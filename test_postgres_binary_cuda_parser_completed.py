@@ -18,6 +18,22 @@ except Exception as e:
     print(f"Failed to initialize CUDA device: {e}")
     raise
 
+def hex_dump(data: bytes, limit=256):
+    """
+    data (bytes or np.uint8 array) の先頭 limit バイトを
+    16進文字列に変換して表示する
+    """
+    # もし data が np.ndarray の場合は bytes に変換
+    if hasattr(data, 'tobytes'):
+        data = data.tobytes()
+    dump_len = min(limit, len(data))
+    hex_str = ' '.join(f"{data[i]:02X}" for i in range(dump_len))
+    print(hex_str)
+    if len(data) > limit:
+        print(f"... (total {len(data)} bytes)")
+
+
+
 @dataclass
 class ColumnInfo:
     """カラム情報を保持するクラス"""
@@ -309,11 +325,11 @@ def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                 valid_start = 0
                 valid_end = valid_length
                 
-                # ヌルバイトを探す
-                for i in range(valid_length):
-                    if str_outputs[dst_pos + i] == 0:
-                        valid_end = i
-                        break
+                # # ヌルバイトを探す
+                # for i in range(valid_length):
+                #     if str_outputs[dst_pos + i] == 0:
+                #         valid_end = i
+                #         break
                 
                 # 前後の空白を除去
                 while valid_start < valid_end and str_outputs[dst_pos + valid_start] <= 32:
@@ -567,30 +583,33 @@ class PgGpuStreamProcessor:
         # バイナリデータを一時的にメモリに保存
         import io
         buffer = io.BytesIO()
-        cur.copy_expert(f"COPY {table_name} TO STDOUT WITH (FORMAT binary)", buffer)
+        cur.copy_expert(f"COPY (SELECT * FROM {table_name} LIMIT 2000)  TO STDOUT WITH (FORMAT binary)", buffer)
         
         # バッファをメモリに固定
         buffer_data = buffer.getvalue()
+
+        print("=== Raw binary data (first 256 bytes) ===")
+        hex_dump(buffer_data, 256)
+        # バイナリファイルに書き込む
+        with open('output_debug.bin', 'wb') as f:
+            f.write(buffer_data)
+
+        print("バイナリファイルに書き込みました。")
+
+
         buffer = io.BytesIO(buffer_data)
-        del buffer_data  # 元のデータを解放
         
         # バッファサイズの確認
         total_size = buffer.getbuffer().nbytes
         print(f"Total binary data size: {total_size} bytes")  # デバッグ出力
         
-        # チャンクサイズの計算（1行あたりの平均サイズ × チャンク行数）
-        avg_row_size = total_size // len(columns)  # 1行あたりの平均サイズ
-        base_chunk_size = avg_row_size * self.config.rows_per_chunk
+        # 全データを一度に処理
+        chunk_array = np.frombuffer(buffer_data, dtype=np.uint8)
+        print(list(chunk_array[:300]))
+        print(f"Processing entire table data")  # デバッグ出力
         
-        # チャンクサイズを調整（メモリ効率を考慮）
-        if base_chunk_size < 512 * 1024:  # 512KB未満
-            chunk_size = 512 * 1024  # 最小512KB
-        elif base_chunk_size > 2 * 1024 * 1024:  # 2MB超
-            chunk_size = 2 * 1024 * 1024  # 最大2MB
-        else:
-            # 2のべき乗に切り上げ
-            chunk_size = 1 << (base_chunk_size - 1).bit_length()
-        print(f"Adjusted chunk size: {chunk_size} bytes")  # デバッグ出力
+        # buffer_dataはここで使い終わったので削除
+        del buffer_data
         
         # バッファの初期化
         int_buffer, num_hi_output, num_lo_output, num_scale_output, \
@@ -605,151 +624,183 @@ class PgGpuStreamProcessor:
         results = {col.name: [] for col in columns}
         
         try:
-            # 実際のチャンク数を計算
-            actual_chunks = (total_size + chunk_size - 1) // chunk_size
-            num_chunks = min(self.config.num_chunks, actual_chunks)
-            print(f"Processing {num_chunks} chunks")  # デバッグ出力
+            # 全データを一度にパース
+            start_time = time.time()
+            field_offsets, field_lengths = parse_binary_chunk(chunk_array, True)
             
-            # バッファをシーク
-            buffer.seek(0)
+            # 行数の計算
+            rows_in_chunk = len(field_offsets) // len(self.columns)
+            print(f"Processing {rows_in_chunk} rows")  # デバッグ出力
             
-            total_rows = 0
-            for chunk_idx in range(num_chunks):
-                chunk_start_time = time.time()
+            # デバイスメモリの確保と転送
+            d_chunk = cuda.to_device(chunk_array)
+            d_offsets = cuda.to_device(field_offsets)
+            d_lengths = cuda.to_device(field_lengths)
+            cuda.synchronize()  # メモリ転送の完了を待つ
+            
+            total_rows = rows_in_chunk
+            print(f"Processing {rows_in_chunk} rows")  # デバッグ出力
+            
+            # スレッド数とブロック数の調整
+            threads_per_block = 256  # 固定スレッド数
+            blocks = min(
+                1024,  # ブロック数の制限を緩和
+                max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)  # 最小128ブロック
+            )
+            print(f"Using {blocks} blocks with {threads_per_block} threads per block")  # デバッグ出力
                 
-                try:
-                    # チャンクデータの読み込みと処理
-                    chunk_data = self._read_and_parse_chunk(buffer, chunk_size)
-                    if not chunk_data:
-                        print(f"No more data after chunk {chunk_idx}")  # デバッグ出力
-                        break
-                except Exception as e:
-                    print(f"Error processing chunk {chunk_idx}: {e}")
-                    continue
-                    
-                d_chunk, d_offsets, d_lengths, rows_in_chunk = chunk_data
-                print(f"Chunk {chunk_idx + 1}: {rows_in_chunk} rows")  # デバッグ出力
-                total_rows += rows_in_chunk
+            # 統合カーネルの起動
+            decode_all_columns_kernel[blocks, threads_per_block](
+                d_chunk, d_offsets, d_lengths,
+                int_buffer, num_hi_output, num_lo_output, num_scale_output,
+                str_buffer, str_null_pos,
+                d_col_types, d_col_lengths,
+                rows_in_chunk, len(columns)
+            )
                 
-                if rows_in_chunk == 0:
-                    continue
-                
-                # スレッド数とブロック数の調整
-                threads_per_block = 256  # 固定スレッド数
-                blocks = min(
-                    1024,  # ブロック数の制限を緩和
-                    max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)  # 最小128ブロック
-                )
-                print(f"Using {blocks} blocks with {threads_per_block} threads per block")  # デバッグ出力
-                
-                # 統合カーネルの起動
-                decode_all_columns_kernel[blocks, threads_per_block](
-                    d_chunk, d_offsets, d_lengths,
-                    int_buffer, num_hi_output, num_lo_output, num_scale_output,
-                    str_buffer, str_null_pos,
-                    d_col_types, d_col_lengths,
-                    rows_in_chunk, len(columns)
-                )
-                
-                # 結果の回収
-                int_col_idx = 0
-                str_col_idx = 0
-                
-                for i, col in enumerate(columns):
-                    col_type = get_column_type(col.type)
-                    if col_type <= 1:  # 数値型（integer or numeric）
-                        if col_type == 0:  # integer
-                            if int_buffer is not None:
-                                host_array = np.empty(rows_in_chunk, dtype=np.int32)
-                                int_buffer[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_array)
-                                results[col.name].append(host_array)
-                                int_col_idx += 1
-                        else:  # numeric
-                            if num_hi_output is not None and num_lo_output is not None:
-                                host_hi = np.empty(rows_in_chunk, dtype=np.int64)
-                                host_lo = np.empty(rows_in_chunk, dtype=np.int64)
-                                host_scale = np.empty(1, dtype=np.int32)
-                                
-                                num_hi_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_hi)
-                                num_lo_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_lo)
-                                num_scale_output[int_col_idx:int_col_idx + 1].copy_to_host(host_scale)
-                                
-                                values = []
-                                for j in range(rows_in_chunk):
-                                    hi = host_hi[j]
-                                    lo = host_lo[j]
-                                    scale = host_scale[0]
-                                    
-                                    if hi == 0 and lo >= 0:
-                                        value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
-                                    elif hi == -1 and lo < 0:
-                                        value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
-                                    else:
-                                        value = f"[{hi},{lo}]@{scale}"
-                                    
-                                    values.append(value)
-                                
-                                results[col.name].append(values)
-                                int_col_idx += 1
-                    else:  # 文字列型
-                        if str_buffer is not None and str_null_pos is not None:
-                            length = get_column_length(col.type, col.length)
+            # 結果の回収
+            int_col_idx = 0
+            str_col_idx = 0
+            
+            for i, col in enumerate(columns):
+                col_type = get_column_type(col.type)
+                if col_type <= 1:  # 数値型（integer or numeric）
+                    if col_type == 0:  # integer
+                        if int_buffer is not None:
+                            host_array = np.empty(rows_in_chunk, dtype=np.int32)
+                            int_buffer[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_array)
+                            results[col.name].append(host_array)
+                            int_col_idx += 1
+                    else:  # numeric
+                        if num_hi_output is not None and num_lo_output is not None:
+                            host_hi = np.empty(rows_in_chunk, dtype=np.int64)
+                            host_lo = np.empty(rows_in_chunk, dtype=np.int64)
+                            host_scale = np.empty(1, dtype=np.int32)
                             
-                            # 文字列データの取得
-                            str_start = str_col_idx * rows_in_chunk * length
-                            str_end = (str_col_idx + 1) * rows_in_chunk * length
-                            host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
-                            str_buffer[str_start:str_end].copy_to_host(host_array)
+                            num_hi_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_hi)
+                            num_lo_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_lo)
+                            num_scale_output[int_col_idx:int_col_idx + 1].copy_to_host(host_scale)
                             
-                            # ヌルバイト位置の取得
-                            null_positions = np.empty(rows_in_chunk, dtype=np.int32)
-                            str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
-                            
-                            # 文字列の変換（ベクトル化）
-                            strings = []
-                            data = host_array.reshape(-1, length)
-                            for row in range(rows_in_chunk):
-                                end_pos = null_positions[row]
-                                if end_pos == 0:  # NULL値
-                                    strings.append('')
+                            values = []
+                            for j in range(rows_in_chunk):
+                                hi = host_hi[j]
+                                lo = host_lo[j]
+                                scale = host_scale[0]
+                                
+                                if hi == 0 and lo >= 0:
+                                    value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
+                                elif hi == -1 and lo < 0:
+                                    value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
                                 else:
-                                    # 文字列データの取り出しとデコード
-                                    if end_pos > 0:
-                                        # 文字列の範囲を取得
-                                        start_pos = (end_pos >> 16) & 0xFFFF
-                                        end_pos = end_pos & 0xFFFF
+                                    value = f"[{hi},{lo}]@{scale}"
+                                
+                                values.append(value)
+                            
+                            results[col.name].append(values)
+                            int_col_idx += 1
+                else:  # 文字列型
+                    if str_buffer is not None and str_null_pos is not None:
+                        length = get_column_length(col.type, col.length)
+
+                        # 文字列データの取得
+                        str_start = str_col_idx * rows_in_chunk * length
+                        str_end   = (str_col_idx + 1) * rows_in_chunk * length
+                        host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
+                        str_buffer[str_start:str_end].copy_to_host(host_array)
+
+                        null_positions = np.empty(rows_in_chunk, dtype=np.int32)
+                        str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
+
+                        data = host_array.reshape(-1, length)
+                        strings = []
+
+                        for row in range(rows_in_chunk):
+                            offset = null_positions[row]
+                            if offset == 0:
+                                # NULL or 長さ0
+                                strings.append('')
+                            else:
+                                start_pos = (offset >> 16) & 0xFFFF
+                                end_pos   = offset & 0xFFFF
+                                
+                                if end_pos > start_pos:
+                                    row_data = data[row, start_pos:end_pos]
+                                    try:
+                                        s = row_data.tobytes().decode('utf-8', errors='replace')
+                                    except:
+                                        s = ''
+                                    strings.append(s)
+                                else:
+                                    # 万一start_pos >= end_posなら空文字
+                                    strings.append('')
+
+                        results[col.name].append(strings)
+                        str_col_idx += 1
+
+                        
+                        # # 文字列データの取得
+                        # str_start = str_col_idx * rows_in_chunk * length
+                        # str_end = (str_col_idx + 1) * rows_in_chunk * length
+                        # host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
+                        # str_buffer[str_start:str_end].copy_to_host(host_array)
+                            
+                        # # ヌルバイト位置の取得
+                        # null_positions = np.empty(rows_in_chunk, dtype=np.int32)
+                        # str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
+                        
+                        # # 文字列の変換（ベクトル化）
+                        # strings = []
+                        # data = host_array.reshape(-1, length)
+                        # for row in range(rows_in_chunk):
+                        #     end_pos = null_positions[row]
+                        #     if end_pos == 0:  # NULL値
+                        #         strings.append('')
+                        #     else:
+                        #         # 文字列データの取り出しとデコード
+                        #         # if end_pos > 0:
+                        #         #     # 文字列の範囲を取得
+                        #         #     start_pos = (end_pos >> 16) & 0xFFFF
+                        #         #     end_pos = end_pos & 0xFFFF
+                                    
+                        #         #     if end_pos > start_pos:
+                        #         #         # 文字列全体を取得
+                        #         #         row_data = data[row, start_pos:end_pos]
+                        #         #         # バイナリデータをクリーンアップ
+                        #         #         valid_data = []
+                        #         #         for b in row_data:
+                        #         #             if b >= 32 and b <= 126:  # 印字可能なASCII文字のみ
+                        #         #                 valid_data.append(b)
+                        #         if end_pos > 0:
+                        #             # end_posはフィールド長そのもの
+                        #             row_data = data[row, :end_pos]
+                        #             try:
+                        #                 s = bytes(row_data).decode('utf-8', errors='replace')
+                        #                 strings.append(s)
+                        #             except:
+                        #                 strings.append('')  # デコードエラーの場合
                                         
-                                        if end_pos > start_pos:
-                                            # 文字列全体を取得
-                                            row_data = data[row, start_pos:end_pos]
-                                            # バイナリデータをクリーンアップ
-                                            valid_data = []
-                                            for b in row_data:
-                                                if b >= 32 and b <= 126:  # 印字可能なASCII文字のみ
-                                                    valid_data.append(b)
-                                            
-                                            if valid_data:
-                                                try:
-                                                    # 文字列をデコード
-                                                    s = bytes(valid_data).decode('utf-8', errors='replace')
-                                                    s = s.strip()  # 前後の空白を除去
-                                                    if s:  # 空文字列でない場合のみ追加
-                                                        strings.append(s)
-                                                        continue
-                                                except:
-                                                    pass  # デコードエラーの場合は空文字列を追加
-                                    strings.append('')  # NULL値または空文字列の場合
-                            results[col.name].append(strings)
-                            str_col_idx += 1
+                        #             # if valid_data:
+                        #             #     try:
+                        #             #         # 文字列をデコード
+                        #             #         s = bytes(valid_data).decode('utf-8', errors='replace')
+                        #             #         s = s.strip()  # 前後の空白を除去
+                        #             #         if s:  # 空文字列でない場合のみ追加
+                        #             #             strings.append(s)
+                        #             #             continue
+                        #             #     except:
+                        #             #         pass  # デコードエラーの場合は空文字列を追加
+                        #         strings.append('')  # NULL値または空文字列の場合
+                        # results[col.name].append(strings)
+                        # str_col_idx += 1
                 
-                # 一時的なGPUメモリの解放
-                cuda.synchronize()  # 処理完了を待つ
-                del d_chunk
-                del d_offsets
-                del d_lengths
-                cuda.synchronize()  # メモリ解放完了を待つ
-                
-                print(f"Chunk {chunk_idx + 1}/{num_chunks} processed in {time.time() - chunk_start_time:.3f}s")
+            # 一時的なGPUメモリの解放
+            cuda.synchronize()  # 処理完了を待つ
+            del d_chunk
+            del d_offsets
+            del d_lengths
+            cuda.synchronize()  # メモリ解放完了を待つ
+            
+            print(f"Processing completed in {time.time() - start_time:.3f}s")
             
             print(f"Total rows processed: {total_rows}")  # デバッグ出力
         
