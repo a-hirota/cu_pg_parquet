@@ -307,10 +307,18 @@ def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                                              row)
             else:  # 文字列型
                 max_length = col_lengths[col]
-                dst_pos = (col * chunk_size + row) * max_length
+                
+                # 文字列カラムのインデックスを計算
+                str_col_idx = 0
+                for i in range(col):
+                    if col_types[i] == 2:  # 文字列型
+                        str_col_idx += 1
+                
+                # 文字列バッファの位置を計算（カラムごとに独立した領域）
+                dst_pos = str_col_idx * chunk_size * max_length + row * max_length
                 
                 if length == -1:  # NULL値
-                    str_null_pos[col * chunk_size + row] = 0
+                    str_null_pos[str_col_idx * chunk_size + row] = 0
                     continue
                     
                 # 文字列データのコピー
@@ -321,29 +329,12 @@ def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                     copy_size = min(64, valid_length - i)
                     bulk_copy_64bytes(raw_data, pos + i, str_outputs, dst_pos + i, copy_size)
                 
-                # 文字列の有効範囲を探す
-                valid_start = 0
-                valid_end = valid_length
+                # 残りのバイトをゼロクリア
+                for i in range(valid_length, max_length):
+                    str_outputs[dst_pos + i] = 0
                 
-                # # ヌルバイトを探す
-                # for i in range(valid_length):
-                #     if str_outputs[dst_pos + i] == 0:
-                #         valid_end = i
-                #         break
-                
-                # 前後の空白を除去
-                while valid_start < valid_end and str_outputs[dst_pos + valid_start] <= 32:
-                    valid_start += 1
-                
-                while valid_end > valid_start and str_outputs[dst_pos + valid_end - 1] <= 32:
-                    valid_end -= 1
-                
-                # 文字列の範囲を設定
-                if valid_end > valid_start:
-                    # 文字列の範囲を保存（上位16ビットにstart、下位16ビットにend）
-                    str_null_pos[col * chunk_size + row] = (valid_start << 16) | valid_end
-                else:
-                    str_null_pos[col * chunk_size + row] = 0
+                # 文字列の有効範囲を設定（カラムごとに独立した位置）
+                str_null_pos[str_col_idx * chunk_size + row] = valid_length
         
         # 次の行へ
         row += stride
@@ -447,6 +438,12 @@ class PgGpuStreamProcessor:
             str_null_pos_size = chunk_size * num_str_cols
             
             print(f"Allocating buffers: int={int_buffer_size}, str={str_buffer_size}, null={str_null_pos_size}")
+            print(f"[DEBUG] String buffer details:")
+            print(f"[DEBUG] - Total size: {str_buffer_size}")
+            print(f"[DEBUG] - Per row size: {max_str_length}")
+            print(f"[DEBUG] - Number of rows: {chunk_size}")
+            print(f"[DEBUG] - Number of string columns: {num_str_cols}")
+            print(f"[DEBUG] - Column lengths: {[col.length for col in columns if get_column_type(col.type) == 2]}")
             
             # バッファの確保と初期化
             int_buffer = None
@@ -589,7 +586,7 @@ class PgGpuStreamProcessor:
         buffer_data = buffer.getvalue()
 
         print("=== Raw binary data (first 256 bytes) ===")
-        hex_dump(buffer_data, 256)
+        # hex_dump(buffer_data, 256)
         # バイナリファイルに書き込む
         with open('output_debug.bin', 'wb') as f:
             f.write(buffer_data)
@@ -605,7 +602,7 @@ class PgGpuStreamProcessor:
         
         # 全データを一度に処理
         chunk_array = np.frombuffer(buffer_data, dtype=np.uint8)
-        print(list(chunk_array[:300]))
+        # print(list(chunk_array[:300]))
         print(f"Processing entire table data")  # デバッグ出力
         
         # buffer_dataはここで使い終わったので削除
@@ -628,9 +625,26 @@ class PgGpuStreamProcessor:
             start_time = time.time()
             field_offsets, field_lengths = parse_binary_chunk(chunk_array, True)
             
+            # カラム情報とバイナリデータの対応を確認
+            print("\n=== Column mapping ===")
+            for i, col in enumerate(self.columns):
+                start_idx = i
+                field_data = []
+                for row in range(min(5, len(field_offsets) // len(self.columns))):
+                    idx = row * len(self.columns) + start_idx
+                    if idx < len(field_offsets):
+                        offset = field_offsets[idx]
+                        length = field_lengths[idx]
+                        if length > 0:
+                            data = chunk_array[offset:offset+length]
+                            field_data.append(f"len={length}, data={bytes(data[:20])}")
+                        else:
+                            field_data.append("NULL")
+                print(f"Column {col.name} ({col.type}): {field_data}")
+            
             # 行数の計算
             rows_in_chunk = len(field_offsets) // len(self.columns)
-            print(f"Processing {rows_in_chunk} rows")  # デバッグ出力
+            print(f"\nProcessing {rows_in_chunk} rows")  # デバッグ出力
             
             # デバイスメモリの確保と転送
             d_chunk = cuda.to_device(chunk_array)
@@ -704,37 +718,54 @@ class PgGpuStreamProcessor:
 
                         # 文字列データの取得
                         str_start = str_col_idx * rows_in_chunk * length
-                        str_end   = (str_col_idx + 1) * rows_in_chunk * length
+                        str_end = str_start + (rows_in_chunk * length)
+                        print(f"\n[DEBUG] String buffer allocation for column {col.name}:")
+                        print(f"[DEBUG] - Start position: {str_start}")
+                        print(f"[DEBUG] - End position: {str_end}")
+                        print(f"[DEBUG] - Length: {length}")
+                        print(f"[DEBUG] - String column index: {str_col_idx}")
+
                         host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
                         str_buffer[str_start:str_end].copy_to_host(host_array)
 
+                        # 文字列長の取得
                         null_positions = np.empty(rows_in_chunk, dtype=np.int32)
                         str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
 
-                        data = host_array.reshape(-1, length)
+                        data = host_array.reshape(rows_in_chunk, length)
                         strings = []
 
                         for row in range(rows_in_chunk):
-                            offset = null_positions[row]
-                            if offset == 0:
-                                # NULL or 長さ0
+                            str_length = null_positions[row]
+                            if str_length == 0:  # NULL値
                                 strings.append('')
+                                if row < 5:  # デバッグ出力
+                                    print(f"[DEBUG] NULL value for column {col.name}, row {row}")
                             else:
-                                start_pos = (offset >> 16) & 0xFFFF
-                                end_pos   = offset & 0xFFFF
-                                
-                                if end_pos > start_pos:
-                                    row_data = data[row, start_pos:end_pos]
-                                    try:
-                                        s = row_data.tobytes().decode('utf-8', errors='replace')
-                                    except:
-                                        s = ''
+                                # 文字列データを直接デコード
+                                row_data = data[row, :str_length]
+                                if row < 5:  # デバッグ出力
+                                    print(f"[DEBUG] String data for column {col.name}, row {row}:")
+                                    print(f"[DEBUG] - Raw data: {bytes(row_data)}")
+                                    print(f"[DEBUG] - Length: {str_length}")
+                                try:
+                                    # バイト列を文字列にデコード（空白は保持）
+                                    s = bytes(row_data).decode('utf-8', errors='replace').rstrip()
                                     strings.append(s)
-                                else:
-                                    # 万一start_pos >= end_posなら空文字
-                                    strings.append('')
+                                    if row < 5:  # デバッグ出力
+                                        print(f"[DEBUG] - Decoded: '{s}'")
+                                except Exception as e:
+                                    strings.append('')  # デコードエラー
+                                    if row < 5:  # デバッグ出力
+                                        print(f"[DEBUG] - Decode error: {e}")
 
+                        # 結果を現在のカラムに格納
                         results[col.name].append(strings)
+                        if i < 5:  # 最初の5カラムのみデバッグ出力
+                            print(f"[DEBUG] Storing result for column {col.name}:")
+                            print(f"[DEBUG] - String column index: {str_col_idx}")
+                            print(f"[DEBUG] - First 5 strings: {strings[:5]}")
+
                         str_col_idx += 1
 
                         
