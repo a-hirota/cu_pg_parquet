@@ -267,9 +267,9 @@ def bulk_copy_64bytes(src, src_pos, dst, dst_pos, size):
 @cuda.jit
 def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                             int_outputs, num_hi_output, num_lo_output, num_scale_output,
-                            str_outputs, str_null_pos,
+                            str_outputs, str_null_pos, str_offsets,
                             col_types, col_lengths, chunk_size, num_cols):
-    """全カラムを一度に処理する統合カーネル"""
+    """全カラムを一度に処理する統合カーネル（累積オフセット方式）"""
     # スレッドインデックスの計算を改善
     thread_id = cuda.threadIdx.x
     block_id = cuda.blockIdx.x
@@ -314,8 +314,9 @@ def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                     if col_types[i] == 2:  # 文字列型
                         str_col_idx += 1
                 
-                # 文字列バッファの位置を計算（カラムごとに独立した領域）
-                dst_pos = str_col_idx * chunk_size * max_length + row * max_length
+                # 文字列バッファの位置を計算（累積オフセット方式）
+                buffer_offset = str_offsets[str_col_idx]
+                dst_pos = buffer_offset + row * max_length
                 
                 if length == -1:  # NULL値
                     str_null_pos[str_col_idx * chunk_size + row] = 0
@@ -409,11 +410,12 @@ class PgGpuStreamProcessor:
         self.header_expected = True
         
     def _initialize_device_buffers(self, columns, chunk_size):
-        """GPUバッファの初期化"""
+        """GPUバッファの初期化（累積オフセット方式）"""
         # カラム情報の収集
         col_types = []  # 0: integer, 1: numeric, 2: string
         col_lengths = []
-        max_str_length = 0
+        str_offsets = []  # 各文字列カラムのバッファ内オフセット
+        total_str_buffer_size = 0  # 文字列バッファの合計サイズ
         num_int_cols = 0
         num_str_cols = 0
         
@@ -425,25 +427,28 @@ class PgGpuStreamProcessor:
                 num_int_cols += 1
                 col_lengths.append(get_column_length(col.type, col.length))
             else:  # 文字列型
-                num_str_cols += 1
                 length = get_column_length(col.type, col.length)
-                max_str_length = max(max_str_length, length)
                 col_lengths.append(length)
+                
+                # このカラムの文字列バッファ開始位置を記録
+                str_offsets.append(total_str_buffer_size)
+                # 累積サイズに加算
+                total_str_buffer_size += chunk_size * length
+                num_str_cols += 1
         
         # バッファの確保
         try:
             # バッファサイズの計算
             int_buffer_size = chunk_size * num_int_cols
-            str_buffer_size = chunk_size * num_str_cols * max_str_length
             str_null_pos_size = chunk_size * num_str_cols
             
-            print(f"Allocating buffers: int={int_buffer_size}, str={str_buffer_size}, null={str_null_pos_size}")
+            print(f"Allocating buffers: int={int_buffer_size}, str={total_str_buffer_size}, null={str_null_pos_size}")
             print(f"[DEBUG] String buffer details:")
-            print(f"[DEBUG] - Total size: {str_buffer_size}")
-            print(f"[DEBUG] - Per row size: {max_str_length}")
+            print(f"[DEBUG] - Total size: {total_str_buffer_size}")
             print(f"[DEBUG] - Number of rows: {chunk_size}")
             print(f"[DEBUG] - Number of string columns: {num_str_cols}")
-            print(f"[DEBUG] - Column lengths: {[col.length for col in columns if get_column_type(col.type) == 2]}")
+            print(f"[DEBUG] - Column lengths: {[get_column_length(col.type, col.length) for col in columns if get_column_type(col.type) == 2]}")
+            print(f"[DEBUG] - String column offsets: {str_offsets}")
             
             # バッファの確保と初期化
             int_buffer = None
@@ -452,6 +457,7 @@ class PgGpuStreamProcessor:
             num_scale_output = None
             str_buffer = None
             str_null_pos = None
+            d_str_offsets = None
             
             # メモリ割り当ての順序を調整
             if num_int_cols > 0:
@@ -466,14 +472,18 @@ class PgGpuStreamProcessor:
                 
             if num_str_cols > 0:
                 # 文字列バッファを一括で確保
-                str_buffer = cuda.to_device(np.zeros(str_buffer_size, dtype=np.uint8))
+                str_buffer = cuda.to_device(np.zeros(total_str_buffer_size, dtype=np.uint8))
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
                 
                 str_null_pos = cuda.to_device(np.zeros(str_null_pos_size, dtype=np.int32))
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
+                
+                # 文字列オフセット情報をGPUへ転送
+                d_str_offsets = cuda.to_device(np.array(str_offsets, dtype=np.int32))
+                cuda.synchronize()  # メモリ割り当ての完了を待つ
             
             return int_buffer, num_hi_output, num_lo_output, num_scale_output, \
-                   str_buffer, str_null_pos, \
+                   str_buffer, str_null_pos, d_str_offsets, \
                    np.array(col_types, dtype=np.int32), np.array(col_lengths, dtype=np.int32)
         except CudaAPIError as e:
             print(f"Failed to allocate GPU memory: {e}")
@@ -490,6 +500,8 @@ class PgGpuStreamProcessor:
                 del str_buffer
             if str_null_pos is not None:
                 del str_null_pos
+            if d_str_offsets is not None:
+                del d_str_offsets
             cuda.synchronize()
             raise
 
@@ -608,9 +620,9 @@ class PgGpuStreamProcessor:
         # buffer_dataはここで使い終わったので削除
         del buffer_data
         
-        # バッファの初期化
+        # バッファの初期化（d_str_offsetsを追加）
         int_buffer, num_hi_output, num_lo_output, num_scale_output, \
-        str_buffer, str_null_pos, col_types, col_lengths = \
+        str_buffer, str_null_pos, d_str_offsets, col_types, col_lengths = \
             self._initialize_device_buffers(columns, self.config.rows_per_chunk)
         
         # デバイスに転送
@@ -663,11 +675,11 @@ class PgGpuStreamProcessor:
             )
             print(f"Using {blocks} blocks with {threads_per_block} threads per block")  # デバッグ出力
                 
-            # 統合カーネルの起動
+            # 統合カーネルの起動（d_str_offsetsを追加）
             decode_all_columns_kernel[blocks, threads_per_block](
                 d_chunk, d_offsets, d_lengths,
                 int_buffer, num_hi_output, num_lo_output, num_scale_output,
-                str_buffer, str_null_pos,
+                str_buffer, str_null_pos, d_str_offsets,
                 d_col_types, d_col_lengths,
                 rows_in_chunk, len(columns)
             )
@@ -716,8 +728,12 @@ class PgGpuStreamProcessor:
                     if str_buffer is not None and str_null_pos is not None:
                         length = get_column_length(col.type, col.length)
 
-                        # 文字列データの取得
-                        str_start = str_col_idx * rows_in_chunk * length
+                        # 文字列データの取得（累積オフセットを使用）
+                        # ホスト側でオフセット値を取得
+                        host_offsets = np.empty(len(d_str_offsets), dtype=np.int32)
+                        d_str_offsets.copy_to_host(host_offsets)
+                        
+                        str_start = host_offsets[str_col_idx]
                         str_end = str_start + (rows_in_chunk * length)
                         print(f"\n[DEBUG] String buffer allocation for column {col.name}:")
                         print(f"[DEBUG] - Start position: {str_start}")
@@ -841,6 +857,8 @@ class PgGpuStreamProcessor:
             
             del d_col_types
             del d_col_lengths
+            if d_str_offsets is not None:
+                del d_str_offsets
             if int_buffer is not None:
                 del int_buffer
             if str_buffer is not None:
