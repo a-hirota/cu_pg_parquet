@@ -245,133 +245,188 @@ class GPUDecoder:
         """
         num_cols = len(columns)
         
-        # デバイスに転送（通常はmemory_managerで行うが、ここではシンプルに直接処理）
-        d_chunk = cuda.to_device(chunk_array)
-        d_offsets = cuda.to_device(field_offsets)
-        d_lengths = cuda.to_device(field_lengths)
-        cuda.synchronize()  # メモリ転送の完了を待つ
+        # 転送前にすべての変数を初期化（解放処理のため）
+        d_chunk = None
+        d_offsets = None
+        d_lengths = None
+        d_col_types = None
+        d_col_lengths = None
         
-        # バッファの取得
-        int_buffer = buffers["int_buffer"]
-        num_hi_output = buffers["num_hi_output"]
-        num_lo_output = buffers["num_lo_output"]
-        num_scale_output = buffers["num_scale_output"]
-        str_buffer = buffers["str_buffer"]
-        str_null_pos = buffers["str_null_pos"]
-        d_str_offsets = buffers["d_str_offsets"]
-        col_types = buffers["col_types"]
-        col_lengths = buffers["col_lengths"]
-        
-        # デバイスに転送
-        d_col_types = cuda.to_device(col_types)
-        d_col_lengths = cuda.to_device(col_lengths)
-        
-        # スレッド数とブロック数の調整
-        threads_per_block = 256  # 固定スレッド数
-        blocks = min(
-            1024,  # ブロック数の制限を緩和
-            max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)  # 最小128ブロック
-        )
-        print(f"Using {blocks} blocks with {threads_per_block} threads per block")
+        try:
+            # メモリ転送前のGPUメモリ状態を確認
+            try:
+                mem_info = cuda.current_context().get_memory_info()
+                print(f"メモリ使用量 (転送前): {mem_info[0]} / {mem_info[1]} バイト")
+            except Exception as e:
+                print(f"メモリ情報取得エラー: {e}")
             
-        # 統合カーネルの起動
-        decode_all_columns_kernel[blocks, threads_per_block](
-            d_chunk, d_offsets, d_lengths,
-            int_buffer, num_hi_output, num_lo_output, num_scale_output,
-            str_buffer, str_null_pos, d_str_offsets,
-            d_col_types, d_col_lengths,
-            rows_in_chunk, num_cols
-        )
-        
-        # 結果を取得するための一時辞書
-        results = {}
-        
-        # 結果の回収
-        int_col_idx = 0
-        str_col_idx = 0
-        
-        for i, col in enumerate(columns):
-            col_type = col_types[i]
-            if col_type <= 1:  # 数値型（integer or numeric）
-                if col_type == 0:  # integer
-                    if int_buffer is not None:
-                        host_array = np.empty(rows_in_chunk, dtype=np.int32)
-                        int_buffer[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_array)
-                        results[col.name] = host_array
-                        int_col_idx += 1
-                else:  # numeric
-                    if num_hi_output is not None and num_lo_output is not None:
-                        host_hi = np.empty(rows_in_chunk, dtype=np.int64)
-                        host_lo = np.empty(rows_in_chunk, dtype=np.int64)
-                        host_scale = np.empty(1, dtype=np.int32)
-                        
-                        num_hi_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_hi)
-                        num_lo_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_lo)
-                        num_scale_output[int_col_idx:int_col_idx + 1].copy_to_host(host_scale)
-                        
-                        values = []
-                        for j in range(rows_in_chunk):
-                            hi = host_hi[j]
-                            lo = host_lo[j]
-                            scale = host_scale[0]
+            # デバイスに転送（通常はmemory_managerで行うが、ここではシンプルに直接処理）
+            d_chunk = cuda.to_device(chunk_array)
+            d_offsets = cuda.to_device(field_offsets)
+            d_lengths = cuda.to_device(field_lengths)
+            cuda.synchronize()  # メモリ転送の完了を待つ
+            
+            # メモリ転送後のGPUメモリ状態を確認
+            try:
+                mem_info = cuda.current_context().get_memory_info()
+                print(f"メモリ使用量 (転送後): {mem_info[0]} / {mem_info[1]} バイト")
+            except Exception as e:
+                print(f"メモリ情報取得エラー: {e}")
+            
+            # バッファの取得
+            int_buffer = buffers["int_buffer"]
+            num_hi_output = buffers["num_hi_output"]
+            num_lo_output = buffers["num_lo_output"]
+            num_scale_output = buffers["num_scale_output"]
+            str_buffer = buffers["str_buffer"]
+            str_null_pos = buffers["str_null_pos"]
+            d_str_offsets = buffers["d_str_offsets"]
+            col_types = buffers["col_types"]
+            col_lengths = buffers["col_lengths"]
+            
+            # デバイスに転送
+            d_col_types = cuda.to_device(col_types)
+            d_col_lengths = cuda.to_device(col_lengths)
+            
+            # スレッド数とブロック数の調整
+            threads_per_block = 256  # 固定スレッド数
+            blocks = min(
+                1024,  # ブロック数の制限を緩和
+                max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)  # 最小128ブロック
+            )
+            print(f"Using {blocks} blocks with {threads_per_block} threads per block")
+                
+            # 統合カーネルの起動
+            decode_all_columns_kernel[blocks, threads_per_block](
+                d_chunk, d_offsets, d_lengths,
+                int_buffer, num_hi_output, num_lo_output, num_scale_output,
+                str_buffer, str_null_pos, d_str_offsets,
+                d_col_types, d_col_lengths,
+                rows_in_chunk, num_cols
+            )
+            
+            # 結果を取得するための一時辞書
+            results = {}
+            
+            # 結果の回収
+            int_col_idx = 0
+            str_col_idx = 0
+            
+            for i, col in enumerate(columns):
+                col_type = col_types[i]
+                if col_type <= 1:  # 数値型（integer or numeric）
+                    if col_type == 0:  # integer
+                        if int_buffer is not None:
+                            host_array = np.empty(rows_in_chunk, dtype=np.int32)
+                            int_buffer[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_array)
+                            results[col.name] = host_array
+                            int_col_idx += 1
+                    else:  # numeric
+                        if num_hi_output is not None and num_lo_output is not None:
+                            host_hi = np.empty(rows_in_chunk, dtype=np.int64)
+                            host_lo = np.empty(rows_in_chunk, dtype=np.int64)
+                            host_scale = np.empty(1, dtype=np.int32)
                             
-                            if hi == 0 and lo >= 0:
-                                value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
-                            elif hi == -1 and lo < 0:
-                                value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
+                            num_hi_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_hi)
+                            num_lo_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_lo)
+                            num_scale_output[int_col_idx:int_col_idx + 1].copy_to_host(host_scale)
+                            
+                            values = []
+                            for j in range(rows_in_chunk):
+                                hi = host_hi[j]
+                                lo = host_lo[j]
+                                scale = host_scale[0]
+                                
+                                if hi == 0 and lo >= 0:
+                                    value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
+                                elif hi == -1 and lo < 0:
+                                    value = float(lo) / (10 ** scale) if scale > 0 else float(lo)
+                                else:
+                                    value = f"[{hi},{lo}]@{scale}"
+                                
+                                values.append(value)
+                            
+                            results[col.name] = values
+                            int_col_idx += 1
+                else:  # 文字列型
+                    if str_buffer is not None and str_null_pos is not None:
+                        length = col_lengths[i]
+                        
+                        # ホスト側でオフセット値を取得
+                        host_offsets = np.empty(len(d_str_offsets), dtype=np.int32)
+                        d_str_offsets.copy_to_host(host_offsets)
+                        
+                        str_start = host_offsets[str_col_idx]
+                        str_end = str_start + (rows_in_chunk * length)
+                        
+                        host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
+                        str_buffer[str_start:str_end].copy_to_host(host_array)
+                        
+                        # 文字列長の取得
+                        null_positions = np.empty(rows_in_chunk, dtype=np.int32)
+                        str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
+                        
+                        data = host_array.reshape(rows_in_chunk, length)
+                        strings = []
+                        
+                        for row in range(rows_in_chunk):
+                            str_length = null_positions[row]
+                            if str_length == 0:  # NULL値
+                                strings.append('')
                             else:
-                                value = f"[{hi},{lo}]@{scale}"
-                            
-                            values.append(value)
+                                # 文字列データを直接デコード
+                                row_data = data[row, :str_length]
+                                try:
+                                    # バイト列を文字列にデコード（空白は保持）
+                                    s = bytes(row_data).decode('utf-8', errors='replace').rstrip()
+                                    strings.append(s)
+                                except Exception as e:
+                                    strings.append('')  # デコードエラー
                         
-                        results[col.name] = values
-                        int_col_idx += 1
-            else:  # 文字列型
-                if str_buffer is not None and str_null_pos is not None:
-                    length = col_lengths[i]
-                    
-                    # ホスト側でオフセット値を取得
-                    host_offsets = np.empty(len(d_str_offsets), dtype=np.int32)
-                    d_str_offsets.copy_to_host(host_offsets)
-                    
-                    str_start = host_offsets[str_col_idx]
-                    str_end = str_start + (rows_in_chunk * length)
-                    
-                    host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
-                    str_buffer[str_start:str_end].copy_to_host(host_array)
-                    
-                    # 文字列長の取得
-                    null_positions = np.empty(rows_in_chunk, dtype=np.int32)
-                    str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
-                    
-                    data = host_array.reshape(rows_in_chunk, length)
-                    strings = []
-                    
-                    for row in range(rows_in_chunk):
-                        str_length = null_positions[row]
-                        if str_length == 0:  # NULL値
-                            strings.append('')
-                        else:
-                            # 文字列データを直接デコード
-                            row_data = data[row, :str_length]
-                            try:
-                                # バイト列を文字列にデコード（空白は保持）
-                                s = bytes(row_data).decode('utf-8', errors='replace').rstrip()
-                                strings.append(s)
-                            except Exception as e:
-                                strings.append('')  # デコードエラー
-                    
-                    # 結果を格納
-                    results[col.name] = strings
-                    str_col_idx += 1
+                        # 結果を格納
+                        results[col.name] = strings
+                        str_col_idx += 1
+            
+            return results
+            
+        except Exception as e:
+            print(f"GPUデコード処理中にエラー発生: {e}")
+            # エラー時もリソース解放を確実に行う
+            try:
+                if d_chunk is not None:
+                    del d_chunk
+                if d_offsets is not None:
+                    del d_offsets
+                if d_lengths is not None:
+                    del d_lengths
+                if d_col_types is not None:
+                    del d_col_types
+                if d_col_lengths is not None:
+                    del d_col_lengths
+                cuda.synchronize()
+            except Exception as cleanup_error:
+                print(f"クリーンアップ中にエラー: {cleanup_error}")
+            raise
         
-        # 一時的なGPUメモリの解放
-        cuda.synchronize()  # 処理完了を待つ
-        del d_chunk
-        del d_offsets
-        del d_lengths
-        del d_col_types
-        del d_col_lengths
-        cuda.synchronize()  # メモリ解放完了を待つ
-        
-        return results
+        finally:
+            # 一時的なGPUメモリの解放
+            cuda.synchronize()  # 処理完了を待つ
+            
+            # すべてのGPUリソースを確実に解放
+            to_delete = [d_chunk, d_offsets, d_lengths, d_col_types, d_col_lengths]
+            for resource in to_delete:
+                if resource is not None:
+                    try:
+                        del resource
+                    except Exception as e:
+                        print(f"リソース解放中にエラー: {e}")
+            
+            # 明示的に同期を取り、GPUメモリ解放を確実に
+            cuda.synchronize()
+            
+            # GPUメモリの状態を確認
+            try:
+                mem_info = cuda.current_context().get_memory_info()
+                print(f"メモリ使用量 (解放後): {mem_info[0]} / {mem_info[1]} バイト")
+            except Exception as e:
+                print(f"メモリ情報取得エラー: {e}")

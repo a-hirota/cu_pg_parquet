@@ -76,13 +76,15 @@ class BinaryDataParser:
         self.header_expected = True
         self._remaining_data = None
     
-    def parse_chunk(self, chunk_data: bytes, max_chunk_size: int = 1024*1024, num_columns: int = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    def parse_chunk(self, chunk_data: bytes, max_chunk_size: int = 1024*1024, num_columns: int = None, start_row: int = 0, max_rows: int = 65535) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """チャンク単位でのパース処理
         
         Args:
             chunk_data: バイナリデータ
             max_chunk_size: 最大チャンクサイズ
             num_columns: カラム数（Noneの場合は動的に検出）
+            start_row: 処理開始行インデックス（複数チャンク対応）
+            max_rows: 処理する最大行数（デフォルト: 65535）
             
         Returns:
             (chunk_array, field_offsets, field_lengths, rows_count)
@@ -94,10 +96,96 @@ class BinaryDataParser:
         else:
             chunk_array = np.frombuffer(chunk_data, dtype=np.uint8)
         
+        # ヘッダーフラグは最初のチャンク（start_row=0）のみTrueに設定
+        self.header_expected = (start_row == 0)
+        
         # 最大試行回数を設定
         max_attempts = 3
         attempts = 0
         
+        # 特定の行から開始する場合のスキップ処理
+        if start_row > 0 and num_columns is not None:
+            print(f"開始行 {start_row} からのパース開始")
+            
+            # 単純なスキップ方式に変更 - 指定行数のレコードを読み飛ばす
+            self.header_expected = (start_row == 0)  # 初回チャンクのみヘッダーあり
+            
+            # ヘッダースキップ処理（ファイル先頭の場合のみ）
+            current_pos = 0
+            if start_row == 0 and len(chunk_array) >= 11:
+                # ヘッダーが "PGCOPY\n\377\r\n\0" (バイナリフォーマット識別子) で始まるか確認
+                if chunk_array[0] == 80 and chunk_array[1] == 71:  # 'P', 'G'
+                    current_pos = 11  # ヘッダー部分をスキップ
+                    
+                    # フラグフィールドとヘッダー拡張をスキップ
+                    if current_pos + 8 <= len(chunk_array):
+                        current_pos += 8  # フラグ(4バイト) + 拡張長(4バイト)
+            
+            # 指定行数をスキップ
+            skipped_rows = 0
+            field_count = 0
+            
+            # 指定された開始行まで読み飛ばす
+            while skipped_rows < start_row and current_pos + 2 <= len(chunk_array):
+                # 行の最初にあるフィールド数（2バイト）を読み取り
+                num_fields = ((chunk_array[current_pos] << 8) | chunk_array[current_pos + 1])
+                
+                if num_fields == 0xFFFF:  # ファイル終端マーカー
+                    print(f"ファイル終端に到達しました（行 {skipped_rows}）")
+                    return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+                
+                current_pos += 2  # フィールド数フィールドをスキップ
+                
+                # 各フィールドをスキップ
+                for field_idx in range(num_fields):
+                    if current_pos + 4 > len(chunk_array):
+                        print(f"データ境界を超えました（行 {skipped_rows}, フィールド {field_idx}, 位置 {current_pos}/{len(chunk_array)}）")
+                        return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+                    
+                    # フィールド長を読み取り
+                    # ネットワークバイトオーダー（ビッグエンディアン）で解釈
+                    field_len = ((int(chunk_array[current_pos]) & 0xFF) << 24) | \
+                               ((int(chunk_array[current_pos+1]) & 0xFF) << 16) | \
+                               ((int(chunk_array[current_pos+2]) & 0xFF) << 8) | \
+                                (int(chunk_array[current_pos+3]) & 0xFF)
+                    
+                    # 符号付き32ビット整数に変換（最上位ビットが1なら負の数）
+                    if field_len & 0x80000000:
+                        field_len = -((~field_len + 1) & 0xFFFFFFFF)
+                    
+                    current_pos += 4  # フィールド長フィールドをスキップ
+                    
+                    if field_len == -1:  # NULLフィールド
+                        # NULLはフィールド長 -1 で示され、データはない
+                        continue
+                    elif field_len < 0:
+                        print(f"無効なフィールド長: {field_len} (行 {skipped_rows}, フィールド {field_idx})")
+                        return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+                    
+                    # バッファ境界チェック
+                    if current_pos + field_len > len(chunk_array):
+                        print(f"フィールドデータがバッファ境界を超えています（行 {skipped_rows}, フィールド {field_idx}, 長さ {field_len}, 現在位置 {current_pos}/{len(chunk_array)}）")
+                        return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+                    
+                    # フィールドデータをスキップ
+                    current_pos += field_len
+                
+                # 1行スキップ完了
+                skipped_rows += 1
+            
+            if skipped_rows < start_row:
+                print(f"指定された開始行 {start_row} まで到達できませんでした（スキップした行数: {skipped_rows}）")
+                return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+            
+            # 開始位置以降のデータで新しい配列を作成
+            start_offset = current_pos
+            remaining_data = chunk_array[start_offset:]
+            print(f"スキップ後のデータ: {len(remaining_data)} バイト (開始位置: {start_offset}, スキップ行数: {skipped_rows})")
+            
+            # 残りのデータで処理を継続
+            chunk_array = remaining_data
+            self.header_expected = False  # ヘッダーは既に処理済み
+            
         while attempts < max_attempts:
             field_offsets, field_lengths = parse_binary_chunk(chunk_array, self.header_expected)
             self.header_expected = False  # 2回目以降はヘッダーを期待しない
@@ -130,7 +218,17 @@ class BinaryDataParser:
         
         if num_columns <= 0:
             num_columns = 1  # 最低でも1列あると仮定
-            
-        rows_in_chunk = len(field_offsets) // num_columns
+        
+        # 最大行数の制限を適用
+        total_fields = len(field_offsets)
+        rows_in_chunk = total_fields // num_columns
+        
+        if rows_in_chunk > max_rows:
+            print(f"警告: 行数を {max_rows} に制限します (実際の行数: {rows_in_chunk})")
+            # フィールド数と行数を制限
+            max_fields = max_rows * num_columns
+            field_offsets = field_offsets[:max_fields]
+            field_lengths = field_lengths[:max_fields]
+            rows_in_chunk = max_rows
         
         return chunk_array, field_offsets, field_lengths, rows_in_chunk

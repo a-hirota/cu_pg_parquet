@@ -19,9 +19,76 @@ class GPUMemoryManager:
         try:
             cuda.select_device(0)
             print("CUDA device initialized")
+            # GPUメモリ情報の表示
+            self.print_gpu_memory_info()
         except Exception as e:
             print(f"Failed to initialize CUDA device: {e}")
             raise
+            
+    def print_gpu_memory_info(self):
+        """GPUメモリ使用状況の表示"""
+        try:
+            mem_info = cuda.current_context().get_memory_info()
+            free_memory = mem_info[0]
+            total_memory = mem_info[1]
+            used_memory = total_memory - free_memory
+            percent_used = (used_memory / total_memory) * 100
+            
+            print(f"GPU Memory: {free_memory / (1024**2):.2f} MB free / {total_memory / (1024**2):.2f} MB total ({percent_used:.1f}% used)")
+        except Exception as e:
+            print(f"Unable to get GPU memory info: {e}")
+    
+    def get_available_gpu_memory(self):
+        """利用可能なGPUメモリ量を取得（バイト単位）"""
+        try:
+            mem_info = cuda.current_context().get_memory_info()
+            free_memory = mem_info[0]
+            return free_memory
+        except Exception as e:
+            print(f"Unable to get GPU memory info: {e}")
+            # フォールバック - 仮の値を返す
+            return 1 * 1024**3  # 1GBをデフォルト値として返す
+            
+    def calculate_optimal_chunk_size(self, columns, total_rows):
+        """GPUメモリ量に基づいて最適なチャンクサイズを計算
+        
+        Args:
+            columns: カラム情報のリスト
+            total_rows: 処理する総行数
+            
+        Returns:
+            最適な行数
+        """
+        # 使用可能なGPUメモリを取得
+        free_memory = self.get_available_gpu_memory()
+        # 安全マージン（80%のみ使用）
+        usable_memory = free_memory * 0.8
+        
+        # 1行あたりのメモリ使用量を計算（各カラムタイプ別）
+        mem_per_row = 0
+        for col in columns:
+            from .utils import get_column_type, get_column_length
+            if get_column_type(col.type) <= 1:  # 数値型
+                mem_per_row += 8  # 8バイト（int64/float64）
+            else:  # 文字列型
+                mem_per_row += get_column_length(col.type, col.length)
+        
+        # オーバーヘッドを考慮して20%追加
+        mem_per_row *= 1.2
+        
+        # 最大処理可能行数を計算
+        max_rows = int(usable_memory / mem_per_row)
+        
+        # 最小行数と最大行数の設定
+        min_rows = 1000  # 最低でも1000行は処理
+        max_hard_limit = 65535  # ハードウェア制限（65535行）
+        
+        # 範囲内に収める
+        max_rows = max(min_rows, min(max_rows, max_hard_limit, total_rows))
+        
+        print(f"メモリ計算: 利用可能={free_memory/1024**2:.2f}MB, 1行あたり={mem_per_row:.2f}B, 最適行数={max_rows}")
+        
+        return max_rows
     
     def initialize_device_buffers(self, columns: List[ColumnInfo], chunk_size: int):
         """GPUバッファの初期化（累積オフセット方式）
@@ -136,6 +203,12 @@ class GPUMemoryManager:
         Args:
             buffers_dict: バッファオブジェクトを含む辞書
         """
+        # クリーンアップ前のメモリ状態を記録
+        try:
+            before_free_memory = self.get_available_gpu_memory()
+        except:
+            before_free_memory = None
+            
         # クリーンアップ対象のリスト
         cleanup_targets = [
             "int_buffer", "num_hi_output", "num_lo_output", "num_scale_output",
@@ -143,12 +216,35 @@ class GPUMemoryManager:
             "d_col_types", "d_col_lengths"
         ]
         
+        # 削除したオブジェクト数をカウント
+        deleted_count = 0
+        
         for target in cleanup_targets:
             if target in buffers_dict and buffers_dict[target] is not None:
                 try:
                     del buffers_dict[target]
-                except:
-                    pass
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"Error deleting {target}: {e}")
         
         # 強制的に同期して解放を確実に
         cuda.synchronize()
+        
+        # ガベージコレクションを明示的に実行
+        try:
+            import gc
+            gc.collect()
+        except Exception as e:
+            print(f"Error during garbage collection: {e}")
+            
+        # クリーンアップ後のメモリ状態を確認
+        if before_free_memory is not None:
+            try:
+                after_free_memory = self.get_available_gpu_memory()
+                freed_memory = after_free_memory - before_free_memory
+                
+                # メモリ解放が確認できた場合にのみ表示
+                if freed_memory > 0:
+                    print(f"クリーンアップにより {freed_memory / (1024**2):.2f} MB のGPUメモリを解放しました ({deleted_count} オブジェクト)")
+            except:
+                pass
