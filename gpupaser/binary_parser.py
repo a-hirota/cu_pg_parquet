@@ -89,12 +89,8 @@ class BinaryDataParser:
         Returns:
             (chunk_array, field_offsets, field_lengths, rows_count)
         """
-        # 前のチャンクの残りデータを使用
-        if self._remaining_data is not None:
-            chunk_array = self._remaining_data
-            self._remaining_data = None
-        else:
-            chunk_array = np.frombuffer(chunk_data, dtype=np.uint8)
+        # 常に完全なバイナリデータを使用
+        chunk_array = np.frombuffer(chunk_data, dtype=np.uint8)
         
         # ヘッダーフラグは最初のチャンク（start_row=0）のみTrueに設定
         self.header_expected = (start_row == 0)
@@ -103,29 +99,37 @@ class BinaryDataParser:
         max_attempts = 3
         attempts = 0
         
-        # 特定の行から開始する場合のスキップ処理
-        if start_row > 0 and num_columns is not None:
+        # ヘッダースキップ処理（最初のチャンクの場合のみ）
+        current_pos = 0
+        header_len = 0
+        
+        if start_row == 0 and len(chunk_array) >= 11:
+            # ヘッダーが "PGCOPY\n\377\r\n\0" (バイナリフォーマット識別子) で始まるか確認
+            if chunk_array[0] == 80 and chunk_array[1] == 71:  # 'P', 'G'
+                header_len = 11  # ヘッダー部分の長さ
+                
+                # フラグフィールドとヘッダー拡張をスキップ
+                if len(chunk_array) >= header_len + 8:
+                    header_len += 8  # フラグ(4バイト) + 拡張長(4バイト)
+                    
+                    # ヘッダーサイズ（ヘッダー拡張）を読み取り、拡張データをスキップ
+                    ext_len = ((int(chunk_array[header_len-4]) & 0xFF) << 24) | \
+                              ((int(chunk_array[header_len-3]) & 0xFF) << 16) | \
+                              ((int(chunk_array[header_len-2]) & 0xFF) << 8) | \
+                              (int(chunk_array[header_len-1]) & 0xFF)
+                    
+                    if ext_len > 0 and len(chunk_array) >= header_len + ext_len:
+                        header_len += ext_len
+        
+        # データポジション計算（ヘッダー + スキップ行分）
+        if start_row > 0:
             print(f"開始行 {start_row} からのパース開始")
             
-            # 単純なスキップ方式に変更 - 指定行数のレコードを読み飛ばす
-            self.header_expected = (start_row == 0)  # 初回チャンクのみヘッダーあり
-            
-            # ヘッダースキップ処理（ファイル先頭の場合のみ）
-            current_pos = 0
-            if start_row == 0 and len(chunk_array) >= 11:
-                # ヘッダーが "PGCOPY\n\377\r\n\0" (バイナリフォーマット識別子) で始まるか確認
-                if chunk_array[0] == 80 and chunk_array[1] == 71:  # 'P', 'G'
-                    current_pos = 11  # ヘッダー部分をスキップ
-                    
-                    # フラグフィールドとヘッダー拡張をスキップ
-                    if current_pos + 8 <= len(chunk_array):
-                        current_pos += 8  # フラグ(4バイト) + 拡張長(4バイト)
-            
-            # 指定行数をスキップ
+            # 現在位置をヘッダーの後ろに設定
+            current_pos = header_len
             skipped_rows = 0
-            field_count = 0
             
-            # 指定された開始行まで読み飛ばす
+            # 指定行数をスキップ（行単位で移動）
             while skipped_rows < start_row and current_pos + 2 <= len(chunk_array):
                 # 行の最初にあるフィールド数（2バイト）を読み取り
                 num_fields = ((chunk_array[current_pos] << 8) | chunk_array[current_pos + 1])
@@ -142,21 +146,19 @@ class BinaryDataParser:
                         print(f"データ境界を超えました（行 {skipped_rows}, フィールド {field_idx}, 位置 {current_pos}/{len(chunk_array)}）")
                         return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
                     
-                    # フィールド長を読み取り
-                    # ネットワークバイトオーダー（ビッグエンディアン）で解釈
+                    # フィールド長を読み取り（ビッグエンディアン）
                     field_len = ((int(chunk_array[current_pos]) & 0xFF) << 24) | \
                                ((int(chunk_array[current_pos+1]) & 0xFF) << 16) | \
                                ((int(chunk_array[current_pos+2]) & 0xFF) << 8) | \
-                                (int(chunk_array[current_pos+3]) & 0xFF)
+                               (int(chunk_array[current_pos+3]) & 0xFF)
                     
-                    # 符号付き32ビット整数に変換（最上位ビットが1なら負の数）
+                    # 符号付き32ビット整数に変換
                     if field_len & 0x80000000:
                         field_len = -((~field_len + 1) & 0xFFFFFFFF)
                     
                     current_pos += 4  # フィールド長フィールドをスキップ
                     
                     if field_len == -1:  # NULLフィールド
-                        # NULLはフィールド長 -1 で示され、データはない
                         continue
                     elif field_len < 0:
                         print(f"無効なフィールド長: {field_len} (行 {skipped_rows}, フィールド {field_idx})")
@@ -164,7 +166,7 @@ class BinaryDataParser:
                     
                     # バッファ境界チェック
                     if current_pos + field_len > len(chunk_array):
-                        print(f"フィールドデータがバッファ境界を超えています（行 {skipped_rows}, フィールド {field_idx}, 長さ {field_len}, 現在位置 {current_pos}/{len(chunk_array)}）")
+                        print(f"フィールドデータがバッファ境界を超えています（行 {skipped_rows}, フィールド {field_idx}, 長さ {field_len}, 位置 {current_pos}/{len(chunk_array)}）")
                         return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
                     
                     # フィールドデータをスキップ
@@ -176,15 +178,15 @@ class BinaryDataParser:
             if skipped_rows < start_row:
                 print(f"指定された開始行 {start_row} まで到達できませんでした（スキップした行数: {skipped_rows}）")
                 return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+        
+        # 現在位置以降のデータを処理する
+        if current_pos > 0:
+            # 現在位置以降のデータで新しい配列を作成
+            chunk_array = chunk_array[current_pos:]
+            print(f"パース開始位置: {current_pos}, 残りデータ: {len(chunk_array)} バイト")
             
-            # 開始位置以降のデータで新しい配列を作成
-            start_offset = current_pos
-            remaining_data = chunk_array[start_offset:]
-            print(f"スキップ後のデータ: {len(remaining_data)} バイト (開始位置: {start_offset}, スキップ行数: {skipped_rows})")
-            
-            # 残りのデータで処理を継続
-            chunk_array = remaining_data
-            self.header_expected = False  # ヘッダーは既に処理済み
+        # ヘッダーは既に処理済みなので、残りのデータを処理
+        self.header_expected = False
             
         while attempts < max_attempts:
             field_offsets, field_lengths = parse_binary_chunk(chunk_array, self.header_expected)

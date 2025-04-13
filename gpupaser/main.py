@@ -16,13 +16,14 @@ from .utils import ChunkConfig, ColumnInfo
 class PgGpuProcessor:
     """PostgreSQLデータGPU処理の統合クラス"""
     
-    def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost'):
+    def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost', parquet_output=None):
         """初期化"""
         self.conn = connect_to_postgres(dbname, user, password, host)
         self.memory_manager = GPUMemoryManager()
         self.parser = BinaryDataParser()
         self.gpu_decoder = GPUDecoder()
-        self.output_handler = OutputHandler()
+        self.output_handler = OutputHandler(parquet_output)
+        self.parquet_output = parquet_output
     
     def process_table(self, table_name: str, limit: Optional[int] = None):
         """テーブル全体を処理（複数チャンク対応）"""
@@ -67,7 +68,7 @@ class PgGpuProcessor:
             
             try:
                 # バイナリデータの解析（特定行からスタート）
-                # 解析の際、チャンクサイズに制限を設ける
+                # 解析の際、常に全データを使用し、チャンクサイズに制限を設ける
                 chunk_array, field_offsets, field_lengths, rows_in_chunk = self.parser.parse_chunk(
                     buffer_data, 
                     max_chunk_size=1024*1024,
@@ -178,11 +179,29 @@ class PgGpuProcessor:
         if hasattr(self, 'conn') and self.conn:
             self.conn.close()
 
-def load_table_optimized(table_name: str, limit: Optional[int] = None):
+def load_table_optimized(table_name: str, limit: Optional[int] = None, parquet_output: Optional[str] = None):
     """最適化されたGPU実装でテーブルを読み込む（コンビニエンス関数）"""
-    processor = PgGpuProcessor()
+    processor = PgGpuProcessor(parquet_output=parquet_output)
     try:
-        return processor.process_table(table_name, limit)
+        results = processor.process_table(table_name, limit)
+        
+        # Parquet出力が指定されている場合の検証
+        if parquet_output:
+            print(f"\nParquetファイルが保存されました: {parquet_output}")
+            print("cuDFで読み込みテスト:")
+            try:
+                import cudf
+                df = cudf.read_parquet(parquet_output)
+                print("\n最初の5行:")
+                print(df.head(5))
+                print("\n最後の5行:")
+                print(df.tail(5))
+            except ImportError:
+                print("cuDFがインストールされていないため、読み込みテストをスキップします")
+            except Exception as e:
+                print(f"Parquetファイル読み込み中にエラー: {e}")
+                
+        return results
     finally:
         processor.close()
 
@@ -193,6 +212,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PostgreSQL GPU Parser')
     parser.add_argument('--table', required=True, help='Table name to process')
     parser.add_argument('--limit', type=int, default=None, help='Limit number of rows')
+    parser.add_argument('--parquet', help='Output path for Parquet file')
     args = parser.parse_args()
     
     # テーブル処理
@@ -201,7 +221,7 @@ if __name__ == "__main__":
     start_time = time.time()
     
     try:
-        results = load_table_optimized(args.table, args.limit)
+        results = load_table_optimized(args.table, args.limit, args.parquet)
         gpu_time = time.time() - start_time
         print(f"処理時間: {gpu_time:.3f}秒")
     except Exception as e:
