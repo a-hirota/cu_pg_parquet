@@ -1,233 +1,138 @@
 """
-CUDAカーネル定義とGPUデコード処理モジュール
+GPU上でのPostgreSQLバイナリデータデコーダー
 """
 
 import numpy as np
-from numba import cuda, njit
+from numba import cuda
+import math
 from typing import List, Dict, Any, Optional, Tuple
 
-@cuda.jit(device=True)
-def check_bounds(data, pos, size):
-    """境界チェック"""
-    return pos >= 0 and pos + size <= len(data)
+# 分割したモジュールをインポート
+from gpupaser.cuda_kernels import parse_binary_format_kernel
+from gpupaser.data_processors import decode_all_columns_kernel
 
-@cuda.jit(device=True)
-def decode_int16(data, pos):
-    """2バイト整数のデコード（ビッグエンディアン）"""
-    if not check_bounds(data, pos, 2):
-        return 0
-    
-    # バイトを取得
-    b0 = data[pos]
-    b1 = data[pos + 1]
-    
-    # ビッグエンディアンからリトルエンディアンに変換
-    val = ((b0 & 0xFF) << 8) | (b1 & 0xFF)
-    
-    # 符号付き16ビット整数に変換
-    if val & 0x8000:  # 最上位ビットが1なら負の数
-        val = -(((~val) + 1) & 0xFFFF)
-    
-    return val
-
-@cuda.jit(device=True)
-def decode_int32(data, pos):
-    """4バイト整数のデコード（ビッグエンディアン）"""
-    if not check_bounds(data, pos, 4):
-        return 0
-    
-    # バイトを取得
-    b0 = data[pos]
-    b1 = data[pos + 1]
-    b2 = data[pos + 2]
-    b3 = data[pos + 3]
-    
-    # ビッグエンディアンからリトルエンディアンに変換
-    val = ((b0 & 0xFF) << 24) | ((b1 & 0xFF) << 16) | ((b2 & 0xFF) << 8) | (b3 & 0xFF)
-    
-    # 符号付き32ビット整数に変換
-    if val & 0x80000000:  # 最上位ビットが1なら負の数
-        val = -(((~val) + 1) & 0xFFFFFFFF)
-    
-    return val
-
-@cuda.jit(device=True)
-def decode_numeric_postgres(data, pos, hi_out, lo_out, scale_out, row_idx):
-    """PostgreSQLのnumeric型を128ビット固定小数点数に変換"""
-    if not check_bounds(data, pos, 8):  # 少なくともヘッダー部分があるか
-        hi_out[row_idx] = 0
-        lo_out[row_idx] = 0
-        scale_out[0] = 0
-        return
-    
-    # ヘッダー情報の取得
-    ndigits = decode_int16(data, pos)
-    weight = decode_int16(data, pos + 2)
-    sign = decode_int16(data, pos + 4)
-    dscale = decode_int16(data, pos + 6)
-    
-    # データの妥当性チェック
-    if ndigits < 0 or ndigits > 100 or dscale < 0 or dscale > 100:
-        hi_out[row_idx] = 0
-        lo_out[row_idx] = 0
-        scale_out[0] = 0
-        return
-    
-    # 必要なバイト数をチェック
-    if not check_bounds(data, pos + 8, ndigits * 2):
-        hi_out[row_idx] = 0
-        lo_out[row_idx] = 0
-        scale_out[0] = 0
-        return
-    
-    # 128ビット整数に変換
-    hi = 0
-    lo = 0
-    
-    # 各桁を処理
-    digit_pos = pos + 8
-    scale = 0
-    
-    for i in range(ndigits):
-        digit = decode_int16(data, digit_pos + i * 2)
-        if digit < 0 or digit > 9999:  # 不正な桁
-            continue
-            
-        # 既存の値を10000倍して新しい桁を加算
-        hi_old = hi
-        lo_old = lo
-        
-        # 10000倍
-        lo = lo_old * 10000
-        hi = hi_old * 10000 + (lo_old >> 32) * 10000
-        
-        # 桁を加算
-        lo += digit
-        if lo < lo_old:  # 桁上がり
-            hi += 1
-        
-        # スケールの更新
-        scale = max(scale, dscale)
-    
-    # 符号の適用
-    if sign == 0x4000:  # 負の数
-        if lo == 0:
-            hi = -hi
-        else:
-            lo = ~lo + 1
-            hi = ~hi
-            if lo == 0:
-                hi += 1
-    
-    # 結果の格納
-    scale_out[0] = scale
-    hi_out[row_idx] = hi
-    lo_out[row_idx] = lo
-
-@cuda.jit(device=True)
-def bulk_copy_64bytes(src, src_pos, dst, dst_pos, size):
-    """64バイト単位でのバルクコピー"""
-    if size > 64:
-        size = 64
-    
-    # 8バイトずつコピー
-    for i in range(0, size, 8):
-        if i + 8 <= size:
-            # 8バイトを一度に読み書き
-            val = 0
-            for j in range(8):
-                val = (val << 8) | src[src_pos + i + j]
-            
-            # 8バイトを一度に書き込み
-            for j in range(8):
-                dst[dst_pos + i + j] = (val >> ((7-j) * 8)) & 0xFF
-        else:
-            # 残りのバイトを1バイトずつコピー
-            for j in range(size - i):
-                dst[dst_pos + i + j] = src[src_pos + i + j]
-
-@cuda.jit
-def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
-                            int_outputs, num_hi_output, num_lo_output, num_scale_output,
-                            str_outputs, str_null_pos, str_offsets,
-                            col_types, col_lengths, chunk_size, num_cols):
-    """全カラムを一度に処理する統合カーネル（累積オフセット方式）"""
-    # スレッドインデックスの計算を改善
-    thread_id = cuda.threadIdx.x
-    block_id = cuda.blockIdx.x
-    block_size = cuda.blockDim.x
-    grid_size = cuda.gridDim.x
-    
-    # グリッド内の絶対位置を計算
-    row = block_id * block_size + thread_id
-    
-    # ストライド処理を追加
-    stride = block_size * grid_size
-    while row < chunk_size:
-        for col in range(num_cols):
-            # フィールドオフセットとデータ長を取得
-            field_idx = row * num_cols + col
-            if field_idx >= len(field_offsets):
-                return
-                
-            pos = field_offsets[field_idx]
-            length = field_lengths[field_idx]
-            
-            if col_types[col] <= 1:  # 数値型
-                if length == -1:  # NULL値
-                    int_outputs[col * chunk_size + row] = 0
-                else:
-                    if col_types[col] == 0:  # integer
-                        val = decode_int32(raw_data, pos)
-                        int_outputs[col * chunk_size + row] = val
-                    else:  # numeric/decimal
-                        # PostgreSQLのnumeric型を128ビット固定小数点数として処理
-                        decode_numeric_postgres(raw_data, pos,
-                                             num_hi_output[col * chunk_size:],
-                                             num_lo_output[col * chunk_size:],
-                                             num_scale_output[col:col + 1],
-                                             row)
-            else:  # 文字列型
-                max_length = col_lengths[col]
-                
-                # 文字列カラムのインデックスを計算
-                str_col_idx = 0
-                for i in range(col):
-                    if col_types[i] == 2:  # 文字列型
-                        str_col_idx += 1
-                
-                # 文字列バッファの位置を計算（累積オフセット方式）
-                buffer_offset = str_offsets[str_col_idx]
-                dst_pos = buffer_offset + row * max_length
-                
-                if length == -1:  # NULL値
-                    str_null_pos[str_col_idx * chunk_size + row] = 0
-                    continue
-                    
-                # 文字列データのコピー
-                valid_length = min(length, max_length)
-                
-                # バルクコピーを使用
-                for i in range(0, valid_length, 64):
-                    copy_size = min(64, valid_length - i)
-                    bulk_copy_64bytes(raw_data, pos + i, str_outputs, dst_pos + i, copy_size)
-                
-                # 残りのバイトをゼロクリア
-                for i in range(valid_length, max_length):
-                    str_outputs[dst_pos + i] = 0
-                
-                # 文字列の有効範囲を設定（カラムごとに独立した位置）
-                str_null_pos[str_col_idx * chunk_size + row] = valid_length
-        
-        # 次の行へ
-        row += stride
 
 class GPUDecoder:
     """GPU上でのデコード処理を管理するクラス"""
     
     def __init__(self):
         """初期化"""
-        pass
+        # CUDAコンテキストを初期化
+        try:
+            # デバイス0を選択（複数GPUの場合は適切なデバイスを選択）
+            cuda.select_device(0)
+            print("CUDA device initialized for GPUDecoder")
+        except Exception as e:
+            print(f"CUDA初期化エラー: {e}")
+    
+    def parse_binary_data(self, chunk_array, rows_in_chunk, num_cols):
+        """
+        PostgreSQLバイナリデータをGPUで解析する
+        
+        Args:
+            chunk_array: バイナリデータ配列 (numpyバイト配列)
+            rows_in_chunk: 予想される行数 (エラー検出用)
+            num_cols: 1行あたりのカラム数
+            
+        Returns:
+            field_offsets: フィールド位置の配列
+            field_lengths: フィールド長の配列
+            actual_rows: 実際に解析できた行数
+        """
+        try:
+            # 整数型に変換（重要）
+            rows_in_chunk_val = int(rows_in_chunk)
+            num_cols_val = int(num_cols)
+            
+            # バイト数は安全に取得
+            array_size = int(chunk_array.size if hasattr(chunk_array, 'size') else len(chunk_array))
+            
+            print(f"GPUでバイナリデータ解析を開始: {array_size}バイト、予想行数={rows_in_chunk_val}、列数={num_cols_val}")
+            
+            # フィールドオフセットと長さの配列を確保（データ型はint32）
+            total_fields = rows_in_chunk_val * num_cols_val
+            d_field_offsets = cuda.device_array(total_fields, dtype=np.int32)
+            d_field_lengths = cuda.device_array(total_fields, dtype=np.int32)
+            
+            # チャンク配列をGPUに転送
+            d_chunk_array = cuda.to_device(chunk_array)
+            
+            # スレッド数とブロック数を決定
+            threads_per_block = 256
+            blocks = min(1024, (array_size + threads_per_block - 1) // threads_per_block)
+            
+            print(f"バイナリデータ解析: スレッド/ブロック={threads_per_block}、ブロック数={blocks}")
+            
+            # 共有メモリの確保（ヘッダーサイズと行位置情報用）
+            header_shared_size = 2 + 100  # ヘッダーサイズ + 総行数 + 最大100行の位置
+            d_header_shared = cuda.device_array(header_shared_size, dtype=np.int32)
+            
+            # 結果を格納する変数を前もって初期化
+            field_offsets = np.array([], dtype=np.int32)
+            field_lengths = np.array([], dtype=np.int32)
+            header_shared = np.zeros(header_shared_size, dtype=np.int32)
+            
+            try:
+                # パースカーネルを起動
+                parse_binary_format_kernel[blocks, threads_per_block](
+                    d_chunk_array, d_field_offsets, d_field_lengths, 
+                    np.int32(num_cols_val), 
+                    d_header_shared
+                )
+                cuda.synchronize()  # カーネル完了を待つ
+                
+                # 結果をホストにコピー
+                field_offsets = d_field_offsets.copy_to_host()
+                field_lengths = d_field_lengths.copy_to_host()
+                
+                # 共有メモリから検出された行数を取得
+                header_shared = d_header_shared.copy_to_host()
+                
+            except Exception as kernel_err:
+                print(f"カーネル実行中のエラー: {kernel_err}")
+                import traceback
+                traceback.print_exc()
+                # 例外が発生しても続行（空の配列を返す準備はできている）
+            finally:
+                # リソース解放（try ブロックの外で必ず実行）
+                # 各変数が存在するか確認してから削除
+                if 'd_chunk_array' in locals():
+                    del d_chunk_array
+                if 'd_field_offsets' in locals():
+                    del d_field_offsets
+                if 'd_field_lengths' in locals():
+                    del d_field_lengths
+                if 'd_header_shared' in locals():
+                    del d_header_shared
+                cuda.synchronize()
+            
+            # 有効なフィールドを検出
+            # フィールド数からユニークな行数を計算
+            actual_rows = min(rows_in_chunk_val, total_fields // num_cols_val)
+            detected_rows = int(header_shared[1])
+            
+            if detected_rows == 0:
+                print(f"有効な行が検出されませんでした")
+                return np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+            
+            # 検出行数が実際のバッファサイズを超えていないか確認
+            max_possible_rows = min(detected_rows, len(field_offsets) // num_cols_val)
+            valid_rows = max_possible_rows
+            
+            # 有効なフィールド数をカウント (デバッグ用)
+            valid_fields = np.sum(field_offsets[:valid_rows * num_cols_val] > 0)
+            
+            print(f"バイナリデータ解析完了: 有効行数={valid_rows}, フィールド数={valid_fields}")
+            
+            # 有効なデータが含まれる部分のみを返す
+            return field_offsets[:valid_rows * num_cols_val], field_lengths[:valid_rows * num_cols_val], valid_rows
+            
+        except Exception as e:
+            print(f"GPUバイナリ解析中にエラー: {e}")
+            import traceback
+            traceback.print_exc()
+            # エラー時は空の配列を返す
+            return np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
     
     def decode_chunk(self, buffers, chunk_array, field_offsets, field_lengths, rows_in_chunk, columns):
         """チャンクをデコードする
@@ -243,7 +148,9 @@ class GPUDecoder:
         Returns:
             デコード結果
         """
-        num_cols = len(columns)
+        # 型変換を保証
+        num_cols = np.int32(len(columns))
+        rows_in_chunk = np.int32(rows_in_chunk)
         
         # 転送前にすべての変数を初期化（解放処理のため）
         d_chunk = None
@@ -353,80 +260,104 @@ class GPUDecoder:
                         length = col_lengths[i]
                         
                         # ホスト側でオフセット値を取得
-                        host_offsets = np.empty(len(d_str_offsets), dtype=np.int32)
-                        d_str_offsets.copy_to_host(host_offsets)
+                        # まず配列サイズを確認（numba.cudadevicearray.DeviceNDArrayのlen問題を回避）
+                        try:
+                            if hasattr(d_str_offsets, 'size'):
+                                d_str_offsets_size = d_str_offsets.size
+                            else:
+                                # サイズが不明の場合は文字列カラム数+1と仮定
+                                d_str_offsets_size = str_col_idx + 1
+                            host_offsets = np.empty(d_str_offsets_size, dtype=np.int32)
+                            d_str_offsets.copy_to_host(host_offsets)
+                        except Exception as e:
+                            print(f"オフセット取得エラー: {e}")
+                            # エラー発生時は文字列カラムの数+1分の要素を持つ配列を生成
+                            num_str_cols = sum(1 for t in col_types if t > 1)
+                            host_offsets = np.zeros(num_str_cols + 1, dtype=np.int32)
+                            # 各文字列カラムのオフセットを計算（バッファサイズを均等配分）
+                            if num_str_cols > 0:
+                                col_lens = [col_lengths[i] for i, t in enumerate(col_types) if t > 1]
+                                total_len = sum(col_lens)
+                                cum_len = 0
+                                str_idx = 0
+                                for i, t in enumerate(col_types):
+                                    if t > 1:  # 文字列型
+                                        host_offsets[str_idx] = int(cum_len * rows_in_chunk)
+                                        cum_len += (col_lengths[i] / total_len) if total_len > 0 else 0
+                                        str_idx += 1
                         
                         str_start = host_offsets[str_col_idx]
                         str_end = str_start + (rows_in_chunk * length)
                         
-                        host_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
-                        str_buffer[str_start:str_end].copy_to_host(host_array)
+                        # 文字列バッファ部分のコピー
+                        host_str_array = np.empty(rows_in_chunk * length, dtype=np.uint8)
+                        str_buffer[str_start:str_end].copy_to_host(host_str_array)
                         
-                        # 文字列長の取得
-                        null_positions = np.empty(rows_in_chunk, dtype=np.int32)
-                        str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(null_positions)
+                        # NULL位置の配列を取得
+                        host_null_pos = np.empty(rows_in_chunk, dtype=np.int32)
+                        str_null_pos[str_col_idx * rows_in_chunk:(str_col_idx + 1) * rows_in_chunk].copy_to_host(host_null_pos)
                         
-                        data = host_array.reshape(rows_in_chunk, length)
+                        # 文字列リストに変換
                         strings = []
-                        
-                        for row in range(rows_in_chunk):
-                            str_length = null_positions[row]
-                            if str_length == 0:  # NULL値
-                                strings.append('')
+                        for j in range(rows_in_chunk):
+                            null_pos = host_null_pos[j]
+                            if null_pos == 0:  # NULL値
+                                strings.append(None)
                             else:
-                                # 文字列データを直接デコード
-                                row_data = data[row, :str_length]
+                                start_idx = j * length
+                                end_idx = start_idx + null_pos
+                                
+                                # バイト配列を取得してUTF-8でデコード
+                                # エラー処理を追加（不正なUTF-8シーケンスを置換）
+                                byte_data = host_str_array[start_idx:end_idx].tobytes()
+                                
                                 try:
-                                    # バイト列を文字列にデコード（空白は保持）
-                                    s = bytes(row_data).decode('utf-8', errors='replace').rstrip()
-                                    strings.append(s)
+                                    # PostgreSQLバイナリデータを直接デコード
+                                    if byte_data:
+                                        # NULL終端の検索や除去を行わない
+                                        # PostgreSQLは長さフィールドで文字列長を管理しているため
+                                        string_val = byte_data.decode('utf-8', errors='replace')
+                                    else:
+                                        string_val = ""  # 空のバイト配列の場合
+                                    
+                                    strings.append(string_val)
                                 except Exception as e:
-                                    strings.append('')  # デコードエラー
+                                    print(f"文字列デコードエラー: {e}, バイトデータ: {byte_data}")
+                                    # デコードに失敗した場合は空文字列
+                                    strings.append("")
                         
-                        # 結果を格納
                         results[col.name] = strings
                         str_col_idx += 1
+            
+            # リソース解放
+            if d_chunk is not None:
+                del d_chunk
+            if d_offsets is not None:
+                del d_offsets
+            if d_lengths is not None:
+                del d_lengths
+            if d_col_types is not None:
+                del d_col_types
+            if d_col_lengths is not None:
+                del d_col_lengths
+            cuda.synchronize()
             
             return results
             
         except Exception as e:
-            print(f"GPUデコード処理中にエラー発生: {e}")
-            # エラー時もリソース解放を確実に行う
-            try:
-                if d_chunk is not None:
-                    del d_chunk
-                if d_offsets is not None:
-                    del d_offsets
-                if d_lengths is not None:
-                    del d_lengths
-                if d_col_types is not None:
-                    del d_col_types
-                if d_col_lengths is not None:
-                    del d_col_lengths
-                cuda.synchronize()
-            except Exception as cleanup_error:
-                print(f"クリーンアップ中にエラー: {cleanup_error}")
-            raise
-        
-        finally:
-            # 一時的なGPUメモリの解放
-            cuda.synchronize()  # 処理完了を待つ
-            
-            # すべてのGPUリソースを確実に解放
-            to_delete = [d_chunk, d_offsets, d_lengths, d_col_types, d_col_lengths]
-            for resource in to_delete:
-                if resource is not None:
-                    try:
-                        del resource
-                    except Exception as e:
-                        print(f"リソース解放中にエラー: {e}")
-            
-            # 明示的に同期を取り、GPUメモリ解放を確実に
+            print(f"GPUデコード中にエラー: {e}")
+            # エラー時はリソース解放
+            if d_chunk is not None:
+                del d_chunk
+            if d_offsets is not None:
+                del d_offsets
+            if d_lengths is not None:
+                del d_lengths
+            if d_col_types is not None:
+                del d_col_types
+            if d_col_lengths is not None:
+                del d_col_lengths
             cuda.synchronize()
             
-            # GPUメモリの状態を確認
-            try:
-                mem_info = cuda.current_context().get_memory_info()
-                print(f"メモリ使用量 (解放後): {mem_info[0]} / {mem_info[1]} バイト")
-            except Exception as e:
-                print(f"メモリ情報取得エラー: {e}")
+            # 空の結果を返す
+            return {}

@@ -8,6 +8,53 @@ from typing import List, Optional, Tuple
 
 from .utils import ColumnInfo
 
+class PostgresConnector:
+    """PostgreSQLとの接続を管理するクラス"""
+    
+    def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost'):
+        """接続を初期化"""
+        self.dbname = dbname
+        self.user = user
+        self.password = password
+        self.host = host
+        self.conn = None
+        self.connect()
+        
+    def connect(self):
+        """PostgreSQL接続を確立"""
+        try:
+            self.conn = psycopg2.connect(
+                dbname=self.dbname,
+                user=self.user,
+                password=self.password,
+                host=self.host
+            )
+            return True
+        except Exception as e:
+            print(f"PostgreSQL接続エラー: {e}")
+            return False
+            
+    def check_table_exists(self, table_name):
+        """テーブルの存在チェック"""
+        return check_table_exists(self.conn, table_name)
+        
+    def get_table_info(self, table_name):
+        """テーブル情報の取得"""
+        return get_table_info(self.conn, table_name)
+        
+    def get_table_row_count(self, table_name):
+        """テーブルの行数を取得"""
+        return get_table_row_count(self.conn, table_name)
+        
+    def get_binary_data(self, table_name, limit=None, offset=None, query=None):
+        """テーブルのバイナリデータを取得"""
+        return get_binary_data(self.conn, table_name, limit, offset, query)
+        
+    def close(self):
+        """接続を閉じる"""
+        if self.conn:
+            self.conn.close()
+
 def connect_to_postgres(dbname='postgres', user='postgres', password='postgres', host='localhost'):
     """PostgreSQLへの接続を確立する"""
     conn = psycopg2.connect(
@@ -62,14 +109,35 @@ def get_table_row_count(conn, table_name: str) -> int:
     print(f"Table {table_name} has {row_count} rows")  # デバッグ出力
     return row_count
 
-def get_binary_data(conn, table_name: str, limit: Optional[int] = None) -> Tuple[bytes, io.BytesIO]:
-    """テーブルのバイナリデータを取得"""
+def get_binary_data(conn, table_name: str, limit: Optional[int] = None, offset: Optional[int] = None, query: Optional[str] = None) -> Tuple[bytes, io.BytesIO]:
+    """テーブルのバイナリデータを取得
+    
+    Args:
+        conn: PostgreSQL接続
+        table_name: テーブル名
+        limit: 取得する最大行数
+        offset: 取得開始位置（行オフセット）
+        query: カスタムSQLクエリ（指定された場合は他のパラメータより優先）
+    
+    Returns:
+        (bytes, BytesIO): バイナリデータとバッファ
+    """
     cur = conn.cursor()
     
     # バイナリデータを一時的にメモリに保存
     buffer = io.BytesIO()
-    limit_clause = f"LIMIT {limit}" if limit is not None else ""
-    cur.copy_expert(f"COPY (SELECT * FROM {table_name} {limit_clause}) TO STDOUT WITH (FORMAT binary)", buffer)
+    
+    if query is not None:
+        # カスタムクエリが指定された場合はそれを使用
+        sql_query = query
+    else:
+        # LIMITとOFFSETの設定
+        limit_clause = f"LIMIT {limit}" if limit is not None else ""
+        offset_clause = f"OFFSET {offset}" if offset is not None else ""
+        sql_query = f"SELECT * FROM {table_name} {limit_clause} {offset_clause}"
+    
+    print(f"実行クエリ: {sql_query}")
+    cur.copy_expert(f"COPY ({sql_query}) TO STDOUT WITH (FORMAT binary)", buffer)
     
     # バッファをメモリに固定
     buffer_data = buffer.getvalue()

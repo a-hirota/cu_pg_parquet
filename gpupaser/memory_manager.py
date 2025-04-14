@@ -15,9 +15,16 @@ class GPUMemoryManager:
     
     def __init__(self):
         """初期化"""
-        # CUDA初期化
+        # CUDA初期化 - 既存のコンテキストを使用
         try:
-            cuda.select_device(0)
+            # デバイスを選択（既存のコンテキストを再利用）
+            try:
+                context = cuda.current_context()
+                print("既存のCUDAコンテキストを使用")
+            except:
+                # コンテキストがない場合は新規に作成
+                cuda.select_device(0)
+                print("新規CUDAコンテキストを作成")
             print("CUDA device initialized")
             # GPUメモリ情報の表示
             self.print_gpu_memory_info()
@@ -137,7 +144,8 @@ class GPUMemoryManager:
             print(f"[DEBUG] - Number of rows: {chunk_size}")
             print(f"[DEBUG] - Number of string columns: {num_str_cols}")
             print(f"[DEBUG] - Column lengths: {[get_column_length(col.type, col.length) for col in columns if get_column_type(col.type) == 2]}")
-            print(f"[DEBUG] - String column offsets: {str_offsets}")
+            # numpy.int32値をリストとして表示する問題を防ぐ
+            print(f"[DEBUG] - String column offsets: {[int(offset) for offset in str_offsets]}")
             
             # バッファの確保と初期化
             int_buffer = None

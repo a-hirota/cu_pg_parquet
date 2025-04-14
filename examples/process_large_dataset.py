@@ -9,6 +9,14 @@ GPUメモリの使用量を最適化しながら複数チャンクに分けて�
 import time
 import argparse
 import numpy as np
+import sys
+import os
+
+# モジュールパスの追加
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
 from numba import cuda
 import psycopg2
 
@@ -73,7 +81,7 @@ def process_in_chunks(table_name, total_rows, chunk_size=None):
         
         try:
             # チャンク処理
-            chunk_results = processor.process_table(table_name, current_chunk_size, start_row)
+            chunk_results = processor.process_table_chunk(table_name, current_chunk_size, start_row)
             chunk_time = time.time() - chunk_start_time
             print(f"チャンク {chunk_idx+1} 処理時間: {chunk_time:.3f}秒")
             

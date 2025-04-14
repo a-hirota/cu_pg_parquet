@@ -1,3 +1,6 @@
 gpuparser/__pycache__/
+gpuparser/cuda_kernels/__pycache__/
+gpuparser/data_processors/__pycache__/
 memory-bank/
 old/
+output/

@@ -1,5 +1,5 @@
 """
-共通ユーティリティ関数とデータ構造
+ユーティリティ関数と共通クラス
 """
 
 import numpy as np
@@ -51,6 +51,39 @@ def get_column_length(type_name: str, length: Optional[int]) -> int:
     else:
         raise ValueError(f"Unsupported column type: {type_name}")
 
+def get_available_gpus():
+    """
+    システムで利用可能なGPUのIDのリストを返す
+    
+    Returns:
+        List[int]: 利用可能なGPU IDのリスト
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        gpu_count = pynvml.nvmlDeviceGetCount()
+        return list(range(gpu_count))
+    except:
+        # pynvmlがインストールされていない場合はNVIDIA-SMIを使用
+        try:
+            import subprocess
+            output = subprocess.check_output(["nvidia-smi", "-L"], universal_newlines=True)
+            gpus = []
+            for line in output.strip().split('\n'):
+                if "GPU " in line:
+                    gpu_id = int(line.split(":", 1)[0].split(" ")[1])
+                    gpus.append(gpu_id)
+            return gpus if gpus else [0]  # 検出失敗時は0を返す
+        except:
+            # CUDA直接使用
+            try:
+                from numba import cuda
+                count = len(cuda.gpus)
+                return list(range(count))
+            except:
+                # デフォルトとして[0]を返す（少なくとも1つのGPUがあると仮定）
+                return [0]
+
 class ChunkConfig:
     """チャンク処理の設定クラス"""
     def __init__(self, total_rows=6_000_000, rows_per_chunk=None):
@@ -61,11 +94,11 @@ class ChunkConfig:
         else:
             # デフォルトは最大65535行まで（CUDA制限）
             self.rows_per_chunk = min(65535, total_rows)
-            
+
         self.num_chunks = (total_rows + self.rows_per_chunk - 1) // self.rows_per_chunk
         self.threads_per_block = 256  # スレッド数を増加
         self.max_blocks = 65535  # CUDA制限
-        
+
     def get_grid_size(self, chunk_size):
         """グリッドサイズの計算"""
         return min(
