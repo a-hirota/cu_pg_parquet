@@ -19,9 +19,9 @@ class GPUDecoder:
         """初期化"""
         # CUDAコンテキストを初期化
         try:
-            # デバイス0を選択（複数GPUの場合は適切なデバイスを選択）
-            cuda.select_device(0)
-            print("CUDA device initialized for GPUDecoder")
+            # 明示的なデバイス選択を削除
+            # Rayが設定した環境変数により、割り当てられたGPUが自動的に選択される
+            print("CUDA device initialized for GPUDecoder (using Ray-assigned GPU)")
         except Exception as e:
             print(f"CUDA初期化エラー: {e}")
     

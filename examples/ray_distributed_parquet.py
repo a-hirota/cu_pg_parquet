@@ -135,11 +135,30 @@ def main():
     results = []
     start_time = time.time()
 
-    # GPUごとのチャンク割り当て計画を作成
+    # GPUごとのチャンク割り当て計画を作成（前半・後半チャンクを分離）
     gpu_assignments = []
+    num_chunks_per_half = (num_chunks + 1) // 2  # 半分に分割（切り上げ）
+    num_gpus_per_half = max(1, len(gpu_ids) // 2)  # 半分のGPU数（最低1）
+    
     for i in range(num_chunks):
-        gpu_idx = i % len(gpu_ids)  # ラウンドロビンでGPUを割り当て
+        if i < num_chunks_per_half:
+            # 前半部分 - 前半のGPUに割り当て
+            gpu_idx = i % num_gpus_per_half
+        else:
+            # 後半部分 - 後半のGPUに割り当て
+            remaining_gpus = len(gpu_ids) - num_gpus_per_half
+            if remaining_gpus <= 0:
+                # GPUが1つしかない場合は同じGPUを使用
+                gpu_idx = 0
+            else:
+                # 後半のGPUセットからラウンドロビンで割り当て
+                gpu_idx = num_gpus_per_half + ((i - num_chunks_per_half) % remaining_gpus)
+        
+        # GPU IDの範囲チェック
+        gpu_idx = min(gpu_idx, len(gpu_ids) - 1)
         gpu_assignments.append(gpu_ids[gpu_idx])
+        
+    print(f"チャンク割り当て計画: {gpu_assignments}")
 
     print(f"{len(results)}個のチャンクを処理中...")
     for i in range(num_chunks):
@@ -170,14 +189,15 @@ def main():
     # すべての結果を待機
     output_info = ray.get(results)
 
-    # 結果表示
-    total_time = time.time() - start_time
+    # 処理終了時間を記録（ファイルリスト表示やcuDF検証など前）
+    processing_end_time = time.time()
+    processing_time = processing_end_time - start_time
     total_rows = sum(info["rows_processed"] for info in output_info)
 
     print("\n=== 処理結果 ===")
-    print(f"合計時間: {total_time:.3f}秒")
+    print(f"PostgreSQLからParquet出力までの処理時間: {processing_time:.3f}秒")
     print(f"処理行数: {total_rows}行")
-    print(f"スループット: {total_rows/total_time:.1f}行/秒")
+    print(f"スループット: {total_rows/processing_time:.1f}行/秒")
 
     # GPU別の処理統計
     gpu_stats = {}
@@ -194,6 +214,8 @@ def main():
         print(f"GPU #{gpu_id}: {stats['count']}チャンク処理 {stats['rows']}行 {stats['time']:.3f}秒 " +
               f"({stats['rows']/stats['time']:.1f}行/秒)")
 
+    print("\n--- 以下は参考情報（処理時間には含まれていません）---")
+    
     # 出力ファイル一覧
     output_files = [info["output_file"] for info in output_info]
     print(f"\n出力ファイル ({len(output_files)}個):")
@@ -202,19 +224,23 @@ def main():
         print(f"  {f} ({file_size:.2f} MB)")
 
     # 検証用サンプル読み込み（オプション）
-    try:
-        if output_files:
-            import cudf
-            sample_file = output_files[0]
-            print(f"\n検証: {sample_file}をcuDFで読み込み")
-            df = cudf.read_parquet(sample_file)
-            print(f"サンプルファイル行数: {len(df)}")
-            print("\n最初の5行:")
-            print(df.head(5))
-    except ImportError:
-        print("\ncuDFがインストールされていないため、検証をスキップします")
-    except Exception as e:
-        print(f"\nParquetファイル検証中にエラー: {e}")
+    verify_sample = os.environ.get("VERIFY_SAMPLE", "0").lower() in ["1", "true", "yes"]
+    if verify_sample:
+        try:
+            if output_files:
+                import cudf
+                sample_file = output_files[0]
+                print(f"\n検証: {sample_file}をcuDFで読み込み")
+                df = cudf.read_parquet(sample_file)
+                print(f"サンプルファイル行数: {len(df)}")
+                print("\n最初の5行:")
+                print(df.head(5))
+        except ImportError:
+            print("\ncuDFがインストールされていないため、検証をスキップします")
+        except Exception as e:
+            print(f"\nParquetファイル検証中にエラー: {e}")
+    else:
+        print("\nサンプル検証は無効です（有効にするには VERIFY_SAMPLE=1 を設定）")
 
     ray.shutdown()
     print("\n処理完了!")

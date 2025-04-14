@@ -107,8 +107,8 @@ fi
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." &> /dev/null && pwd )"
 
-# コマンド構築
-CMD="PYTHONPATH=\$PYTHONPATH:$PROJECT_ROOT python examples/ray_distributed_parquet.py --table $TABLE --total_rows $TOTAL_ROWS"
+# コマンド構築（環境変数を渡す）
+CMD="PYTHONPATH=\$PYTHONPATH:$PROJECT_ROOT VERIFY_SAMPLE=$VERIFY_SAMPLE python examples/ray_distributed_parquet.py --table $TABLE --total_rows $TOTAL_ROWS"
 
 if [ $NUM_GPUS -gt 0 ]; then
     CMD="$CMD --num_gpus $NUM_GPUS"

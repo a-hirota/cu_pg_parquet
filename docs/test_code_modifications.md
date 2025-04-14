@@ -1,334 +1,146 @@
-# テストコード修正ガイド
+# GPU直接デシリアライズのマルチGPU機能改善
 
-このドキュメントでは、gpuPaserのテストコードを修正して、より大きなデータセット（70,000行以上）を処理するための具体的な方法を説明します。
+本ドキュメントでは、PostgreSQLデータのGPU直接デシリアライズとcuDF格納パイプラインのマルチGPU機能改善について説明します。
 
-## 現状の問題点
+## 問題点
 
-現在のパイプラインには以下の制限があります：
+現在の実装では、Rayフレームワークを使用してマルチGPU処理を試みていますが、実際には**GPU 0のみが使用される**という問題がありました。この問題の原因は次の点にありました：
 
-1. **CUDA制限**: 1回のカーネル起動で処理できる最大行数は65,535行（ブロック数の制限による）
-2. **チャンク境界**: 現在のバイナリパーサーは複数チャンク間での行オフセット計算に問題がある
-3. **エラー処理**: 2回目のチャンク処理でエラーが発生した場合の適切な回復処理がない
+- `GPUDecoder`クラスの初期化時に`cuda.select_device(0)`がハードコードされており、全てのRayタスクが同じGPU 0を使用していた
 
-## 修正方針
+## 修正内容
 
-### 1. テストスクリプトの修正
+### 1. GPUDecoderクラスの修正
 
-`test_postgres_binary_cuda_parser_module.py`を以下のように修正します：
+`GPUDecoder.__init__`メソッドからハードコードされたGPU選択を削除し、Rayによる自動GPU割り当てを利用するように変更しました。
 
+**修正前:**
 ```python
-# 70,000行のテスト関数
-def test_70k_rows():
-    print("\n=== 70,000行処理テスト ===")
-    
-    # 方法1: 65,000行以下に制限して安全に処理
-    test_rows = 65000
-    print(f"方法1: 最大{test_rows}行を処理")
-    start_time = time.time()
-    results = load_table_optimized('customer', test_rows)
-    print(f"処理時間: {time.time() - start_time:.3f}秒")
-    
-    # 方法2: 複数チャンクに分割して処理
-    chunks = [(0, 35000), (35000, 35000)]  # (開始行, 行数)
-    all_results = {}
-    
-    print("\n方法2: 複数チャンク処理")
-    total_start_time = time.time()
-    
-    for i, (start, size) in enumerate(chunks):
-        print(f"\nチャンク {i+1}: 行 {start}～{start+size-1}")
-        chunk_start_time = time.time()
-        
-        try:
-            # ここで個別のチャンク処理を実装
-            # この例では直接main.pyの内部実装を呼び出す
-            processor = PgGpuProcessor()
-            results = processor.process_chunk('customer', start, size)
-            processor.close()
-            
-            # 結果を集約
-            if not all_results:
-                all_results = results
-            else:
-                for col_name, data in results.items():
-                    if isinstance(data, np.ndarray):
-                        all_results[col_name] = np.concatenate([all_results[col_name], data])
-                    elif isinstance(data, list):
-                        all_results[col_name].extend(data)
-            
-            print(f"チャンク {i+1} 処理時間: {time.time() - chunk_start_time:.3f}秒")
-            
-        except Exception as e:
-            print(f"チャンク {i+1} 処理エラー: {e}")
-            # エラー時は部分的な結果を返す
-    
-    print(f"\n全チャンク処理時間: {time.time() - total_start_time:.3f}秒")
-    print(f"処理された総行数: {sum(size for _, size in chunks)}")
-    
-    return all_results
-```
-
-### 2. メインモジュールの修正
-
-`main.py`に必要な機能を追加します：
-
-```python
-# PgGpuProcessor クラスに新しいメソッドを追加
-def process_chunk(self, table_name: str, start_row: int, chunk_size: int):
-    """指定した開始行から特定サイズのチャンクを処理"""
-    # テーブルの存在確認
-    if not check_table_exists(self.conn, table_name):
-        raise ValueError(f"Table {table_name} does not exist")
-    
-    # テーブル情報の取得
-    columns = get_table_info(self.conn, table_name)
-    if not columns:
-        raise ValueError(f"No columns found in table {table_name}")
-    
-    # バイナリデータの取得（全データを取得し、後でスライス）
-    buffer_data, buffer = get_binary_data(self.conn, table_name, start_row + chunk_size)
-    
-    # バッファの初期化
-    buffers = self.memory_manager.initialize_device_buffers(columns, chunk_size)
-    
+def __init__(self):
+    # CUDAコンテキストを初期化
     try:
-        # バイナリデータの解析（開始行を指定）
-        chunk_array, field_offsets, field_lengths, rows_in_chunk = self.parser.parse_chunk(
-            buffer_data, 
-            max_chunk_size=1024*1024,
-            num_columns=len(columns),
-            start_row=start_row,
-            max_rows=chunk_size
-        )
-        
-        if rows_in_chunk == 0:
-            print(f"開始行 {start_row} 以降にデータがありません")
-            return {}
-            
-        print(f"処理中: {rows_in_chunk}行 (行 {start_row}～{start_row+rows_in_chunk-1})")
-        
-        # GPUでデコード
-        d_col_types = self.memory_manager.transfer_to_device(buffers["col_types"], np.int32)
-        d_col_lengths = self.memory_manager.transfer_to_device(buffers["col_lengths"], np.int32)
-        
-        chunk_results = self.gpu_decoder.decode_chunk(
-            buffers, 
-            chunk_array, 
-            field_offsets, 
-            field_lengths, 
-            rows_in_chunk, 
-            columns
-        )
-        
-        # 結果の処理
-        self.output_handler.process_chunk_result(chunk_results)
-        final_results = self.output_handler.get_results()
-        
-        return final_results
-        
+        # デバイス0を選択（複数GPUの場合は適切なデバイスを選択）
+        cuda.select_device(0)
+        print("CUDA device initialized for GPUDecoder")
     except Exception as e:
-        print(f"チャンク処理エラー: {e}")
-        raise
-        
-    finally:
-        # リソースのクリーンアップ
-        # 既存のクリーンアップコード...
-        pass
+        print(f"CUDA初期化エラー: {e}")
 ```
 
-### 3. バイナリパーサーの修正
-
-`binary_parser.py`のキーポイントを修正します：
-
+**修正後:**
 ```python
-def parse_chunk(self, chunk_data: bytes, max_chunk_size: int = 1024*1024, 
-                num_columns: int = None, start_row: int = 0, max_rows: int = 65535):
-    """チャンク単位でのパース処理"""
-    # 既存のコード...
-    
-    # 特定の行から開始する場合のスキップ処理を改善
-    if start_row > 0 and num_columns is not None:
-        print(f"開始行 {start_row} からのパース開始")
-        
-        # バイナリデータのスキャンとオフセット計算を改善
-        # 1. ヘッダーをスキップ
-        pos = self._skip_header(chunk_array)
-        
-        # 2. 行単位でスキャン - より堅牢なスキップ処理
-        row_count = 0
-        row_offsets = [pos]  # 各行の開始位置
-        
-        # バイナリファイル全体をスキャンして行境界を特定
-        while pos + 2 <= len(chunk_array):
-            # フィールド数を読み取り
-            num_fields = ((chunk_array[pos] << 8) | chunk_array[pos + 1])
-            
-            # ファイル終端チェック
-            if num_fields == 0xFFFF:
-                break
-                
-            pos += 2  # フィールド数フィールドをスキップ
-            
-            # 各フィールドをスキップ
-            for _ in range(num_fields):
-                if pos + 4 > len(chunk_array):
-                    break
-                    
-                # フィールド長を読み取り
-                field_len = ((chunk_array[pos] << 24) | 
-                             (chunk_array[pos+1] << 16) | 
-                             (chunk_array[pos+2] << 8) | 
-                              chunk_array[pos+3])
-                
-                pos += 4  # フィールド長フィールドをスキップ
-                
-                # NULL値チェック
-                if field_len != -1:
-                    pos += field_len  # データをスキップ
-            
-            # 行の終わり
-            row_count += 1
-            row_offsets.append(pos)
-            
-            # 必要な行数に達したらスキャン終了
-            if row_count > start_row + max_rows:
-                break
-        
-        # 開始行が存在するか確認
-        if start_row >= len(row_offsets) - 1:
-            print(f"警告: 指定された開始行 {start_row} は存在しません（利用可能な行数: {len(row_offsets)-1}）")
-            return np.zeros(0, dtype=np.uint8), np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
-        
-        # 開始行以降のデータを抽出
-        start_offset = row_offsets[start_row]
-        end_offset = row_offsets[min(start_row + max_rows, len(row_offsets) - 1)]
-        chunk_array = chunk_array[start_offset:end_offset]
-        
-        # ヘッダーフラグを無効化（スキップ済み）
-        self.header_expected = False
-    
-    # 残りの処理は既存コードと同様...
+def __init__(self):
+    # CUDAコンテキストを初期化
+    try:
+        # 明示的なデバイス選択を削除
+        # Rayが設定した環境変数により、割り当てられたGPUが自動的に選択される
+        print("CUDA device initialized for GPUDecoder (using Ray-assigned GPU)")
+    except Exception as e:
+        print(f"CUDA初期化エラー: {e}")
 ```
 
-### 4. ユーティリティ関数の追加
+### 2. Rayチャンク割り当てロジックの改善
 
-より便利なデバッグとテスト用のユーティリティ関数を追加します：
+`ray_distributed_parquet.py`のチャンク割り当てロジックを改善し、前半チャンクと後半チャンクを異なるGPUセットに割り当てるようにしました。これにより、前半チャンクと後半チャンクを異なるGPUで並列処理できるようになります。
 
+**修正前:**
 ```python
-# utils.py に追加
-
-def estimate_max_rows(gpu_mem_mb, row_size_bytes):
-    """利用可能なGPUメモリから処理可能な最大行数を推定"""
-    # 80%のメモリを使用可能と仮定
-    usable_mem = gpu_mem_mb * 0.8 * 1024 * 1024  # バイト単位に変換
-    
-    # オーバーヘッドを20%と仮定
-    row_size_with_overhead = row_size_bytes * 1.2
-    
-    # 最大行数計算（CUDA制限も考慮）
-    max_rows = min(int(usable_mem / row_size_with_overhead), 65535)
-    
-    return max_rows
-
-def analyze_data_types(columns):
-    """カラム情報から行あたりのメモリ使用量を推定"""
-    total_bytes = 0
-    type_summary = {}
-    
-    for col in columns:
-        if get_column_type(col.type) <= 1:  # 数値型
-            total_bytes += 8
-            type_summary[col.type] = type_summary.get(col.type, 0) + 1
-        else:  # 文字列型
-            length = get_column_length(col.type, col.length)
-            total_bytes += length
-            type_summary[f"{col.type}({length})"] = type_summary.get(f"{col.type}({length})", 0) + 1
-    
-    return {
-        "total_bytes_per_row": total_bytes,
-        "type_summary": type_summary,
-        "estimated_max_rows": estimate_max_rows(21000, total_bytes)  # 21GBと仮定
-    }
+# GPUごとのチャンク割り当て計画を作成
+gpu_assignments = []
+for i in range(num_chunks):
+    gpu_idx = i % len(gpu_ids)  # ラウンドロビンでGPUを割り当て
+    gpu_assignments.append(gpu_ids[gpu_idx])
 ```
 
-## 新しいテスト関数の実行
-
-これらの修正を適用した後、70,000行以上のデータを処理するためのテストコードを以下のように実行できます：
-
+**修正後:**
 ```python
-# test_postgres_binary_cuda_parser_module.py
+# GPUごとのチャンク割り当て計画を作成（前半・後半チャンクを分離）
+gpu_assignments = []
+num_chunks_per_half = (num_chunks + 1) // 2  # 半分に分割（切り上げ）
+num_gpus_per_half = max(1, len(gpu_ids) // 2)  # 半分のGPU数（最低1）
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='PostgreSQL GPU Parser Test')
-    parser.add_argument('--incremental', action='store_true', help='Run incremental row test')
-    parser.add_argument('--rows', type=int, default=None, help='Number of rows to process')
-    parser.add_argument('--chunks', action='store_true', help='Use multi-chunk processing')
-    args = parser.parse_args()
-    
-    if args.incremental:
-        test_increasing_rows()
-    elif args.chunks:
-        test_multi_chunk()
-    elif args.rows:
-        print(f"Processing {args.rows} rows...")
-        if args.rows > 65535:
-            print("Note: Using multiple chunks as row count exceeds 65,535")
-            # マルチチャンク処理
-            # チャンクサイズを計算
-            chunk_size = 65000
-            num_chunks = (args.rows + chunk_size - 1) // chunk_size
-            
-            # 各チャンクを処理
-            for i in range(num_chunks):
-                start_row = i * chunk_size
-                size = min(chunk_size, args.rows - start_row)
-                print(f"\nProcessing chunk {i+1}/{num_chunks}: rows {start_row} to {start_row+size-1}")
-                # チャンク処理コード...
-        else:
-            # 単一チャンク処理
-            results = load_table_optimized('customer', args.rows)
+for i in range(num_chunks):
+    if i < num_chunks_per_half:
+        # 前半部分 - 前半のGPUに割り当て
+        gpu_idx = i % num_gpus_per_half
     else:
-        run_tests()
+        # 後半部分 - 後半のGPUに割り当て
+        remaining_gpus = len(gpu_ids) - num_gpus_per_half
+        if remaining_gpus <= 0:
+            # GPUが1つしかない場合は同じGPUを使用
+            gpu_idx = 0
+        else:
+            # 後半のGPUセットからラウンドロビンで割り当て
+            gpu_idx = num_gpus_per_half + ((i - num_chunks_per_half) % remaining_gpus)
+    
+    # GPU IDの範囲チェック
+    gpu_idx = min(gpu_idx, len(gpu_ids) - 1)
+    gpu_assignments.append(gpu_ids[gpu_idx])
+    
+print(f"チャンク割り当て計画: {gpu_assignments}")
 ```
 
-## 応用例: 最大メモリ使用量でのテスト
+## 動作と仕組み
 
-GPUメモリを最大限活用するために、利用可能なGPUメモリに基づいて最適なチャンクサイズを自動的に計算するテスト：
+改修後の動作の仕組みは次の通りです：
 
-```python
-def test_max_memory_usage():
-    """利用可能なGPUメモリを最大限使用するテスト"""
-    print("\n=== GPUメモリ最大活用テスト ===")
-    
-    # メモリマネージャーの初期化
-    memory_manager = GPUMemoryManager()
-    
-    # 利用可能なGPUメモリ取得
-    free_memory = memory_manager.get_available_gpu_memory()
-    total_memory = memory_manager.get_total_gpu_memory()
-    
-    print(f"GPUメモリ: 利用可能 {free_memory/(1024**2):.2f}MB / 合計 {total_memory/(1024**2):.2f}MB")
-    
-    # テーブル情報取得
-    conn = connect_to_postgres()
-    columns = get_table_info(conn, 'customer')
-    conn.close()
-    
-    # 最適チャンクサイズ計算
-    optimal_chunk_size = memory_manager.calculate_optimal_chunk_size(columns, 1000000)
-    
-    print(f"最適チャンクサイズ: {optimal_chunk_size}行")
-    print(f"推定メモリ使用量: {analyze_data_types(columns)['total_bytes_per_row'] * optimal_chunk_size / (1024**2):.2f}MB")
-    
-    # テスト実行
-    print(f"\n{optimal_chunk_size}行のデータをロード中...")
-    start_time = time.time()
-    results = load_table_optimized('customer', optimal_chunk_size)
-    print(f"処理時間: {time.time() - start_time:.3f}秒")
-    
-    return results
+1. **Ray環境でのGPU割り当て**
+   - Rayは各タスクに1つのGPUリソースを割り当て、環境変数`CUDA_VISIBLE_DEVICES`を自動設定します
+   - この設定により、各プロセスからは割り当てられた特定のGPUのみが「GPU 0」として見えるようになります
+
+2. **GPUDecoderの動作**
+   - 明示的なGPU選択を行わないため、GPUDecoderはRayが設定した環境に従って自動的に割り当てられたGPUを使用します
+   - 各タスクは異なるGPUリソースを使って並行処理されます
+
+3. **前半・後半チャンクの並列処理**
+   - データを前半と後半に分け、異なるGPUセットで処理することでリソースを最大活用します
+   - 特にデータ量が多い場合に効果的です
+
+## 期待される効果
+
+この修正により、次のような効果が期待されます：
+
+1. **複数GPU利用率の向上**
+   - すべてのGPUが均等に活用されるようになり、処理能力が最大化されます
+
+2. **処理時間の短縮**
+   - 複数のGPUでの並列処理によりスループットが向上し、処理時間が短縮されます
+   - 特に大規模データセットでの効果が顕著です
+
+3. **スケーラビリティの向上**
+   - GPUの数に応じて自動的にスケールするため、将来GPUを追加した場合も容易に活用できます
+
+## テスト方法
+
+テスト用の`examples/test_multigpu_fix.sh`スクリプトを用意しました。このスクリプトでは以下の検証を行います：
+
+1. **修正前後での処理時間比較**
+   - 修正前のコード（GPU 0のみ使用）での処理時間
+   - 修正後のコード（複数GPU使用）での処理時間
+
+2. **GPU使用率の監視**
+   - nvidia-smiを使用して各GPUの使用率をモニタリング
+   - 複数GPUが均等に活用されているかを確認
+
+3. **出力データの一貫性確認**
+   - 修正前後での出力ファイル数、サイズ、行数の比較
+   - サンプルデータの内容確認による文字ずれチェック
+
+## 使用方法
+
+テストスクリプトを以下のように実行します：
+
+```bash
+./examples/test_multigpu_fix.sh
 ```
 
-これらの修正により、GPUメモリを最大限に活用して、より大きなデータセットを効率的に処理できるようになります。
+通常のマルチGPU処理は以下のコマンドで実行できます：
+
+```bash
+./examples/run_ray_multi_gpu.sh -t <テーブル名> -r <行数> -g <GPU数> -o <出力ディレクトリ>
+```
+
+## 注意点
+
+1. Rayが正しくインストールされていることを確認してください
+2. 十分なGPUメモリがあることを確認してください
+3. チャンクサイズが大きすぎるとGPUメモリ不足になる可能性があります
