@@ -31,6 +31,8 @@ pip install -e .
 
 ## 基本的な使い方
 
+### Pythonコードから使用する場合
+
 ```python
 from gpupaser.main import load_table_optimized
 
@@ -40,8 +42,29 @@ results = load_table_optimized('mytable')
 # 行数を制限して処理
 results = load_table_optimized('mytable', limit=50000)
 
+# Parquetファイルに出力
+results = load_table_optimized('mytable', limit=50000, parquet_output='output.parquet')
+
 # 結果の利用（例：NumPy配列として取得）
 first_column_data = results['column_name']
+```
+
+### コマンドラインから使用する場合
+
+`process_large_dataset.py`スクリプトを使用すると、コマンドラインから直接テーブルを処理できます：
+
+```bash
+# テーブル分析（行数、サイズ、推奨チャンクサイズの取得）
+python examples/process_large_dataset.py --table=customer --analyze
+
+# 特定行数を処理
+python examples/process_large_dataset.py --table=customer --rows=100000
+
+# Parquetファイルに出力
+python examples/process_large_dataset.py --table=customer --rows=100000 --parquet=output.parquet
+
+# チャンクサイズを指定して処理
+python examples/process_large_dataset.py --table=customer --rows=100000 --chunk-size=50000
 ```
 
 ## GPUメモリを最大限活用する方法
