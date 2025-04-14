@@ -189,6 +189,7 @@ if __name__ == "__main__":
     parser.add_argument('--rows', type=int, default=None, help='処理する行数 (デフォルト: テーブル全体)')
     parser.add_argument('--chunk-size', type=int, default=None, help='チャンクサイズ (デフォルト: 自動計算)')
     parser.add_argument('--analyze', action='store_true', help='テーブル分析のみ実行')
+    parser.add_argument('--parquet', help='Parquetファイルの出力先パス')
     
     args = parser.parse_args()
     
@@ -207,8 +208,14 @@ if __name__ == "__main__":
         else:
             total_rows = args.rows
         
-        # 複数チャンクに分けて処理
-        results = process_in_chunks(args.table, total_rows, args.chunk_size)
+        # Parquet出力の指定がある場合
+        if args.parquet:
+            print(f"Parquet出力ファイル: {args.parquet}")
+            # load_table_optimizedを使用して直接Parquet出力
+            results = load_table_optimized(args.table, args.rows, args.parquet)
+        else:
+            # 従来通りの処理（メモリ内処理のみ）
+            results = process_in_chunks(args.table, total_rows, args.chunk_size)
         
         # 結果サマリー
         if results:
