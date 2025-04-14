@@ -1,11 +1,20 @@
 """
-PostgreSQLバイナリデータの基本パース処理
+PostgreSQLバイナリデータの基本パース処理とパイプライン処理
 """
 
 import numpy as np
 from numba import njit
-from typing import Tuple
+from typing import Tuple, Dict, List, Any
+import concurrent.futures
+from queue import Queue
+import threading
+import time
+
 from gpupaser.gpu_decoder import GPUDecoder
+from gpupaser.memory_manager import allocate_gpu_buffers
+from gpupaser.utils import ColumnInfo
+from gpupaser.pg_connector import PostgresConnector
+from gpupaser.output_handler import OutputHandler
 
 # Numbaによる高速化を適用
 @njit
@@ -125,8 +134,419 @@ def parse_binary_chunk(chunk_array, header_expected=True):
     
     return np.array(field_offsets, dtype=np.int32), np.array(field_lengths, dtype=np.int32)
 
+class BinaryParser:
+    """PostgreSQLバイナリデータをパースしてカラムデータに変換するクラス"""
+    
+    def __init__(self, use_gpu=True):
+        """初期化
+        
+        Args:
+            use_gpu: GPUを使用するかどうか
+        """
+        self.gpu_decoder = GPUDecoder() if use_gpu else None
+        self.data_parser = BinaryDataParser(use_gpu=use_gpu)
+        self.use_gpu = use_gpu
+    
+    def parse_postgres_binary(self, binary_data: bytes, columns: List[ColumnInfo]) -> Dict[str, Any]:
+        """PostgreSQLバイナリデータをパースして列データに変換
+        
+        Args:
+            binary_data: PostgreSQLバイナリデータ
+            columns: カラム情報のリスト
+            
+        Returns:
+            Dict[str, Any]: カラム名をキー、値の配列を値とする辞書
+        """
+        print(f"PostgreSQLバイナリデータのパース開始: {len(binary_data)} バイト, {len(columns)} 列")
+        
+        # カラム数の取得
+        num_columns = len(columns)
+        
+        # バイナリデータをパース（フィールドの位置と長さを取得）
+        chunk_array, field_offsets, field_lengths, rows_in_chunk = self.data_parser.parse_chunk(
+            binary_data, 
+            num_columns=num_columns, 
+            max_rows=65535
+        )
+        
+        if rows_in_chunk == 0 or field_offsets is None or field_lengths is None:
+            print("データのパースに失敗しました")
+            return {}
+        
+        print(f"バイナリデータのパース完了: {rows_in_chunk}行")
+        
+        # カラムの型情報を生成
+        col_types = np.zeros(num_columns, dtype=np.int32)
+        col_lengths = np.zeros(num_columns, dtype=np.int32)
+        
+        for i, col in enumerate(columns):
+            if 'int' in col.type:
+                # 整数型
+                col_types[i] = 0
+                col_lengths[i] = 4
+            elif 'numeric' in col.type:
+                # 数値型
+                col_types[i] = 1
+                col_lengths[i] = 8
+            else:
+                # 文字列型
+                col_types[i] = 2
+                # 長さを設定（最大長が指定されている場合はそれを使用、それ以外は64）
+                col_lengths[i] = col.length if col.length is not None else 64
+        
+        # GPUバッファの割り当て
+        buffers = allocate_gpu_buffers(rows_in_chunk, num_columns, col_types, col_lengths)
+        
+        # GPUでのデコード処理
+        decoded_data = self.gpu_decoder.decode_chunk(
+            buffers, 
+            chunk_array, 
+            field_offsets, 
+            field_lengths, 
+            rows_in_chunk, 
+            columns
+        )
+        
+        if not decoded_data:
+            print("GPUデコードに失敗しました")
+            return {}
+        
+        print(f"デコード完了: {len(decoded_data)}列")
+        return decoded_data
+
+
+class PipelinedProcessor:
+    """非同期パイプラインによるPostgreSQLデータ処理クラス
+    
+    データの流れ: PostgreSQL → GPU → Parquet
+    
+    * データ取得スレッド: PostgreSQLからデータを取得し、キューに入れる
+    * GPU処理スレッド: キューからデータを取り出し、GPUで処理し、結果を出力
+    * 複数GPUに対応: 各GPUで別々のスレッドで処理
+    """
+    
+    def __init__(self, table_name, db_params, output_dir, chunk_size=100000, gpu_count=None):
+        """初期化
+        
+        Args:
+            table_name: 処理対象テーブル名
+            db_params: PostgreSQL接続パラメータ
+            output_dir: 出力ディレクトリ
+            chunk_size: チャンクサイズ（行数）
+            gpu_count: 使用するGPU数（Noneの場合は自動検出）
+        """
+        self.table_name = table_name
+        self.db_params = db_params
+        self.output_dir = output_dir
+        self.chunk_size = chunk_size
+        
+        # GPUの数を取得または設定
+        if gpu_count is None:
+            try:
+                from numba import cuda
+                self.gpu_count = len(cuda.gpus)
+                print(f"利用可能なGPU数: {self.gpu_count}")
+            except Exception as e:
+                print(f"GPU情報取得エラー: {e}")
+                self.gpu_count = 1
+        else:
+            self.gpu_count = gpu_count
+            
+        # パイプラインキュー（データ取得スレッドと処理スレッド間の通信）
+        self.queue = Queue(maxsize=self.gpu_count * 2)  # キューサイズはGPU数の2倍
+        
+        # 状態管理用の変数
+        self.total_rows = 0
+        self.processed_rows = 0
+        self.total_chunks = 0
+        self.current_chunk = 0
+        self.is_running = False
+        self.error_occurred = False
+        
+        # スレッド管理用の変数
+        self.data_thread = None
+        self.gpu_threads = []
+        
+        # 結果保存用の変数
+        self.chunk_results = {}
+        
+        # PostgreSQL接続の初期化
+        self.pg_conn = PostgresConnector(**self.db_params)
+        
+        # テーブル情報の取得
+        if not self.pg_conn.check_table_exists(table_name):
+            raise ValueError(f"テーブル {table_name} が存在しません")
+            
+        self.columns = self.pg_conn.get_table_info(table_name)
+        self.row_count = self.pg_conn.get_table_row_count(table_name)
+        
+        # 総チャンク数の計算
+        self.total_chunks = (self.row_count + self.chunk_size - 1) // self.chunk_size
+        
+        print(f"パイプライン初期化完了: テーブル={table_name}, 行数={self.row_count}, チャンク数={self.total_chunks}, GPU数={self.gpu_count}")
+        
+    def data_fetch_worker(self):
+        """データ取得スレッドの処理
+        
+        PostgreSQLからデータを取得し、キューに入れる
+        """
+        try:
+            # 各チャンクを処理
+            for chunk_idx in range(self.total_chunks):
+                if self.error_occurred:
+                    break
+                    
+                # チャンクの範囲設定
+                offset = chunk_idx * self.chunk_size
+                limit = min(self.chunk_size, self.row_count - offset)
+                
+                if limit <= 0:
+                    break
+                    
+                print(f"データ取得開始: チャンク {chunk_idx + 1}/{self.total_chunks} (オフセット: {offset}, 行数: {limit})")
+                
+                # バイナリデータの取得
+                start_time = time.time()
+                try:
+                    binary_data, _ = self.pg_conn.get_binary_data(self.table_name, limit=limit, offset=offset)
+                    fetch_time = time.time() - start_time
+                    print(f"データ取得完了: チャンク {chunk_idx}, {len(binary_data)} バイト, {fetch_time:.2f}秒")
+                    
+                    # キューにデータを入れる（処理スレッドに渡す）
+                    self.queue.put((chunk_idx, binary_data, offset, limit))
+                except Exception as e:
+                    print(f"データ取得エラー: チャンク {chunk_idx}, {e}")
+                    self.error_occurred = True
+                    # エラー通知をキューに入れる
+                    self.queue.put((chunk_idx, None, offset, limit))
+            
+            # 終了通知をキューに入れる（GPUごとに1つずつ）
+            for _ in range(self.gpu_count):
+                self.queue.put((None, None, None, None))
+                
+        except Exception as e:
+            print(f"データ取得スレッドでエラー発生: {e}")
+            self.error_occurred = True
+            import traceback
+            traceback.print_exc()
+            
+            # エラー通知をキューに入れる
+            for _ in range(self.gpu_count):
+                self.queue.put((None, None, None, None))
+    
+    def gpu_process_worker(self, gpu_id):
+        """GPU処理スレッドの処理
+        
+        Args:
+            gpu_id: 使用するGPUのID
+        """
+        try:
+            # GPUを選択
+            from numba import cuda
+            cuda.select_device(gpu_id)
+            print(f"GPU {gpu_id} を選択しました")
+            
+            # バイナリパーサーの初期化
+            parser = BinaryParser(use_gpu=True)
+            
+            # 処理ループ
+            while True:
+                if self.error_occurred:
+                    break
+                    
+                # キューからデータを取り出す
+                chunk_idx, binary_data, offset, limit = self.queue.get()
+                
+                # 終了通知を受け取ったら終了
+                if chunk_idx is None:
+                    print(f"GPU {gpu_id} 処理終了")
+                    break
+                    
+                # データがない場合はスキップ
+                if binary_data is None:
+                    print(f"チャンク {chunk_idx} のデータがありません (GPU {gpu_id})")
+                    continue
+                    
+                # 出力設定
+                output_path = f"{self.output_dir}/{self.table_name}_chunk_{chunk_idx}_gpu{gpu_id}.parquet"
+                output_handler = OutputHandler(parquet_output=output_path)
+                
+                try:
+                    # データの解析と変換
+                    start_time = time.time()
+                    print(f"チャンク {chunk_idx} の処理開始 (GPU {gpu_id})")
+                    
+                    # バイナリデータをパース
+                    result = parser.parse_postgres_binary(binary_data, self.columns)
+                    
+                    if not result:
+                        print(f"チャンク {chunk_idx} の解析に失敗しました (GPU {gpu_id})")
+                        continue
+                        
+                    # 行数の確認
+                    row_count = len(next(iter(result.values())))
+                    print(f"チャンク {chunk_idx} 解析成功: {row_count}行 (GPU {gpu_id})")
+                    
+                    # 結果をParquetに出力
+                    output_handler.process_chunk_result(result)
+                    output_handler.close()
+                    
+                    # 処理時間の計算
+                    total_time = time.time() - start_time
+                    print(f"チャンク {chunk_idx} 処理完了: {total_time:.2f}秒, {row_count / total_time:.2f} rows/sec (GPU {gpu_id})")
+                    
+                    # 処理済み行数を更新
+                    with threading.Lock():
+                        self.processed_rows += row_count
+                        self.chunk_results[chunk_idx] = {
+                            "output_path": output_path,
+                            "row_count": row_count,
+                            "processing_time": total_time
+                        }
+                        
+                except Exception as e:
+                    print(f"チャンク {chunk_idx} の処理中にエラー: {e} (GPU {gpu_id})")
+                    self.error_occurred = True
+                    import traceback
+                    traceback.print_exc()
+                
+        except Exception as e:
+            print(f"GPU {gpu_id} 処理スレッドでエラー発生: {e}")
+            self.error_occurred = True
+            import traceback
+            traceback.print_exc()
+    
+    def run(self, max_rows=None):
+        """パイプライン処理を実行
+        
+        Args:
+            max_rows: 処理する最大行数（Noneの場合は全行）
+            
+        Returns:
+            処理結果の辞書
+        """
+        # 出力ディレクトリの作成
+        import os
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # 処理行数の制限
+        if max_rows is not None:
+            self.row_count = min(max_rows, self.row_count)
+            self.total_chunks = (self.row_count + self.chunk_size - 1) // self.chunk_size
+            
+        print(f"パイプライン処理開始: {self.row_count}行, {self.total_chunks}チャンク")
+        
+        # 状態初期化
+        self.is_running = True
+        self.error_occurred = False
+        self.processed_rows = 0
+        self.chunk_results = {}
+        
+        # 時間計測開始
+        total_start_time = time.time()
+        
+        # データ取得スレッドの開始
+        self.data_thread = threading.Thread(target=self.data_fetch_worker)
+        self.data_thread.start()
+        
+        # GPU処理スレッドの開始
+        self.gpu_threads = []
+        for gpu_id in range(self.gpu_count):
+            thread = threading.Thread(target=self.gpu_process_worker, args=(gpu_id,))
+            thread.start()
+            self.gpu_threads.append(thread)
+            
+        # すべてのスレッドの終了を待つ
+        self.data_thread.join()
+        for thread in self.gpu_threads:
+            thread.join()
+            
+        # 処理時間の計算
+        total_time = time.time() - total_start_time
+        
+        # 結果の表示
+        print(f"\n=== 処理完了 ===")
+        print(f"処理行数: {self.processed_rows} / {self.row_count}")
+        print(f"処理チャンク数: {len(self.chunk_results)} / {self.total_chunks}")
+        print(f"合計処理時間: {total_time:.2f}秒")
+        print(f"処理速度: {self.processed_rows / total_time:.2f} rows/sec")
+        
+        # 状態更新
+        self.is_running = False
+        
+        return {
+            "processed_rows": self.processed_rows,
+            "total_rows": self.row_count,
+            "processed_chunks": len(self.chunk_results),
+            "total_chunks": self.total_chunks,
+            "processing_time": total_time,
+            "throughput": self.processed_rows / total_time if total_time > 0 else 0,
+            "chunk_results": self.chunk_results,
+            "error_occurred": self.error_occurred
+        }
+    
+    def combine_outputs(self, output_path=None):
+        """処理結果のParquetファイルを結合
+        
+        Args:
+            output_path: 結合後の出力パス（Noneの場合はデフォルト値）
+            
+        Returns:
+            結合結果
+        """
+        if output_path is None:
+            output_path = f"{self.output_dir}/{self.table_name}_combined.parquet"
+            
+        # 入力ファイルの検索
+        chunk_files = [result["output_path"] for result in self.chunk_results.values()]
+        
+        if not chunk_files:
+            print("結合するParquetファイルがありません")
+            return False
+            
+        print(f"Parquetファイル結合: {len(chunk_files)}ファイル")
+        
+        try:
+            # cuDFでファイルを読み込んで結合
+            import cudf
+            
+            combined_df = None
+            total_rows = 0
+            
+            for file_path in chunk_files:
+                try:
+                    df = cudf.read_parquet(file_path)
+                    if combined_df is None:
+                        combined_df = df
+                    else:
+                        combined_df = cudf.concat([combined_df, df], ignore_index=True)
+                        
+                    total_rows += len(df)
+                    print(f"  ファイル読み込み: {file_path}, {len(df)}行")
+                except Exception as e:
+                    print(f"  ファイル読み込みエラー: {file_path}, {e}")
+                    
+            # 結合したデータフレームを保存
+            if combined_df is not None:
+                combined_df.to_parquet(output_path)
+                print(f"結合ファイル保存: {output_path}, {total_rows}行")
+                return {
+                    "output_path": output_path,
+                    "row_count": total_rows
+                }
+            else:
+                print("結合に失敗しました")
+                return False
+                
+        except Exception as e:
+            print(f"結合処理中にエラー: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
 class BinaryDataParser:
-    """バイナリデータのパーサークラス"""
+    """バイナリデータの低レベルパーサークラス"""
     
     def __init__(self, use_gpu=True):
         """初期化

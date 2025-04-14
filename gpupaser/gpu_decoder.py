@@ -57,11 +57,22 @@ class GPUDecoder:
             # チャンク配列をGPUに転送
             d_chunk_array = cuda.to_device(chunk_array)
             
-            # スレッド数とブロック数を決定
-            threads_per_block = 256
-            blocks = min(1024, (array_size + threads_per_block - 1) // threads_per_block)
+            # スレッド数とブロック数を最適化（Ampereアーキテクチャ向け）
+            threads_per_block = 1024  # 最大スレッド数に設定
             
-            print(f"バイナリデータ解析: スレッド/ブロック={threads_per_block}、ブロック数={blocks}")
+            # デバイスのプロパティを取得
+            try:
+                device_props = cuda.get_current_device().get_attributes()
+                sm_count = device_props['MultiProcessorCount']
+                # A100/A30等ではSMあたり2ブロックが最適
+                blocks_per_sm = 2
+                blocks = min(2048, sm_count * blocks_per_sm)
+                print(f"GPU特性: SM数={sm_count}、使用ブロック数={blocks}")
+            except:
+                # 既定値でフォールバック
+                blocks = min(2048, (array_size + threads_per_block - 1) // threads_per_block)
+            
+            print(f"最適化されたCUDA設定: スレッド/ブロック={threads_per_block}、ブロック数={blocks}")
             
             # 共有メモリの確保（ヘッダーサイズと行位置情報用）
             header_shared_size = 2 + 100  # ヘッダーサイズ + 総行数 + 最大100行の位置

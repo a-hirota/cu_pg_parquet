@@ -10,6 +10,29 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from .utils import ColumnInfo, get_column_type, get_column_length
 
+def allocate_gpu_buffers(rows_in_chunk, num_columns, col_types, col_lengths):
+    """GPUバッファを割り当てる
+    
+    Args:
+        rows_in_chunk: チャンク内の行数
+        num_columns: カラム数
+        col_types: カラムタイプの配列
+        col_lengths: カラム長の配列
+        
+    Returns:
+        バッファ辞書
+    """
+    memory_manager = GPUMemoryManager()
+    
+    # カラム情報の作成
+    columns = []
+    for i in range(num_columns):
+        col_type = "integer" if col_types[i] == 0 else "numeric" if col_types[i] == 1 else "character varying"
+        columns.append(ColumnInfo(f"col_{i}", col_type, col_lengths[i]))
+    
+    # バッファ初期化
+    return memory_manager.initialize_device_buffers(columns, rows_in_chunk)
+
 class GPUMemoryManager:
     """GPU上のメモリリソースを管理するクラス"""
     

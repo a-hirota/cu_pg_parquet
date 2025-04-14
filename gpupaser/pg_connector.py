@@ -4,6 +4,7 @@ PostgreSQLへの接続とデータ取得モジュール
 
 import psycopg2
 import io
+import os
 from typing import List, Optional, Tuple
 
 from .utils import ColumnInfo
@@ -137,16 +138,21 @@ def get_binary_data(conn, table_name: str, limit: Optional[int] = None, offset: 
         sql_query = f"SELECT * FROM {table_name} {limit_clause} {offset_clause}"
     
     print(f"実行クエリ: {sql_query}")
-    cur.copy_expert(f"COPY ({sql_query}) TO STDOUT WITH (FORMAT binary)", buffer)
+    cur.copy_expert(f"COPY ({sql_query}) TO STDOUT (FORMAT BINARY)", buffer)
     
     # バッファをメモリに固定
     buffer_data = buffer.getvalue()
     
-    # バイナリファイルに書き込む
-    with open('output_debug.bin', 'wb') as f:
-        f.write(buffer_data)
+    # デバッグ設定に基づいてファイル出力（環境変数で制御）
+    debug_files = os.environ.get('GPUPASER_DEBUG_FILES', '1') == '1'
     
-    print("バイナリファイルに書き込みました。")
+    if debug_files:
+        # バイナリファイルに書き込む
+        with open('output_debug.bin', 'wb') as f:
+            f.write(buffer_data)
+        print("デバッグ用バイナリファイルに書き込みました。")
+    else:
+        print("デバッグファイル出力はスキップされました。")
     
     # バッファをリセットして読み取り用に準備
     buffer = io.BytesIO(buffer_data)

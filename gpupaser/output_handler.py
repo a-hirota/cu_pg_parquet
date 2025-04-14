@@ -162,16 +162,61 @@ class ParquetWriter:
         
         for col_name, values in chunk_data.items():
             # 空の値配列はスキップ
-            if not values or (hasattr(values, '__len__') and len(values) == 0):
+            if values is None or (isinstance(values, (list, tuple)) and len(values) == 0) or \
+               (isinstance(values, np.ndarray) and values.size == 0):
                 continue
                 
             # NumPy配列またはリストからPyArrow配列を作成
-            if isinstance(values, np.ndarray):
-                arr = pa.array(values)
-            elif isinstance(values, list):
-                arr = pa.array(values)
-            else:
-                continue  # 不明なデータ型はスキップ
+            try:
+                if isinstance(values, np.ndarray):
+                    arr = pa.array(values)
+                elif isinstance(values, list):
+                    # numeric型の特殊表現を処理
+                    if any(isinstance(v, str) and '@' in v for v in values if v is not None):
+                        # PostgreSQLのnumeric型特殊表現の処理
+                        converted_values = []
+                        for v in values:
+                            if v is None:
+                                converted_values.append(None)
+                            elif isinstance(v, str) and '@' in v:
+                                try:
+                                    # 数値化を試みる（簡易的な処理）
+                                    # 値が文字列形式 "[high_bits-low_bits]@scale" の場合
+                                    # 最も単純な近似として最初の数値部分を抽出
+                                    parts = v.split('@')
+                                    if len(parts) == 2:
+                                        scale = int(parts[1])
+                                        number_part = parts[0].strip('[]')
+                                        if '-' in number_part:
+                                            # 大きな数値の場合は数値化が難しいため、
+                                            # 最初の部分だけを使用
+                                            first_part = number_part.split('-')[0]
+                                            try:
+                                                val = float(first_part) / (10 ** scale)
+                                                converted_values.append(val)
+                                            except ValueError:
+                                                converted_values.append(0.0)  # デフォルト値
+                                        else:
+                                            try:
+                                                val = float(number_part) / (10 ** scale)
+                                                converted_values.append(val)
+                                            except ValueError:
+                                                converted_values.append(0.0)  # デフォルト値
+                                    else:
+                                        converted_values.append(0.0)  # デフォルト値
+                                except Exception as e:
+                                    print(f"数値変換エラー: {e} for value {v}")
+                                    converted_values.append(0.0)  # デフォルト値
+                            else:
+                                converted_values.append(v)
+                        arr = pa.array(converted_values)
+                    else:
+                        arr = pa.array(values)
+                else:
+                    continue  # 不明なデータ型はスキップ
+            except Exception as e:
+                print(f"配列変換エラー: {e} for column {col_name} with type {type(values)}")
+                continue  # エラーが発生した場合はこのカラムをスキップ
                 
             arrays.append(arr)
             names.append(col_name)
