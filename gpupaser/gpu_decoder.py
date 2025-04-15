@@ -170,6 +170,10 @@ class GPUDecoder:
         d_col_types = None
         d_col_lengths = None
         
+        # 複数CUDAストリームを初期化（データ転送と計算を並列化）
+        stream1 = cuda.stream()  # データ転送用
+        stream2 = cuda.stream()  # カーネル実行用
+        
         try:
             # メモリ転送前のGPUメモリ状態を確認
             try:
@@ -178,18 +182,10 @@ class GPUDecoder:
             except Exception as e:
                 print(f"メモリ情報取得エラー: {e}")
             
-            # デバイスに転送（通常はmemory_managerで行うが、ここではシンプルに直接処理）
-            d_chunk = cuda.to_device(chunk_array)
-            d_offsets = cuda.to_device(field_offsets)
-            d_lengths = cuda.to_device(field_lengths)
-            cuda.synchronize()  # メモリ転送の完了を待つ
-            
-            # メモリ転送後のGPUメモリ状態を確認
-            try:
-                mem_info = cuda.current_context().get_memory_info()
-                print(f"メモリ使用量 (転送後): {mem_info[0]} / {mem_info[1]} バイト")
-            except Exception as e:
-                print(f"メモリ情報取得エラー: {e}")
+            # ストリーム1を使用して非同期データ転送
+            d_chunk = cuda.to_device(chunk_array, stream=stream1)
+            d_offsets = cuda.to_device(field_offsets, stream=stream1)
+            d_lengths = cuda.to_device(field_lengths, stream=stream1)
             
             # バッファの取得
             int_buffer = buffers["int_buffer"]
@@ -202,26 +198,63 @@ class GPUDecoder:
             col_types = buffers["col_types"]
             col_lengths = buffers["col_lengths"]
             
-            # デバイスに転送
-            d_col_types = cuda.to_device(col_types)
-            d_col_lengths = cuda.to_device(col_lengths)
+            # ストリーム1でデバイスに列タイプ情報を転送
+            d_col_types = cuda.to_device(col_types, stream=stream1)
+            d_col_lengths = cuda.to_device(col_lengths, stream=stream1)
             
-            # スレッド数とブロック数の調整
-            threads_per_block = 256  # 固定スレッド数
-            blocks = min(
-                1024,  # ブロック数の制限を緩和
-                max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)  # 最小128ブロック
-            )
-            print(f"Using {blocks} blocks with {threads_per_block} threads per block")
+            # ストリーム1の転送完了を待機
+            stream1.synchronize()
+            
+            # メモリ転送後のGPUメモリ状態を確認
+            try:
+                mem_info = cuda.current_context().get_memory_info()
+                print(f"メモリ使用量 (転送後): {mem_info[0]} / {mem_info[1]} バイト")
+            except Exception as e:
+                print(f"メモリ情報取得エラー: {e}")
+            
+            # GPUプロパティに基づいた最適なスレッド・ブロック設定
+            try:
+                device_props = cuda.get_current_device().get_attributes()
+                sm_count = device_props['MultiProcessorCount']
+                max_threads_per_block = device_props.get('MaxThreadsPerBlock', 1024)
                 
-            # 統合カーネルの起動
-            decode_all_columns_kernel[blocks, threads_per_block](
+                # GPU世代に応じた最適なパラメータ設定
+                # A100/A30/A40などの新しいGPUではSMあたり最大ブロック数は16-32
+                blocks_per_sm = 16
+                
+                # スレッド数をワープサイズの倍数に設定
+                warp_size = 32
+                threads_per_block = 256  # 8ワープ（最新GPUで最適）
+                
+                # ブロック数を大幅に増加（SM数 × SMあたりブロック数）
+                # 実際のGPU性能に合わせて調整
+                blocks = min(8192, sm_count * blocks_per_sm)
+                
+                # 行数が少ない場合はブロック数を適切に削減
+                min_blocks = max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block)
+                blocks = max(min_blocks, blocks)
+                
+                print(f"GPU特性: SM数={sm_count}, 最大スレッド数={max_threads_per_block}")
+                print(f"最適化設定: スレッド数={threads_per_block}, ブロック数={blocks}")
+            except Exception as e:
+                # プロパティ取得に失敗した場合は従来の計算方法にフォールバック
+                print(f"GPUプロパティ取得エラー: {e}, デフォルト設定を使用")
+                threads_per_block = 256
+                blocks = min(2048, max(128, (rows_in_chunk + threads_per_block - 1) // threads_per_block))
+            
+            print(f"Using {blocks} blocks with {threads_per_block} threads per block")
+            
+            # ストリーム2で統合カーネルを起動
+            decode_all_columns_kernel[blocks, threads_per_block, stream2](
                 d_chunk, d_offsets, d_lengths,
                 int_buffer, num_hi_output, num_lo_output, num_scale_output,
                 str_buffer, str_null_pos, d_str_offsets,
                 d_col_types, d_col_lengths,
                 rows_in_chunk, num_cols
             )
+            
+            # カーネル実行の完了を待機
+            stream2.synchronize()
             
             # 結果を取得するための一時辞書
             results = {}

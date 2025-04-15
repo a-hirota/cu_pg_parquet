@@ -6,7 +6,7 @@ import time
 import numpy as np
 from typing import Dict, List, Optional, Any
 
-from .pg_connector import connect_to_postgres, check_table_exists, get_table_info, get_table_row_count, get_binary_data
+from .pg_connector import connect_to_postgres, check_table_exists, get_table_info, get_table_row_count, get_binary_data, get_query_column_info
 from .binary_parser import BinaryDataParser
 from .memory_manager import GPUMemoryManager
 from .gpu_decoder import GPUDecoder
@@ -355,10 +355,16 @@ class PgGpuProcessor:
                 print("列情報を取得できませんでした")
                 return None
                 
-            # カラム情報を仮作成（型情報なし）
-            columns = []
-            for i in range(num_cols):
-                columns.append(ColumnInfo(f"col_{i}", "text", 256))  # デフォルトは文字列型と仮定
+            # PostgreSQLメタデータAPIを使用して正確なカラム型情報を取得
+            columns = get_query_column_info(self.conn, query)
+            
+            # カラム情報が取得できない場合はフォールバック
+            if not columns:
+                print("PostgreSQLメタデータからカラム情報を取得できませんでした。デフォルト設定を使用します。")
+                # デフォルトのカラム情報を作成（すべて文字列型と仮定）
+                columns = []
+                for i in range(num_cols):
+                    columns.append(ColumnInfo(f"col_{i}", "text", 256))  # デフォルトは文字列型と仮定
                 
             # GPUバッファの初期化
             buffers = self.memory_manager.initialize_device_buffers(columns, rows_in_chunk)
@@ -389,6 +395,145 @@ class PgGpuProcessor:
             print(f"クエリ処理中にエラー: {e}")
             return None
             
+    def process_custom_query(self, query: str, output_file: Optional[str] = None):
+        """カスタムSQLクエリを実行し、結果をGPUで処理してParquetファイルに出力する
+        
+        Args:
+            query: 実行するSQLクエリ
+            output_file: Parquet出力ファイルパス（Noneの場合は出力なし）
+            
+        Returns:
+            処理結果（dictまたはDataFrame）
+        """
+        print(f"カスタムSQLクエリの実行: {query}")
+        start_time = time.time()
+        
+        # テーブル情報と行数の取得
+        buffer_data, buffer = get_binary_data(
+            self.conn,
+            table_name="", 
+            query=query
+        )
+        
+        # バッファが空の場合
+        if len(buffer_data) == 0:
+            print("クエリ結果が空です")
+            return None
+        
+        # まずCPUで簡易パースして列数とタイプを推定
+        try:
+            parser = BinaryDataParser(use_gpu=False)
+            chunk_array, field_offsets, field_lengths, rows_in_chunk = parser.parse_chunk(
+                buffer_data,
+                max_chunk_size=len(buffer_data),
+                max_rows=10000  # 十分な行数を指定
+            )
+            
+            if rows_in_chunk == 0:
+                print("有効な行がありません")
+                return None
+                
+            # 最初の行から列数を推定
+            if rows_in_chunk > 0:
+                # フィールド数をカウント
+                field_count = 0
+                for i in range(min(100, len(field_lengths))):
+                    if field_lengths[i] != 0:
+                        field_count += 1
+                    else:
+                        break
+                        
+                # 先頭行のフィールド数から推定
+                num_cols = field_count
+            else:
+                num_cols = 0
+            
+            if num_cols == 0:
+                print("列情報を取得できませんでした")
+                return None
+            
+            # 行数を確認
+            print(f"クエリ結果: 約{rows_in_chunk}行")
+            
+            # PostgreSQLメタデータAPIを使用して正確なカラム型情報を取得
+            columns = get_query_column_info(self.conn, query)
+            
+            # カラム情報が取得できない場合はフォールバック
+            if not columns:
+                print("PostgreSQLメタデータからカラム情報を取得できませんでした。デフォルト設定を使用します。")
+                # デフォルトのカラム情報を作成（すべて文字列型と仮定）
+                columns = []
+                for i in range(num_cols):
+                    columns.append(ColumnInfo(f"col_{i}", "text", 256))  # デフォルトは文字列型と仮定
+                
+            # GPUバッファの初期化
+            buffers = self.memory_manager.initialize_device_buffers(columns, rows_in_chunk)
+            
+            # 出力ハンドラの設定（Parquet出力用）
+            query_output_handler = OutputHandler(output_file)
+            
+            # GPUでデコード
+            try:
+                print(f"GPUデコード開始: クエリ結果（{rows_in_chunk}行）")
+                
+                # GPUメモリ管理
+                import gc
+                gc.collect()
+                from numba import cuda
+                cuda.synchronize()
+                
+                # カラム情報をデバイスに転送
+                d_col_types = self.memory_manager.transfer_to_device(buffers["col_types"], np.int32)
+                d_col_lengths = self.memory_manager.transfer_to_device(buffers["col_lengths"], np.int32)
+                
+                # デコード処理
+                chunk_results = self.gpu_decoder.decode_chunk(
+                    buffers,
+                    chunk_array,
+                    field_offsets,
+                    field_lengths,
+                    rows_in_chunk,
+                    columns
+                )
+                
+                print(f"GPUデコード完了: {time.time() - start_time:.3f}秒")
+                
+                # Parquet出力の処理
+                if output_file:
+                    print(f"Parquetファイルに出力中: {output_file}")
+                    query_output_handler.process_chunk_result(chunk_results)
+                    query_output_handler.print_summary()
+                    print(f"Parquetファイル出力完了: {output_file}")
+                
+                return chunk_results
+                
+            except Exception as e:
+                print(f"GPUデコード中にエラー: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            finally:
+                # GPUリソースのクリーンアップ
+                cleanup_dict = {
+                    "d_col_types": d_col_types,
+                    "d_col_lengths": d_col_lengths
+                }
+                self.memory_manager.cleanup_buffers(cleanup_dict)
+                self.memory_manager.cleanup_buffers(buffers)
+                
+                # GPU同期とメモリ解放
+                from numba import cuda
+                cuda.synchronize()
+                import gc
+                gc.collect()
+                
+        except Exception as e:
+            print(f"クエリ処理中にエラー: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def close(self):
         """リソースの解放"""
         if hasattr(self, 'conn') and self.conn:

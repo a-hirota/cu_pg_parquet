@@ -11,17 +11,10 @@ import argparse
 import numpy as np
 import sys
 import os
+import re
 import concurrent.futures
 from typing import Dict, List, Optional, Tuple
 import glob
-
-# Rayによる並列処理のためのインポート（--parallelフラグ時のみ使用）
-try:
-    import ray
-    RAY_AVAILABLE = True
-except ImportError:
-    RAY_AVAILABLE = False
-    print("警告: Rayがインストールされていません。マルチGPU並列処理には必要です。")
 
 # モジュールパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -38,57 +31,29 @@ from gpupaser.utils import ColumnInfo, ChunkConfig
 from gpupaser.pg_connector import connect_to_postgres, get_table_info, get_table_row_count
 
 
-# Rayでの分散処理用の関数定義
-@ray.remote(num_gpus=1)
-def process_chunk_ray(table_name: str, chunk_size: int, offset: int, output_file: str = None,
-                      dbname: str = 'postgres', user: str = 'postgres',
-                      password: str = 'postgres', host: str = 'localhost'):
-    """Rayリモートタスクとして1チャンクを処理
+def extract_table_from_sql(sql_query):
+    """SQLクエリからテーブル名を抽出する
     
     Args:
-        table_name: 処理するテーブル名
-        chunk_size: 処理する行数
-        offset: 開始行オフセット
-        output_file: Parquet出力ファイルパス（Noneの場合はメモリ内処理のみ）
-        dbname, user, password, host: DB接続情報
-    
+        sql_query: SQLクエリ文字列
+        
     Returns:
-        処理結果（チャンク情報と出力ファイルパス）
+        抽出されたテーブル名、見つからない場合は"query_result"
     """
-    print(f"GPU処理開始: {table_name}テーブル {offset}～{offset+chunk_size}行")
-    start_time = time.time()
+    # 正規表現でFROM句のテーブル名を探す
+    # 基本的なSELECT文のパターン
+    match = re.search(r'from\s+([^\s,\(\)]+)', sql_query.lower())
     
-    # GPUプロセッサの初期化
-    processor = PgGpuProcessor(
-        dbname=dbname, 
-        user=user, 
-        password=password, 
-        host=host,
-        parquet_output=output_file
-    )
+    if match:
+        return match.group(1)
     
-    try:
-        # 指定範囲のデータを処理
-        result = processor.process_table_chunk(table_name, chunk_size, offset, output_file)
-        
-        processing_time = time.time() - start_time
-        print(f"GPU処理完了: オフセット={offset} 行数={chunk_size} 時間={processing_time:.3f}秒")
-        
-        return {
-            "output_file": output_file,
-            "rows_processed": chunk_size,
-            "processing_time": processing_time,
-            "offset": offset,
-            "result": result if output_file is None else None  # メモリモードの場合のみ結果を返す
-        }
-    except Exception as e:
-        print(f"チャンク処理エラー ({offset}～{offset+chunk_size}): {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-    finally:
-        # リソース解放
-        processor.close()
+    # ALIASを使っているケース (e.g. "FROM table_name AS t")
+    match = re.search(r'from\s+([^\s,\(\)]+)\s+as\s+', sql_query.lower())
+    if match:
+        return match.group(1)
+    
+    # 見つからなければデフォルト名
+    return "query_result"
 
 
 def process_in_chunks(table_name, total_rows, chunk_size=None):
@@ -193,165 +158,6 @@ def process_in_chunks(table_name, total_rows, chunk_size=None):
         pass
     
     return all_results
-
-
-def process_parallel_ray(table_name, total_rows, gpus=2, chunk_size=None, output_dir=None, output_format='memory'):
-    """Rayを使用した並列処理の実行
-    
-    Args:
-        table_name: 処理するテーブル名
-        total_rows: 処理する合計行数
-        gpus: 使用するGPU数（0=利用可能な全て）
-        chunk_size: チャンクサイズ（指定しない場合は自動計算）
-        output_dir: 出力ディレクトリ（Parquet形式のみ）
-        output_format: 出力形式（'parquet'または'memory'）
-        
-    Returns:
-        結果辞書（メモリ形式）またはファイルパスのリスト（Parquet形式）
-    """
-    if not RAY_AVAILABLE:
-        raise RuntimeError("Rayがインストールされていません。pip install rayでインストールしてください。")
-    
-    # Ray初期化
-    ray.init()
-    
-    try:
-        # 利用可能なGPU数の確認
-        available_gpus = int(ray.available_resources().get('GPU', 0))
-        if available_gpus == 0:
-            raise RuntimeError("利用可能なGPUがありません。Ray環境でCUDAが正しく設定されているか確認してください。")
-            
-        # 使用するGPU数の決定
-        if gpus == 0:
-            num_gpus = available_gpus  # 0の場合は全GPU使用
-        else:
-            num_gpus = min(gpus, available_gpus)  # 利用可能数を超えないように
-        
-        print(f"Ray初期化完了: 利用可能なGPU: {available_gpus} 使用するGPU: {num_gpus}")
-        
-        # データベース接続して情報取得
-        conn = connect_to_postgres()
-        columns = get_table_info(conn, table_name)
-        conn.close()
-        
-        # チャンクサイズとチャンク数の計算
-        if chunk_size is None:
-            # 最適なチャンクサイズを計算
-            memory_manager = GPUMemoryManager()
-            chunk_size = memory_manager.calculate_optimal_chunk_size(columns, total_rows)
-            chunk_size = min(chunk_size, 65000)  # 安全のため制限
-        
-        # チャンク数の計算（最低でもGPU数分）
-        num_chunks = max(num_gpus, (total_rows + chunk_size - 1) // chunk_size)
-        
-        # GPUあたりの最適なチャンク数を決定
-        chunks_per_gpu = (num_chunks + num_gpus - 1) // num_gpus
-        
-        # チャンクサイズを再計算（チャンク数が決定した後）
-        chunk_size = (total_rows + num_chunks - 1) // num_chunks
-        
-        print(f"並列処理設定: {num_gpus}GPU使用, チャンクサイズ={chunk_size}行, チャンク数={num_chunks}個")
-        print(f"GPU当たりチャンク数: {chunks_per_gpu}")
-        
-        # 出力ディレクトリの設定（Parquet形式の場合）
-        if output_format == 'parquet':
-            if output_dir is None:
-                output_dir = f"{table_name}_output"
-            os.makedirs(output_dir, exist_ok=True)
-            print(f"Parquet出力ディレクトリ: {output_dir}")
-        
-        # タスク実行
-        tasks = []
-        start_time = time.time()
-        
-        for chunk_idx in range(num_chunks):
-            offset = chunk_idx * chunk_size
-            # 最後のチャンクは残りすべて
-            current_chunk_size = min(chunk_size, total_rows - offset)
-            if current_chunk_size <= 0:
-                break
-                
-            # Parquet出力用のファイルパス設定
-            output_file = None
-            if output_format == 'parquet':
-                output_file = os.path.join(output_dir, f"{table_name}_chunk_{chunk_idx}.parquet")
-            
-            # Rayタスクとして実行
-            task = process_chunk_ray.remote(
-                table_name, 
-                current_chunk_size, 
-                offset, 
-                output_file
-            )
-            tasks.append(task)
-        
-        # すべての結果を待機
-        print(f"全{len(tasks)}タスクを実行中...")
-        results = ray.get(tasks)
-        
-        # 全体の処理時間を計算
-        total_time = time.time() - start_time
-        total_rows_processed = sum(r["rows_processed"] for r in results)
-        
-        print(f"\n=== 並列処理完了 ===")
-        print(f"処理行数: {total_rows_processed}")
-        print(f"総処理時間: {total_time:.3f}秒")
-        print(f"スループット: {total_rows_processed/total_time:.1f}行/秒")
-        
-        # GPU別の処理統計
-        gpu_stats = {}
-        for i, result in enumerate(results):
-            gpu_id = i % num_gpus  # 簡易的にGPU IDを割り当て
-            if gpu_id not in gpu_stats:
-                gpu_stats[gpu_id] = {"count": 0, "time": 0, "rows": 0}
-            gpu_stats[gpu_id]["count"] += 1
-            gpu_stats[gpu_id]["time"] += result["processing_time"]
-            gpu_stats[gpu_id]["rows"] += result["rows_processed"]
-        
-        print("\n=== GPU別統計 ===")
-        for gpu_id, stats in gpu_stats.items():
-            print(f"GPU #{gpu_id}: {stats['count']}チャンク処理 {stats['rows']}行 {stats['time']:.3f}秒 " +
-                  f"({stats['rows']/stats['time']:.1f}行/秒)")
-        
-        # 出力形式に基づいた結果の返却
-        if output_format == 'parquet':
-            # Parquet出力の場合はファイルパスのリストを返す
-            output_files = [r["output_file"] for r in results if r["output_file"] is not None]
-            print(f"\n出力ファイル ({len(output_files)}個):")
-            for f in output_files:
-                if os.path.exists(f):
-                    file_size = os.path.getsize(f) / (1024 * 1024)  # MBに変換
-                    print(f"  {f} ({file_size:.2f} MB)")
-            return output_files
-        else:
-            # メモリ出力の場合は結果を統合
-            all_results = {}
-            
-            # 結果のマージ（オフセット順）
-            sorted_results = sorted(results, key=lambda r: r["offset"])
-            
-            for result_info in sorted_results:
-                chunk_result = result_info.get("result", {})
-                if not chunk_result:
-                    continue
-                    
-                if not all_results:
-                    # 初回はそのまま結果を保存
-                    all_results = chunk_result
-                else:
-                    # 2回目以降は結果を連結
-                    for col_name, data in chunk_result.items():
-                        if isinstance(data, np.ndarray):
-                            # NumPy配列の場合はconcatenate
-                            all_results[col_name] = np.concatenate([all_results[col_name], data])
-                        elif isinstance(data, list):
-                            # リストの場合はextend
-                            all_results[col_name].extend(data)
-            
-            return all_results
-    finally:
-        # Ray終了
-        ray.shutdown()
 
 
 def analyze_table(table_name):
@@ -462,7 +268,8 @@ def display_data_sample(results, sample_rows=5):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='PostgreSQL 大規模データ処理')
-    parser.add_argument('--table', required=True, help='処理するテーブル名')
+    parser.add_argument('--table', help='処理するテーブル名')
+    parser.add_argument('--sql', help='カスタムSQLクエリ (--tableより優先)')
     parser.add_argument('--rows', type=int, default=None, help='処理する行数 (デフォルト: テーブル全体)')
     parser.add_argument('--chunk-size', type=int, default=None, help='チャンクサイズ (デフォルト: 自動計算)')
     parser.add_argument('--analyze', action='store_true', help='テーブル分析のみ実行')
@@ -473,100 +280,108 @@ if __name__ == "__main__":
                        help='メモリ出力時のサンプル表示行数')
     parser.add_argument('--no-debug-files', action='store_true',
                        help='デバッグ用一時ファイル出力を無効化（.binファイル等）')
-    parser.add_argument('--gpus', type=int, default=2,
-                       help='並列処理時に使用するGPU数（デフォルト: 2、利用可能なすべてを使用する場合は0）')
-    parser.add_argument('--parallel', action='store_true',
-                       help='Rayを使ったマルチGPU並列処理を有効化')
+    parser.add_argument('--quiet', action='store_true',
+                       help='出力を最小限にする（実行時間や結果のみ表示）')
+    parser.add_argument('--gpuid', type=int, help='使用する特定のGPU ID（他の全てのGPUは無視されます）')
     
     args = parser.parse_args()
     
+    # 特定のGPU IDが指定された場合、環境変数を設定
+    if args.gpuid is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpuid)
+        print(f"GPU {args.gpuid} を使用します (CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']})")
+    
+    # SQLクエリが指定された場合、テーブル名を抽出
+    if args.sql and not args.table:
+        args.table = extract_table_from_sql(args.sql)
+        print(f"SQLクエリからテーブル名を推測: {args.table}")
+    
+    # テーブル名とSQLクエリの整合性チェック
+    if not args.table and not args.sql:
+        parser.error("--table または --sql オプションを指定してください")
+    
+    # analyzeフラグがある場合はテーブル分析のみ実行
     if args.analyze:
-        # テーブル分析のみ
+        if not args.table:
+            parser.error("テーブル分析には --table オプションが必要です")
         analyze_table(args.table)
     else:
         # 実際の処理
         start_time = time.time()
         
-        # 行数を取得（指定がなければテーブル全体）
-        if args.rows is None:
-            conn = connect_to_postgres()
-            total_rows = get_table_row_count(conn, args.table)
-            conn.close()
+        # SQLクエリが指定された場合は行数の取得方法を変更
+        if args.sql:
+            # SQLクエリを使用して行数を推定
+            # 行数が指定されていればそれを使用、なければ大きめの値を設定
+            if args.rows is not None:
+                total_rows = args.rows
+            else:
+                # SQLクエリの場合はデフォルト行数を大きめに設定
+                total_rows = 1000000  # 100万行を想定
+            print(f"SQLクエリを使用: {args.sql}")
+            print(f"推定行数: {total_rows}行")
         else:
-            total_rows = args.rows
+            # テーブル全体を処理
+            if not args.table:
+                parser.error("テーブル名またはSQLクエリを指定してください")
+                
+            # 行数を取得（指定がなければテーブル全体）
+            if args.rows is None:
+                conn = connect_to_postgres()
+                total_rows = get_table_row_count(conn, args.table)
+                conn.close()
+            else:
+                total_rows = args.rows
         
         # デバッグファイル制御オプションの設定
         os.environ['GPUPASER_DEBUG_FILES'] = '0' if args.no_debug_files else '1'
         
-        # 並列処理かシングルGPU処理かを決定
-        if args.parallel:
-            # 並列処理モード（Rayを使用）
-            print(f"マルチGPU並列処理モード (GPU数: {args.gpus})")
-            
-            output_dir = None
-            if args.output_format == 'parquet':
-                # 出力先の決定
-                if args.parquet:
-                    # パスが直接指定された場合はディレクトリとして使用
-                    if os.path.isdir(args.parquet):
-                        output_dir = args.parquet
-                    else:
-                        # ディレクトリパスを抽出
-                        output_dir = os.path.dirname(args.parquet)
-                        if not output_dir:
-                            output_dir = '.'
-                else:
-                    # デフォルトのディレクトリ
-                    output_dir = f"{args.table}_parallel_output"
-            
-            # 並列処理実行
-            results = process_parallel_ray(
-                args.table, 
-                total_rows, 
-                args.gpus, 
-                args.chunk_size, 
-                output_dir, 
-                args.output_format
-            )
-            
-            # 結果サマリー出力（メモリモードの場合）
-            if args.output_format == 'memory' and results:
-                print("\n=== 結果サマリー ===")
-                for col_name, data in results.items():
-                    print(f"{col_name}: {type(data).__name__} 長さ={len(data)}")
-                
-                # サンプルデータの表示
-                display_data_sample(results, args.sample_rows)
-        
+        # 出力制御オプションの設定
+        if args.quiet:
+            # 標準出力を一時的に抑制する設定
+            os.environ['GPUPASER_QUIET'] = '1'
+            # 最小限の情報のみ表示
+            print("実行モード: GPU処理")
         else:
-            # 単一GPU処理モード
+            os.environ['GPUPASER_QUIET'] = '0'
             print("シングルGPU処理モード")
+        
+        # 出力先の決定
+        parquet_path = None
+        if args.output_format == 'parquet':
+            if args.parquet:
+                parquet_path = args.parquet
+            else:
+                # デフォルトのパス
+                parquet_path = f"{args.table}_output.parquet"
             
-            # 出力先の決定
-            parquet_path = None
-            if args.output_format == 'parquet':
-                if args.parquet:
-                    parquet_path = args.parquet
-                else:
-                    # デフォルトのパス
-                    parquet_path = f"{args.table}_output.parquet"
-                
-                print(f"Parquet出力ファイル: {parquet_path}")
-            
-            # 処理の実行
+            print(f"Parquet出力ファイル: {parquet_path}")
+        
+        # 処理の実行
+        if args.sql:
+            # SQLクエリを使用した処理（カスタムクエリモード）
+            processor = PgGpuProcessor(parquet_output=parquet_path)
+            try:
+                print(f"カスタムSQLクエリを実行: {args.sql}")
+                # カスタムクエリで処理
+                results = processor.process_custom_query(args.sql, parquet_path)
+            finally:
+                processor.close()
+        else:
+            # 通常のテーブル処理
             if parquet_path:
                 # Parquet出力モード
                 results = load_table_optimized(args.table, args.rows, parquet_path)
             else:
                 # メモリ出力モード
                 results = process_in_chunks(args.table, total_rows, args.chunk_size)
+        
+        # 結果サマリー
+        if results:
+            print("\n=== 結果サマリー ===")
+            for col_name, data in results.items():
+                print(f"{col_name}: {type(data).__name__} 長さ={len(data)}")
             
-            # 結果サマリー
-            if results:
-                print("\n=== 結果サマリー ===")
-                for col_name, data in results.items():
-                    print(f"{col_name}: {type(data).__name__} 長さ={len(data)}")
-                
-                # メモリ出力モードの場合はサンプルデータを表示
-                if args.output_format == 'memory':
-                    display_data_sample(results, args.sample_rows)
+            # メモリ出力モードの場合はサンプルデータを表示
+            if args.output_format == 'memory':
+                display_data_sample(results, args.sample_rows)

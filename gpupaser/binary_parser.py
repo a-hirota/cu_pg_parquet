@@ -16,6 +16,9 @@ from gpupaser.utils import ColumnInfo
 from gpupaser.pg_connector import PostgresConnector
 from gpupaser.output_handler import OutputHandler
 
+# 循環インポートを避けるため、main.pyからのインポートを削除
+# from gpupaser.main import PgGpuProcessor
+
 # Numbaによる高速化を適用
 @njit
 def parse_binary_chunk(chunk_array, header_expected=True):

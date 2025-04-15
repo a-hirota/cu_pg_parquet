@@ -3,10 +3,19 @@ GPUメモリの割り当てと管理を担当するモジュール
 """
 
 import numpy as np
-import cupy as cp
 from numba import cuda
 from numba.cuda.cudadrv.driver import CudaAPIError
 from typing import List, Dict, Any, Optional, Tuple
+
+# CuPyを条件付きでインポート（インストールされていない場合はスキップ）
+try:
+    import cupy as cp
+    HAS_CUPY = True
+except ImportError:
+    # CuPyがない場合はNoneとして扱う
+    cp = None
+    HAS_CUPY = False
+    print("警告: CuPyがインストールされていません。一部の機能が制限されます。")
 
 from .utils import ColumnInfo, get_column_type, get_column_length
 
@@ -181,21 +190,21 @@ class GPUMemoryManager:
             
             # メモリ割り当ての順序を調整
             if num_int_cols > 0:
-                int_buffer = cuda.to_device(np.zeros(int_buffer_size, dtype=np.int32))
+                int_buffer = cuda.to_device(np.zeros(int(int_buffer_size), dtype=np.int32))
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
                 
-                # numeric型用のバッファ
-                num_hi_output = cuda.device_array(chunk_size * num_int_cols, dtype=np.int64)
-                num_lo_output = cuda.device_array(chunk_size * num_int_cols, dtype=np.int64)
-                num_scale_output = cuda.device_array(num_int_cols, dtype=np.int32)
+                # numeric型用のバッファ (タプルで形状を指定)
+                num_hi_output = cuda.device_array((int(chunk_size * num_int_cols),), dtype=np.int64)
+                num_lo_output = cuda.device_array((int(chunk_size * num_int_cols),), dtype=np.int64)
+                num_scale_output = cuda.device_array((int(num_int_cols),), dtype=np.int32)
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
                 
             if num_str_cols > 0:
                 # 文字列バッファを一括で確保
-                str_buffer = cuda.to_device(np.zeros(total_str_buffer_size, dtype=np.uint8))
+                str_buffer = cuda.to_device(np.zeros(int(total_str_buffer_size), dtype=np.uint8))
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
                 
-                str_null_pos = cuda.to_device(np.zeros(str_null_pos_size, dtype=np.int32))
+                str_null_pos = cuda.to_device(np.zeros(int(str_null_pos_size), dtype=np.int32))
                 cuda.synchronize()  # メモリ割り当ての完了を待つ
                 
                 # 文字列オフセット情報をGPUへ転送

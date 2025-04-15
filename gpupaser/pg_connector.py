@@ -110,6 +110,65 @@ def get_table_row_count(conn, table_name: str) -> int:
     print(f"Table {table_name} has {row_count} rows")  # デバッグ出力
     return row_count
 
+def get_query_column_info(conn, query: str) -> List[ColumnInfo]:
+    """SQLクエリの結果セットのカラム情報を取得
+    
+    Args:
+        conn: PostgreSQL接続オブジェクト
+        query: 実行するSQLクエリ
+    
+    Returns:
+        カラム情報のリスト (ColumnInfoオブジェクト)
+    """
+    try:
+        # カラム情報を取得するためのサブクエリを作成
+        # LIMIT 0を使って結果を返さずにメタデータだけを取得
+        metadata_query = f"""
+        SELECT * FROM ({query}) AS query_result LIMIT 0
+        """
+        
+        cur = conn.cursor()
+        cur.execute(metadata_query)
+        
+        # カラム情報を取得
+        columns = []
+        for col in cur.description:
+            col_name = col.name
+            # PostgreSQLの型OIDをPythonの型に変換
+            # 参考: https://www.postgresql.org/docs/current/datatype-oid.html
+            col_type_oid = col.type_code
+            
+            # 一般的なPostgreSQL型OIDを確認
+            # 23: int4 (integer), 21: int2 (smallint), 20: int8 (bigint)
+            # 1700: numeric, 25: text, 1043: varchar
+            if col_type_oid in (20, 21, 23):  # 整数型
+                col_type = "integer"
+                col_length = 4
+            elif col_type_oid == 1700:  # numeric
+                col_type = "numeric"
+                col_length = 8
+            elif col_type_oid in (25, 1043):  # 文字列型
+                col_type = "character varying"
+                col_length = 256  # デフォルト長さ
+            else:
+                # その他の型は文字列として扱う
+                col_type = "text"
+                col_length = 1024
+                
+            columns.append(ColumnInfo(col_name, col_type, col_length))
+        
+        # 詳細なログ出力
+        print(f"クエリのカラム情報を取得: {len(columns)}カラム")
+        for col in columns:
+            print(f"  - {col.name}: {col.type}" + (f" (長さ: {col.length})" if col.length else ""))
+            
+        return columns
+        
+    except Exception as e:
+        print(f"クエリのカラム情報取得中にエラー: {e}")
+        # エラーの場合は空のリストを返す
+        return []
+
 def get_binary_data(conn, table_name: str, limit: Optional[int] = None, offset: Optional[int] = None, query: Optional[str] = None) -> Tuple[bytes, io.BytesIO]:
     """テーブルのバイナリデータを取得
     

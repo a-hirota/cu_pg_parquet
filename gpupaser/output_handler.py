@@ -150,17 +150,32 @@ class ParquetWriter:
     def write_chunk(self, chunk_data):
         """チャンクデータをParquetファイルに追加"""
         import pyarrow as pa
+        import os
         
         # 空のデータチェック
         if not chunk_data or not any(len(values) > 0 for values in chunk_data.values()):
             print("書き込み可能なデータがありません")
             return
-            
+        
+        # ファイルが既に存在する場合は、既存のスキーマを確認
+        existing_schema = None
+        if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 0:
+            try:
+                import pyarrow.parquet as pq
+                existing_schema = pq.read_schema(self.output_path)
+                print(f"既存のParquetファイルスキーマを使用: {self.output_path}")
+            except Exception as e:
+                print(f"既存スキーマの読み取りエラー: {e}")
+        
         # チャンクデータからPyArrowテーブルを作成
         arrays = []
         names = []
         
-        for col_name, values in chunk_data.items():
+        # 一貫したスキーマを確保するためにカラム名をソート
+        sorted_columns = sorted(chunk_data.keys())
+        
+        for col_name in sorted_columns:
+            values = chunk_data[col_name]
             # 空の値配列はスキップ
             if values is None or (isinstance(values, (list, tuple)) and len(values) == 0) or \
                (isinstance(values, np.ndarray) and values.size == 0):
@@ -234,8 +249,41 @@ class ParquetWriter:
             self.initialize_writer(chunk_data)
         
         # チャンクを追加
-        self.writer.write_table(table)
-        self.records_written += len(arrays[0])  # 最初の配列の長さを使用
+        try:
+            self.writer.write_table(table)
+            self.records_written += len(arrays[0])  # 最初の配列の長さを使用
+        except ValueError as e:
+            # スキーマ不一致エラーの場合
+            if "Table schema does not match" in str(e):
+                print(f"スキーマ不一致エラー: {e}")
+                print("スキーマを修正してリトライします...")
+                
+                # 既存のファイルを上書き
+                print(f"同じファイルパスで再作成します: {self.output_path}")
+                
+                # 既存ライターを閉じる
+                import pyarrow.parquet as pq
+                if self.writer:
+                    self.writer.close()
+                
+                # 既存ファイルが存在する場合は削除
+                import os
+                if os.path.exists(self.output_path):
+                    try:
+                        os.remove(self.output_path)
+                        print(f"既存ファイルを削除しました: {self.output_path}")
+                    except Exception as e:
+                        print(f"ファイル削除エラー: {e}")
+                
+                # 新しいライターを初期化（同じパスに）
+                self.writer = pq.ParquetWriter(self.output_path, table.schema)
+                
+                # 改めて書き込み
+                self.writer.write_table(table)
+                self.records_written += len(arrays[0])
+            else:
+                # その他のエラーはそのまま伝播
+                raise
         
     def close(self):
         """ライターを閉じる"""
