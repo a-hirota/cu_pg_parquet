@@ -582,22 +582,48 @@ class BinaryDataParser:
         if num_columns is not None:
             num_columns = np.int32(num_columns)
         
+        # ヘッダーチェックとスキップ（最初のチャンクの場合のみ）
+        header_pos = 0
+        if start_row == 0 and len(chunk_array) >= 11:
+            # PostgreSQLバイナリフォーマットヘッダーの検出
+            if chunk_array[0] == 80 and chunk_array[1] == 71:  # 'P', 'G'
+                header_pos = 11  # 基本ヘッダー長
+                
+                # フラグとヘッダー拡張をスキップ
+                if len(chunk_array) >= header_pos + 8:
+                    flags = np.int32((chunk_array[header_pos] << 24) | (chunk_array[header_pos+1] << 16) | \
+                                    (chunk_array[header_pos+2] << 8) | chunk_array[header_pos+3])
+                    header_pos += 4
+                    ext_len = np.int32((chunk_array[header_pos] << 24) | (chunk_array[header_pos+1] << 16) | \
+                                      (chunk_array[header_pos+2] << 8) | chunk_array[header_pos+3])
+                    header_pos += 4
+                    
+                    if ext_len > 0 and len(chunk_array) >= header_pos + ext_len:
+                        header_pos += ext_len
+                        
+                print(f"ヘッダーを検出: 長さ={header_pos}バイト")
+        
         # フィールド数が不明の場合は検出を試みる
-        if num_columns is None and len(chunk_array) >= 2:
-            # 型安全なキャスト
-            b0 = np.int32(chunk_array[0])
-            b1 = np.int32(chunk_array[1])
+        if num_columns is None and len(chunk_array) >= header_pos + 2:
+            # ヘッダー後の位置から列数を検出（重要）
+            b0 = np.int32(chunk_array[header_pos])
+            b1 = np.int32(chunk_array[header_pos + 1])
             detected_columns = np.int32((b0 << 8) | b1)
+            
+            # デバッグ情報を表示
+            if header_pos < len(chunk_array) - 10:
+                dump_bytes = [f"{b:02x}" for b in chunk_array[header_pos:header_pos+10]]
+                print(f"ヘッダー後の先頭10バイト: {' '.join(dump_bytes)}")
             
             if 0 < detected_columns < 100:  # 妥当なカラム数範囲チェック
                 num_columns = detected_columns
                 print(f"検出したカラム数: {num_columns}")
             else:
                 print(f"警告: 検出したカラム数 {detected_columns} が範囲外です。デフォルト値を使用します。")
-                num_columns = np.int32(8)  # customerテーブルのデフォルト値
+                num_columns = np.int32(17)  # lineorderテーブルのデフォルト値
         elif num_columns is None:
             print(f"警告: カラム数を検出できません。デフォルト値を使用します。")
-            num_columns = np.int32(8)  # customerテーブルのデフォルト値
+            num_columns = np.int32(17)  # lineorderテーブルのデフォルト値
         
         # 開始行と最大行数をnp.int32に変換
         start_row = np.int32(start_row)

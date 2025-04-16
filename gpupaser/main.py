@@ -16,7 +16,7 @@ from .utils import ChunkConfig, ColumnInfo
 class PgGpuProcessor:
     """PostgreSQLデータGPU処理の統合クラス"""
     
-    def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost', parquet_output=None):
+    def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost', parquet_output=None, block_size=None, thread_count=None):
         """初期化"""
         self.conn = connect_to_postgres(dbname, user, password, host)
         self.memory_manager = GPUMemoryManager()
@@ -24,6 +24,8 @@ class PgGpuProcessor:
         self.gpu_decoder = GPUDecoder()
         self.output_handler = OutputHandler(parquet_output)
         self.parquet_output = parquet_output
+        self.block_size = block_size
+        self.thread_count = thread_count
         
     def process_table_chunk(self, table_name: str, chunk_size: int, offset: int = 0, output_file: Optional[str] = None):
         """テーブルの特定チャンク範囲のみを処理
@@ -150,32 +152,30 @@ class PgGpuProcessor:
             print(f"チャンク処理でエラー: {e}")
             raise
     
-    def process_table(self, table_name: str, limit: Optional[int] = None):
-        """テーブル全体を処理（複数チャンク対応）"""
-        # テーブルの存在確認
-        if not check_table_exists(self.conn, table_name):
-            raise ValueError(f"Table {table_name} does not exist")
+    def _process_data_in_chunks(self, buffer_data, columns, total_rows, output_file=None):
+        """データをチャンクに分けて処理する共通ロジック
         
-        # テーブル情報と行数の取得
-        columns = get_table_info(self.conn, table_name)
-        if not columns:
-            raise ValueError(f"No columns found in table {table_name}")
-        
-        total_rows = min(get_table_row_count(self.conn, table_name), limit if limit else float('inf'))
-        
+        Args:
+            buffer_data: PostgreSQLから取得したバイナリデータ
+            columns: カラム情報のリスト
+            total_rows: 処理する合計行数
+            output_file: Parquet出力ファイルパス
+            
+        Returns:
+            処理結果の辞書
+        """
         # 最適なチャンクサイズを計算
+        num_columns = len(columns)
         optimal_chunk_size = self.memory_manager.calculate_optimal_chunk_size(columns, total_rows)
         
-        # チャンク設定の初期化（最適なチャンクサイズを使用）
+        # チャンク設定の初期化
         chunk_config = ChunkConfig(total_rows, optimal_chunk_size)
         print(f"GPUメモリに基づく最適チャンクサイズ: {chunk_config.rows_per_chunk}行")
         
-        # バイナリデータの取得
-        start_time = time.time()
-        buffer_data, buffer = get_binary_data(self.conn, table_name, limit)
+        # 出力ハンドラの設定
+        output_handler = OutputHandler(output_file)
         
         # 複数チャンク処理のための変数初期化
-        num_columns = len(columns)
         all_results = {}  # 全チャンクの結果を集約する辞書
         processed_rows = 0
         chunk_count = 0
@@ -193,9 +193,8 @@ class PgGpuProcessor:
             
             try:
                 # バイナリデータの解析（特定行からスタート）
-                # 解析の際、常に全データを使用し、チャンクサイズに制限を設ける
                 chunk_array, field_offsets, field_lengths, rows_in_chunk = self.parser.parse_chunk(
-                    buffer_data, 
+                    buffer_data,
                     max_chunk_size=1024*1024,
                     num_columns=num_columns,
                     start_row=processed_rows,  # 開始行を指定
@@ -205,100 +204,80 @@ class PgGpuProcessor:
                 if rows_in_chunk == 0:
                     print("これ以上処理する行がありません")
                     break
-                    
+                
                 print(f"処理中: {rows_in_chunk}行")
-            except Exception as e:
-                print(f"チャンク {chunk_count} のバイナリデータ解析でエラー: {e}")
-                # 最初のチャンクでエラーなら致命的
-                if chunk_count == 1:
-                    raise
-                # それ以外は処理済みの行だけを返す
-                print(f"これまでに処理した {processed_rows} 行の結果を返します")
-                break
-            
-            # GPUで解析
-            d_col_types = None
-            d_col_lengths = None
-            d_chunk = None  # バイナリデータ用バッファ参照
-            d_offsets = None  # オフセット用バッファ参照
-            d_lengths = None  # 長さ用バッファ参照
-            
-            try:
-                print(f"GPUデコード開始: チャンク {chunk_count}（{rows_in_chunk}行）")
                 
-                # チャンク間でのGCを促進
-                import gc
-                gc.collect()
-                from numba import cuda
-                cuda.synchronize()
-                
-                # デバイスに転送
+                # GPUデコード処理
                 d_col_types = self.memory_manager.transfer_to_device(buffers["col_types"], np.int32)
                 d_col_lengths = self.memory_manager.transfer_to_device(buffers["col_lengths"], np.int32)
                 
-                # デコード処理
                 chunk_results = self.gpu_decoder.decode_chunk(
-                    buffers, 
-                    chunk_array, 
-                    field_offsets, 
-                    field_lengths, 
-                    rows_in_chunk, 
+                    buffers,
+                    chunk_array,
+                    field_offsets,
+                    field_lengths,
+                    rows_in_chunk,
                     columns
                 )
                 
-                print(f"GPUデコード完了: チャンク {chunk_count}")
+                # Parquet出力処理
+                if output_file:
+                    output_handler.process_chunk_result(chunk_results)
                 
                 # 結果の集約
                 if not all_results:
-                    # 初回は結果をそのまま格納
+                    # 初回は結果をそのまま使用
                     all_results = chunk_results
                 else:
                     # 2回目以降は結果を連結
                     for col_name, data in chunk_results.items():
                         if isinstance(data, np.ndarray):
-                            # NumPy配列はconcatenateで連結
                             all_results[col_name] = np.concatenate([all_results[col_name], data])
                         elif isinstance(data, list):
-                            # リストはextendで連結
                             all_results[col_name].extend(data)
                 
-                # 処理済み行数の更新
+                # 処理済み行数を更新
                 processed_rows += rows_in_chunk
                 
             except Exception as e:
-                print(f"チャンク {chunk_count} 処理中にエラー発生: {e}")
-                raise
-                
+                print(f"チャンク {chunk_count} の処理中にエラー: {e}")
+                import traceback
+                traceback.print_exc()
             finally:
                 # GPUリソースのクリーンアップ
                 cleanup_dict = {
-                    "d_col_types": d_col_types, 
+                    "d_col_types": d_col_types,
                     "d_col_lengths": d_col_lengths,
-                    "d_chunk": d_chunk,
-                    "d_offsets": d_offsets,
-                    "d_lengths": d_lengths
                 }
                 self.memory_manager.cleanup_buffers(cleanup_dict)
                 self.memory_manager.cleanup_buffers(buffers)
-                
-                # 明示的にGPU同期を取り、全リソースが解放されたことを確認
-                from numba import cuda
-                cuda.synchronize()
-                
-                # チャンク処理後のガベージコレクションを促進
-                import gc
-                gc.collect()
         
-        # 全チャンクの処理完了
-        print(f"\n全 {processed_rows} 行の処理が完了しました（全{total_rows}行中）")
+        # 出力ハンドラのサマリー表示
+        if output_file:
+            output_handler.print_summary()
         
-        # 結果の処理
-        self.output_handler.process_chunk_result(all_results)
-        final_results = self.output_handler.print_summary()
-        print(f"Processing completed in {time.time() - start_time:.3f}s")
-        
-        return final_results
-    
+        return all_results
+
+    def process_table(self, table_name: str, limit: Optional[int] = None):
+        """テーブル全体を処理（複数チャンク対応）"""
+        # テーブルの存在確認
+        if not check_table_exists(self.conn, table_name):
+            raise ValueError(f"Table {table_name} does not exist")
+
+        # テーブル情報と行数の取得
+        columns = get_table_info(self.conn, table_name)
+        if not columns:
+            raise ValueError(f"No columns found in table {table_name}")
+
+        total_rows = min(get_table_row_count(self.conn, table_name), limit if limit else float('inf'))
+
+        # バイナリデータの取得
+        start_time = time.time()
+        buffer_data, buffer = get_binary_data(self.conn, table_name, limit)
+
+        # 共通のチャンク処理ロジックを呼び出し
+        return self._process_data_in_chunks(buffer_data, columns, total_rows, self.parquet_output)
+            
     def process_query(self, query: str):
         """SQLクエリを実行し結果を処理する
         
@@ -397,44 +376,44 @@ class PgGpuProcessor:
             
     def process_custom_query(self, query: str, output_file: Optional[str] = None):
         """カスタムSQLクエリを実行し、結果をGPUで処理してParquetファイルに出力する
-        
+
         Args:
             query: 実行するSQLクエリ
             output_file: Parquet出力ファイルパス（Noneの場合は出力なし）
-            
+
         Returns:
             処理結果（dictまたはDataFrame）
         """
         print(f"カスタムSQLクエリの実行: {query}")
         start_time = time.time()
-        
+
         # テーブル情報と行数の取得
         buffer_data, buffer = get_binary_data(
             self.conn,
-            table_name="", 
+            table_name="",
             query=query
         )
-        
+
         # バッファが空の場合
         if len(buffer_data) == 0:
             print("クエリ結果が空です")
             return None
-        
-        # まずCPUで簡易パースして列数とタイプを推定
+
+        # まずCPUで簡易パースして列数とタイプを推定（少数行のみ）
         try:
             parser = BinaryDataParser(use_gpu=False)
-            chunk_array, field_offsets, field_lengths, rows_in_chunk = parser.parse_chunk(
+            chunk_array, field_offsets, field_lengths, rows_in_sample = parser.parse_chunk(
                 buffer_data,
                 max_chunk_size=len(buffer_data),
-                max_rows=10000  # 十分な行数を指定
+                max_rows=100  # メタデータ推定用に少数行のみ処理（10000→100に変更）
             )
-            
-            if rows_in_chunk == 0:
+
+            if rows_in_sample == 0:
                 print("有効な行がありません")
                 return None
-                
+
             # 最初の行から列数を推定
-            if rows_in_chunk > 0:
+            if rows_in_sample > 0:
                 # フィールド数をカウント
                 field_count = 0
                 for i in range(min(100, len(field_lengths))):
@@ -442,22 +421,19 @@ class PgGpuProcessor:
                         field_count += 1
                     else:
                         break
-                        
+
                 # 先頭行のフィールド数から推定
                 num_cols = field_count
             else:
                 num_cols = 0
-            
+
             if num_cols == 0:
                 print("列情報を取得できませんでした")
                 return None
-            
-            # 行数を確認
-            print(f"クエリ結果: 約{rows_in_chunk}行")
-            
+
             # PostgreSQLメタデータAPIを使用して正確なカラム型情報を取得
             columns = get_query_column_info(self.conn, query)
-            
+
             # カラム情報が取得できない場合はフォールバック
             if not columns:
                 print("PostgreSQLメタデータからカラム情報を取得できませんでした。デフォルト設定を使用します。")
@@ -465,69 +441,29 @@ class PgGpuProcessor:
                 columns = []
                 for i in range(num_cols):
                     columns.append(ColumnInfo(f"col_{i}", "text", 256))  # デフォルトは文字列型と仮定
-                
-            # GPUバッファの初期化
-            buffers = self.memory_manager.initialize_device_buffers(columns, rows_in_chunk)
-            
-            # 出力ハンドラの設定（Parquet出力用）
-            query_output_handler = OutputHandler(output_file)
-            
-            # GPUでデコード
+
+            # --- 以下が変更部分 ---
+            # 全行数を取得または推定
+            # SQLからの正確な行数が取得できない場合は、バッファサイズから概算
             try:
-                print(f"GPUデコード開始: クエリ結果（{rows_in_chunk}行）")
-                
-                # GPUメモリ管理
-                import gc
-                gc.collect()
-                from numba import cuda
-                cuda.synchronize()
-                
-                # カラム情報をデバイスに転送
-                d_col_types = self.memory_manager.transfer_to_device(buffers["col_types"], np.int32)
-                d_col_lengths = self.memory_manager.transfer_to_device(buffers["col_lengths"], np.int32)
-                
-                # デコード処理
-                chunk_results = self.gpu_decoder.decode_chunk(
-                    buffers,
-                    chunk_array,
-                    field_offsets,
-                    field_lengths,
-                    rows_in_chunk,
-                    columns
-                )
-                
-                print(f"GPUデコード完了: {time.time() - start_time:.3f}秒")
-                
-                # Parquet出力の処理
-                if output_file:
-                    print(f"Parquetファイルに出力中: {output_file}")
-                    query_output_handler.process_chunk_result(chunk_results)
-                    query_output_handler.print_summary()
-                    print(f"Parquetファイル出力完了: {output_file}")
-                
-                return chunk_results
-                
+                # ROW_NUMBERを使った行数取得クエリ
+                count_query = f"SELECT COUNT(*) FROM ({query}) AS subquery"
+                count_cursor = self.conn.cursor()
+                count_cursor.execute(count_query)
+                total_rows = count_cursor.fetchone()[0]
+                count_cursor.close()
             except Exception as e:
-                print(f"GPUデコード中にエラー: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-            
-            finally:
-                # GPUリソースのクリーンアップ
-                cleanup_dict = {
-                    "d_col_types": d_col_types,
-                    "d_col_lengths": d_col_lengths
-                }
-                self.memory_manager.cleanup_buffers(cleanup_dict)
-                self.memory_manager.cleanup_buffers(buffers)
-                
-                # GPU同期とメモリ解放
-                from numba import cuda
-                cuda.synchronize()
-                import gc
-                gc.collect()
-                
+                print(f"行数の正確な取得に失敗: {e}")
+                # バッファサイズとサンプルから行数を概算
+                avg_row_size = len(buffer_data) / rows_in_sample if rows_in_sample > 0 else 1000
+                total_rows = int(len(buffer_data) / avg_row_size) + 1
+                print(f"概算行数: {total_rows}行")
+
+            print(f"クエリ結果: 推定{total_rows}行")
+
+            # 共通のチャンク処理ロジックを呼び出し
+            return self._process_data_in_chunks(buffer_data, columns, total_rows, output_file)
+
         except Exception as e:
             print(f"クエリ処理中にエラー: {e}")
             import traceback

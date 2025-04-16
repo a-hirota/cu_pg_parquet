@@ -312,12 +312,15 @@ if __name__ == "__main__":
         # SQLクエリが指定された場合は行数の取得方法を変更
         if args.sql:
             # SQLクエリを使用して行数を推定
-            # 行数が指定されていればそれを使用、なければ大きめの値を設定
             if args.rows is not None:
                 total_rows = args.rows
             else:
-                # SQLクエリの場合はデフォルト行数を大きめに設定
-                total_rows = 1000000  # 100万行を想定
+                import re
+                m = re.search(r'\blimit\s+(\d+)', args.sql, re.IGNORECASE)
+                if m:
+                    total_rows = int(m.group(1))
+                else:
+                    total_rows = 1000000  # 100万行を想定
             print(f"SQLクエリを使用: {args.sql}")
             print(f"推定行数: {total_rows}行")
         else:
@@ -360,7 +363,10 @@ if __name__ == "__main__":
         # 処理の実行
         if args.sql:
             # SQLクエリを使用した処理（カスタムクエリモード）
-            processor = PgGpuProcessor(parquet_output=parquet_path)
+            block_size = int(os.environ.get("GPUPASER_BLOCK_SIZE", "256"))
+            thread_count = int(os.environ.get("GPUPASER_THREAD_COUNT", "1024"))
+            processor = PgGpuProcessor(parquet_output=parquet_path, block_size=block_size, thread_count=thread_count)
+            print(f"GPU設定: ブロックサイズ={block_size}, スレッド数={thread_count}")
             try:
                 print(f"カスタムSQLクエリを実行: {args.sql}")
                 # カスタムクエリで処理
