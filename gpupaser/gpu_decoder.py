@@ -5,10 +5,11 @@ GPU上でのPostgreSQLバイナリデータデコーダー
 import numpy as np
 from numba import cuda
 import math
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 # 分割したモジュールをインポート
-from gpupaser.cuda_kernels import parse_binary_format_kernel
+from gpupaser.cuda_kernels import parse_binary_format_kernel, parse_binary_format_kernel_one_row
 from gpupaser.data_processors import decode_all_columns_kernel
 
 class GPUDecoder:
@@ -22,7 +23,7 @@ class GPUDecoder:
         except Exception as e:
             print(f"CUDA初期化エラー: {e}")
     
-    def parse_binary_data(self, chunk_array, rows_in_chunk, num_cols):
+    def parse_binary_data(self, chunk_array, rows_in_chunk, num_cols, use_one_row_per_thread=True):
         """
         PostgreSQLバイナリデータをGPUで解析する
         
@@ -30,12 +31,15 @@ class GPUDecoder:
             chunk_array: バイナリデータ配列 (numpyバイト配列)
             rows_in_chunk: 予想される行数 (エラー検出用)
             num_cols: 1行あたりのカラム数（データと不一致の場合は動的検出）
+            use_one_row_per_thread: 1スレッド1行の最適化カーネルを使用するか
             
         Returns:
             field_offsets: フィールド位置の配列
             field_lengths: フィールド長の配列
             actual_rows: 実際に解析できた行数
         """
+        # 全体の開始時間計測
+        total_start_time = time.perf_counter()
         try:
             rows_in_chunk_val = int(rows_in_chunk)
             num_cols_val = int(num_cols)
@@ -49,12 +53,34 @@ class GPUDecoder:
                 print(f"データから検出した列数: {detected_cols}（指定された列数と異なる: {num_cols_val}）")
                 num_cols_val = detected_cols
             
-            print(f"GPUでバイナリデータ解析を開始: {array_size}バイト、予想行数={rows_in_chunk_val}、列数={num_cols_val}")
+            print(f"GPUでバイナリデータ解析を開始: {array_size}バイト、予想行数={rows_in_chunk_val}、列数={num_cols_val}", flush=True)
+            import binascii
+            print("DEBUG: First 128 bytes of binary data:", flush=True)
+            print(binascii.hexlify(chunk_array[:128]), flush=True)
             
+            # メモリ確保開始時間計測
+            alloc_start = time.perf_counter()
+            
+            print("=== GPUメモリ確保開始 ===", flush=True)
             total_fields = rows_in_chunk_val * num_cols_val
             d_field_offsets = cuda.device_array(total_fields, dtype=np.int32)
             d_field_lengths = cuda.device_array(total_fields, dtype=np.int32)
+            
+            # メモリ確保時間計測
+            alloc_time = time.perf_counter() - alloc_start
+            print(f"[TIMING] GPUメモリ確保時間: {alloc_time*1000:.2f} ms", flush=True)
+            
+            # データ転送開始時間計測
+            transfer_start = time.perf_counter()
+            print("=== GPU転送開始 ===", flush=True)
+            
             d_chunk_array = cuda.to_device(chunk_array)
+            
+            # データ転送時間計測
+            transfer_time = time.perf_counter() - transfer_start
+            transfer_size = chunk_array.nbytes / (1024*1024)  # MB単位
+            print(f"[TIMING] データ転送時間 (CPU→GPU): {transfer_time*1000:.2f} ms", flush=True)
+            print(f"[TIMING] 転送速度: {transfer_size/transfer_time:.2f} MB/s", flush=True)
             
             # スレッド・ブロック設定
             import os
@@ -82,7 +108,8 @@ class GPUDecoder:
                 # 環境変数の値またはデフォルト値を使用
                 blocks = block_size
             
-            print(f"最適化されたCUDA設定: スレッド/ブロック={threads_per_block}、ブロック数={blocks}")
+            print(f"最適化されたCUDA設定: スレッド/ブロック={threads_per_block}、ブロック数={blocks}", flush=True)
+            print("=== カーネル実行開始 ===", flush=True)
             
             # 共有メモリの確保
             header_shared_size = 2 + 100  # ヘッダーサイズ + 行数情報 + 追加スペース
@@ -94,17 +121,72 @@ class GPUDecoder:
             header_shared = np.zeros(header_shared_size, dtype=np.int32)
             
             try:
-                # パースカーネル起動
-                parse_binary_format_kernel[blocks, threads_per_block](
-                    d_chunk_array, d_field_offsets, d_field_lengths, 
-                    np.int32(num_cols_val), d_header_shared
-                )
+                # カーネル実行時間計測用イベント
+                start_event = cuda.event()
+                end_event = cuda.event()
+                
+                # カーネル実行開始時間計測
+                kernel_start = time.perf_counter()
+                
+                # イベント記録開始
+                start_event.record()
+                
+                # カーネルタイプによって異なるカーネルを使用
+                if use_one_row_per_thread:
+                    print("=== 1スレッド1行モードで実行 ===", flush=True)
+                    # ヘッダーサイズ取得（ヘッダー検出から取得）
+                    header_size = self._detect_header_size(chunk_array)
+                    
+                    # 1スレッド1行カーネル用にスレッド数を行数に合わせて調整
+                    rows_threads = rows_in_chunk_val
+                    blocks_needed = (rows_threads + threads_per_block - 1) // threads_per_block
+                    blocks = min(blocks, blocks_needed * 2)  # 余裕を持たせる
+                    
+                    # カーネル起動（1スレッド1行モード）
+                    # 空の行位置配列を作成（Noneの代わり）
+                    empty_row_positions = cuda.device_array(0, dtype=np.int32)
+                    
+                    # GPU実行に必要なすべてのパラメータを設定
+                    parse_binary_format_kernel_one_row[blocks, threads_per_block](
+                        d_chunk_array, d_field_offsets, d_field_lengths, 
+                        np.int32(num_cols_val), np.int32(header_size), empty_row_positions
+                    )
+                else:
+                    print("=== 従来のモードで実行 ===", flush=True)
+                    # 従来の（複数行担当）カーネル起動
+                    parse_binary_format_kernel[blocks, threads_per_block](
+                        d_chunk_array, d_field_offsets, d_field_lengths, 
+                        np.int32(num_cols_val), d_header_shared
+                    )
+                
+                # イベント記録終了
+                end_event.record()
+                end_event.synchronize()
+                
+                # カーネル実行時間（CUDA イベントベース）
+                kernel_time_ms = cuda.event_elapsed_time(start_event, end_event)
+                print(f"[TIMING] カーネル実行時間 (CUDA計測): {kernel_time_ms:.2f} ms", flush=True)
+                
                 cuda.synchronize()
+                
+                # カーネル実行時間（Python計測）
+                kernel_time = time.perf_counter() - kernel_start
+                print(f"[TIMING] カーネル実行時間 (Python計測): {kernel_time*1000:.2f} ms", flush=True)
+                
+                # 結果転送開始時間計測
+                result_transfer_start = time.perf_counter()
+                print("=== 結果転送開始 ===", flush=True)
                 
                 # 結果をホストにコピー
                 field_offsets = d_field_offsets.copy_to_host()
                 field_lengths = d_field_lengths.copy_to_host()
                 header_shared = d_header_shared.copy_to_host()
+                
+                # 結果転送時間計測
+                result_transfer_time = time.perf_counter() - result_transfer_start
+                result_size = (field_offsets.nbytes + field_lengths.nbytes + header_shared.nbytes) / (1024*1024)  # MB単位
+                print(f"[TIMING] 結果転送時間 (GPU→CPU): {result_transfer_time*1000:.2f} ms", flush=True)
+                print(f"[TIMING] 結果転送速度: {result_size/result_transfer_time:.2f} MB/s", flush=True)
             except Exception as kernel_err:
                 print(f"カーネル実行中のエラー: {kernel_err}")
                 import traceback
@@ -131,12 +213,50 @@ class GPUDecoder:
             valid_rows = max_possible_rows
             valid_fields = np.sum(field_offsets[:valid_rows * num_cols_val] > 0)
             
+            # 全体処理時間計測
+            total_time = time.perf_counter() - total_start_time
+            
             print(f"バイナリデータ解析完了: 有効行数={valid_rows}, フィールド数={valid_fields}")
+            print(f"[TIMING] 全体処理時間: {total_time*1000:.2f} ms")
+            print(f"[TIMING] 処理速度: {valid_rows/total_time:.2f} rows/sec")
             
             return field_offsets[:valid_rows * num_cols_val], field_lengths[:valid_rows * num_cols_val], valid_rows
         except Exception as e:
             print(f"GPUデータ解析中にエラー: {e}")
             return np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+    
+    def _detect_header_size(self, data):
+        """
+        バイナリデータからPostgreSQLヘッダーサイズを検出する
+        
+        Args:
+            data: バイナリデータ配列
+            
+        Returns:
+            ヘッダーサイズ（バイト数）
+        """
+        try:
+            if len(data) < 11:
+                return 0
+                
+            # PostgreSQLバイナリフォーマットのヘッダー検出
+            header_size = 11
+            
+            # フラグと拡張ヘッダー長を処理
+            if len(data) >= header_size + 8:
+                header_size += 4  # フラグ
+                ext_len = (data[header_size] << 24) | (data[header_size + 1] << 16) | \
+                          (data[header_size + 2] << 8) | data[header_size + 3]
+                header_size += 4  # 拡張長
+                
+                if ext_len > 0 and len(data) >= header_size + ext_len:
+                    header_size += ext_len
+            
+            print(f"検出したヘッダーサイズ: {header_size}バイト")
+            return header_size
+        except Exception as e:
+            print(f"ヘッダーサイズ検出中にエラー: {e}")
+            return 19  # PostgreSQLのデフォルトヘッダーサイズ（基本+フラグ+拡張長）
     
     def _detect_column_count_from_data(self, data):
         """
@@ -199,6 +319,8 @@ class GPUDecoder:
         """
         チャンクをデコードする
         
+        性能計測付きのデコード処理
+        
         Args:
             buffers: GPUバッファ辞書
             chunk_array: バイナリデータ配列
@@ -223,6 +345,9 @@ class GPUDecoder:
         stream2 = cuda.stream()
         
         try:
+            # データ転送開始時間計測
+            transfer_start = time.perf_counter()
+            
             try:
                 mem_info = cuda.current_context().get_memory_info()
                 print(f"メモリ使用量 (転送前): {mem_info[0]} / {mem_info[1]} バイト")
@@ -232,6 +357,11 @@ class GPUDecoder:
             d_chunk = cuda.to_device(chunk_array, stream=stream1)
             d_offsets = cuda.to_device(field_offsets, stream=stream1)
             d_lengths = cuda.to_device(field_lengths, stream=stream1)
+            
+            # データ転送時間計測
+            transfer_time = time.perf_counter() - transfer_start
+            transfer_size = (chunk_array.nbytes + field_offsets.nbytes + field_lengths.nbytes) / (1024*1024)
+            print(f"[TIMING] データ転送時間 (CPU→GPU): {transfer_time*1000:.2f} ms 【{transfer_size:.2f} MB, {transfer_size/transfer_time:.2f} MB/s】")
             
             int_buffer = buffers["int_buffer"]
             num_hi_output = buffers["num_hi_output"]
@@ -281,6 +411,16 @@ class GPUDecoder:
             
             print(f"Using {blocks} blocks with {threads_per_block} threads per block")
             
+            # カーネル実行時間計測用イベント
+            start_event = cuda.event()
+            end_event = cuda.event()
+            
+            # カーネル実行開始時間計測
+            kernel_start = time.perf_counter()
+            
+            # イベント記録開始
+            start_event.record()
+            
             decode_all_columns_kernel[blocks, threads_per_block, stream2](
                 d_chunk, d_offsets, d_lengths,
                 int_buffer, num_hi_output, num_lo_output, num_scale_output,
@@ -289,7 +429,18 @@ class GPUDecoder:
                 rows_in_chunk, num_cols
             )
             
+            # イベント記録終了
+            end_event.record()
+            end_event.synchronize()
+            
+            # カーネル実行時間（CUDA イベントベース）
+            kernel_time_ms = cuda.event_elapsed_time(start_event, end_event)
+            
             stream2.synchronize()
+            
+            # カーネル実行時間（Python計測）
+            kernel_time = time.perf_counter() - kernel_start
+            print(f"[TIMING] デコードカーネル実行時間: {kernel_time*1000:.2f} ms (CUDA計測: {kernel_time_ms:.2f} ms)")
             
             results = {}
             int_col_idx = 0

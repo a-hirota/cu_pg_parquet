@@ -71,11 +71,11 @@ def parse_binary_chunk(chunk_array, header_expected=True):
         if pos < 100:  # 先頭部分のみ詳細表示
             print(f"位置 {pos}: フィールド数={num_fields}, バイト値=[{chunk_array[pos]},{chunk_array[pos+1]}]")
         
-        if num_fields == 0xFFFF:  # ファイル終端 (-1)
-            print(f"ファイル終端マーカーを検出: pos={pos}")
+        if num_fields == -1:  # np.int16(0xFFFF) は -1 になる
+            print(f"ファイル終端マーカー(0xFFFF)を検出: pos={pos}")
             break
             
-        if num_fields <= 0 or num_fields > 100:  # 異常値チェック
+        if num_fields <= 0 or num_fields > 200:  # 異常値チェック
             print(f"警告: 異常なフィールド数 {num_fields} (位置={pos})")
             break
             

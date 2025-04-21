@@ -23,23 +23,23 @@ CUDA_VISIBLE_DEVICES=0 python process_large_dataset.py \
 PID1=$!
 echo "GPU 0で処理を開始 (PID: $PID1)"
 
-# GPU 1で後半のデータを処理
-CUDA_VISIBLE_DEVICES=1 python process_large_dataset.py \
-  --gpuid 1 \
-  --sql "SELECT * FROM lineorder  limit 600000 offset 60000" \
-  --output-format parquet \
-  --parquet lineorder_multigpu_output/lineorder_part2.parquet \
-  --no-debug-files \
-  --quiet &
+# # GPU 1で後半のデータを処理
+# CUDA_VISIBLE_DEVICES=1 python process_large_dataset.py \
+#   --gpuid 1 \
+#   --sql "SELECT * FROM lineorder  limit 600000 offset 60000" \
+#   --output-format parquet \
+#   --parquet lineorder_multigpu_output/lineorder_part2.parquet \
+#   --no-debug-files \
+#   --quiet &
   
-PID2=$!
-echo "GPU 1で処理を開始 (PID: $PID2)"
+# PID2=$!
+# echo "GPU 1で処理を開始 (PID: $PID2)"
 
 # すべての処理の完了を待機
 wait $PID1
 echo "GPU 0の処理が完了"
-wait $PID2
-echo "GPU 1の処理が完了"
+# wait $PID2
+# echo "GPU 1の処理が完了"
 
 # 終了時間の記録と経過時間の計算
 END_TIME=$(date +%s.%N)

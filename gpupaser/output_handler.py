@@ -119,11 +119,25 @@ class ParquetWriter:
         """データからPyArrowスキーマを作成"""
         import pyarrow as pa
         
+        # 列名に基づいて、テキストカラムのリストを作成（典型的なテキストカラム名）
+        # PostgreSQLのCOPYコマンドから出力される典型的な文字列カラム
+        typical_text_columns = [
+            "_date", "date", "commit_date", "shipmode", "priority", "orderpriority", 
+            "shippriority", "comment", "name", "address", "city", "state", "country"
+        ]
+        
         # カラム名とデータ型からスキーマを構築
         fields = []
         for col_name, values in data.items():
+            # 強制的に文字列型として扱うべきカラムかどうかを判断
+            is_text_column = any(text_word in col_name.lower() for text_word in typical_text_columns)
+            
             # データ型に基づいてPyArrow型を決定
-            if isinstance(values, np.ndarray):
+            if is_text_column:
+                # 明示的に文字列型として指定
+                pa_type = pa.string()
+                print(f"カラム {col_name} を明示的に文字列型として処理します")
+            elif isinstance(values, np.ndarray):
                 if np.issubdtype(values.dtype, np.integer):
                     pa_type = pa.int32()
                 elif np.issubdtype(values.dtype, np.floating):
@@ -171,6 +185,12 @@ class ParquetWriter:
         arrays = []
         names = []
         
+        # 列名に基づいて、テキストカラムのリストを作成（典型的なテキストカラム名）
+        typical_text_columns = [
+            "_date", "date", "commit_date", "shipmode", "priority", "orderpriority", 
+            "shippriority", "comment", "name", "address", "city", "state", "country"
+        ]
+        
         # 一貫したスキーマを確保するためにカラム名をソート
         sorted_columns = sorted(chunk_data.keys())
         
@@ -180,10 +200,24 @@ class ParquetWriter:
             if values is None or (isinstance(values, (list, tuple)) and len(values) == 0) or \
                (isinstance(values, np.ndarray) and values.size == 0):
                 continue
+            
+            # 強制的に文字列型として扱うべきカラムかどうかを判断
+            is_text_column = any(text_word in col_name.lower() for text_word in typical_text_columns)
                 
             # NumPy配列またはリストからPyArrow配列を作成
             try:
-                if isinstance(values, np.ndarray):
+                if is_text_column:
+                    # 明示的に空の文字列配列を作成してNULLではなく''を使用する
+                    # NULL値はそのままNULLに変換されるよう処理
+                    clean_values = []
+                    for v in values:
+                        if v is None:
+                            clean_values.append(None)  # NULLはそのまま
+                        else:
+                            clean_values.append(str(v))  # 文字列に変換
+                    arr = pa.array(clean_values, type=pa.string())
+                    print(f"カラム {col_name} を明示的に文字列配列として処理しました - 要素数:{len(clean_values)}")
+                elif isinstance(values, np.ndarray):
                     arr = pa.array(values)
                 elif isinstance(values, list):
                     # numeric型の特殊表現を処理

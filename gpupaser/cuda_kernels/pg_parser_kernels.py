@@ -6,6 +6,7 @@ import os
 import numpy as np
 from numba import cuda
 import math
+import time
 
 # 環境変数から最適化パラメータを取得
 MAX_THREADS = int(os.environ.get('GPUPASER_MAX_THREADS', '1024'))
@@ -92,6 +93,111 @@ def atomic_add_global(array, idx, val):
     # 古い実装（compare_and_swapを使用）だとNumba 0.56以降でエラーが発生するため、
     # 単純なatomic.addを使用する実装に変更
     return cuda.atomic.add(array, idx, val)
+
+@cuda.jit
+def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths, 
+                                        num_cols, header_size, row_start_positions=None):
+    """
+    PostgreSQLバイナリデータを直接GPU上で解析するカーネル（1スレッド1行の最適化版）
+    
+    Args:
+        chunk_array: バイナリデータ配列
+        field_offsets: フィールド位置の出力配列
+        field_lengths: フィールド長の出力配列
+        num_cols: 1行あたりのカラム数
+        header_size: ヘッダーサイズ（バイト）
+        row_start_positions: 各行の開始位置配列（オプション、提供されない場合は計算）
+    """
+    # スレッド情報 - 各スレッドが1行だけを担当
+    thread_id = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+    
+    # 有効な行数範囲チェック（field_offsetsの行数に基づく）
+    max_rows = field_offsets.size // num_cols
+    if thread_id >= max_rows:
+        return  # 範囲外のスレッドは早期リターン
+    
+    # 行の開始位置を決定
+    row_start = 0
+    if row_start_positions is not None:
+        # 事前計算された行開始位置を使用（最も効率的）
+        if thread_id < len(row_start_positions):
+            row_start = row_start_positions[thread_id]
+        else:
+            return  # 範囲外
+    else:
+        # 事前計算されていない場合、単純にヘッダー後からスキャンする
+        # 注：実際のプロダクション環境では、この部分は事前計算を推奨
+        valid_start = header_size
+        
+        # 前の行をスキップ
+        for i in range(thread_id):
+            # 行開始位置から先頭2バイトでフィールド数を取得
+            if valid_start + 2 > len(chunk_array):
+                return  # データの終端
+            
+            num_fields = (np.int32(chunk_array[valid_start]) << 8) | np.int32(chunk_array[valid_start + 1])
+            if num_fields == 0xFFFF:  # 終端マーカー
+                return
+                
+            # 各フィールドをスキップ
+            valid_start += 2  # フィールド数フィールドをスキップ
+            
+            for field_idx in range(num_fields):
+                if valid_start + 4 > len(chunk_array):
+                    return
+                    
+                field_len = decode_int32_be(chunk_array, valid_start)
+                valid_start += 4
+                
+                if field_len != -1 and field_len >= 0:
+                    valid_start += field_len
+        
+        row_start = valid_start
+    
+    # この時点で row_start は現在のスレッドが処理すべき行の開始位置
+    pos = row_start
+    
+    # フィールド数を確認
+    if pos + 2 > len(chunk_array):
+        return  # データの終端
+        
+    num_fields = (np.int32(chunk_array[pos]) << 8) | np.int32(chunk_array[pos + 1])
+    
+    # 終端マーカーをチェック
+    if num_fields == 0xFFFF:
+        return
+        
+    # フィールド数が期待値と異なる場合
+    if num_fields != num_cols:
+        # オプション：管理用の共有メモリにエラー情報を書き込む
+        # ここではスキップして次の行に進む
+        return
+    
+    pos += 2  # フィールド数フィールドをスキップ
+    
+    # この行のすべてのフィールドを処理
+    for field_idx in range(num_cols):
+        if pos + 4 > len(chunk_array):
+            return  # データの終端
+            
+        # フィールド長を取得
+        field_len = decode_int32_be(chunk_array, pos)
+        pos += 4
+        
+        # 出力インデックス - この行のこのフィールドの位置
+        out_idx = thread_id * num_cols + field_idx
+        
+        # 結果を保存
+        if field_len == -1:  # NULL値
+            field_offsets[out_idx] = 0
+        else:
+            field_offsets[out_idx] = pos
+        
+        field_lengths[out_idx] = field_len
+        
+        # フィールドデータをスキップ
+        if field_len != -1 and field_len >= 0:
+            pos += field_len
 
 @cuda.jit
 def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_cols, header_shared):
