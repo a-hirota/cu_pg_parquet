@@ -15,7 +15,7 @@ CHUNK_SIZE=8000000
 # TOTAL_ROWS取得時に正しいユーザーでクエリを実行するために -U postgres を指定
 TOTAL_ROWS=$(psql -U postgres -qt -A -c "SELECT COUNT(*) FROM public.lineorder" | tr -d '[:space:]')
 OUTPUT_DIR="lineorder_offset_output"
-TEMP_DIR="${OUTPUT_DIR}/tmp"
+TEMP_DIR="/dev/shm/lineorder_tmp"
 TABLE="public.lineorder"
 
 # 出力ディレクトリの作成
