@@ -1,6 +1,11 @@
 gpuparser/__pycache__/
 gpuparser/cuda_kernels/__pycache__/
 gpuparser/data_processors/__pycache__/
+
+lineorder_keyset_output/
+lineorder_multigpu_output/
+lineorder_offset_output/
 memory-bank/
+
 old/
 output/
