@@ -156,6 +156,7 @@ def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths
     
     # この時点で row_start は現在のスレッドが処理すべき行の開始位置
     pos = row_start
+    next_row_start = -1
     
     # フィールド数を確認
     if pos + 2 > len(chunk_array):
@@ -163,10 +164,6 @@ def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths
         
     num_fields = (np.int32(chunk_array[pos]) << 8) | np.int32(chunk_array[pos + 1])
     
-    # 終端マーカーをチェック
-    if num_fields == 0xFFFF:
-        return
-        
     # フィールド数が期待値と異なる場合
     if num_fields != num_cols:
         # オプション：管理用の共有メモリにエラー情報を書き込む
@@ -175,7 +172,18 @@ def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths
     
     pos += 2  # フィールド数フィールドをスキップ
     
-    # この行のすべてのフィールドを処理
+    # 次の行の開始位置を探す（行終端に依存しない）
+    scan_pos = pos
+    for field_idx in range(num_fields):
+        if scan_pos + 4 > len(chunk_array):
+            return
+        field_len = decode_int32_be(chunk_array, scan_pos)
+        scan_pos += 4
+        if field_len != -1 and field_len >= 0:
+            scan_pos += field_len
+    next_row_start = scan_pos
+    
+    # この行のすべてのフィールドを処理（行長は次行開始位置から計算）
     for field_idx in range(num_cols):
         if pos + 4 > len(chunk_array):
             return  # データの終端

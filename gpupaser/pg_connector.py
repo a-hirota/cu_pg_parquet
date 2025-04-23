@@ -3,11 +3,15 @@ PostgreSQLへの接続とデータ取得モジュール
 """
 
 import psycopg2
+import psycopg
 import io
 import os
 from typing import List, Optional, Tuple
 
 from .utils import ColumnInfo
+from .meta_fetch import fetch_column_meta
+from .type_map import ColumnMeta
+from .psql_copy_stream import copy_binary_to_gpu_chunks
 
 class PostgresConnector:
     """PostgreSQLとの接続を管理するクラス"""
@@ -55,6 +59,26 @@ class PostgresConnector:
         """接続を閉じる"""
         if self.conn:
             self.conn.close()
+
+    def copy_to_gpu(self,
+        query: str,
+        process_chunk,
+        chunk_bytes: int = 32 << 20
+    ):
+        """
+        COPY BINARY を psycopg3 + pinned buffer でチャンク受信し GPU へ転送
+        Parameters
+        ----------
+        query : str
+            SELECT クエリ文字列
+        process_chunk : callable
+            (gpu_dev_array, nbytes) を受け取るコールバック
+        chunk_bytes : int
+            1チャンクのバイト数
+        """
+        # DSN文字列を再構築
+        dsn = f"dbname={self.dbname} user={self.user} password={self.password} host={self.host}"
+        copy_binary_to_gpu_chunks(dsn, query, chunk_bytes, process_chunk)
 
 def connect_to_postgres(dbname='postgres', user='postgres', password='postgres', host='localhost'):
     """PostgreSQLへの接続を確立する"""
@@ -221,3 +245,11 @@ def get_binary_data(conn, table_name: str, limit: Optional[int] = None, offset: 
     print(f"Total binary data size: {total_size} bytes")
     
     return buffer_data, buffer
+
+
+# ----------------------------------------------------------------------
+# Arrow ColumnMeta ベースでカラムメタデータを取得する新関数
+# ----------------------------------------------------------------------
+def get_query_column_meta(conn, query: str) -> List[ColumnMeta]:
+    """SQLクエリの RowDescription を利用して ColumnMeta を返す"""
+    return fetch_column_meta(conn, query)

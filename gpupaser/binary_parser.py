@@ -191,6 +191,8 @@ class BinaryParser:
                 # 数値型
                 col_types[i] = 1
                 col_lengths[i] = 8
+                print(f"DEBUG: Numeric型カラム検出: {col.name}, type={col.type}")
+                # ここではデコード前のデータがないため、後段のデコード時にデバッグが必要
             else:
                 # 文字列型
                 col_types[i] = 2
@@ -587,20 +589,17 @@ class BinaryDataParser:
         if start_row == 0 and len(chunk_array) >= 11:
             # PostgreSQLバイナリフォーマットヘッダーの検出
             if chunk_array[0] == 80 and chunk_array[1] == 71:  # 'P', 'G'
-                header_pos = 11  # 基本ヘッダー長
-                
-                # フラグとヘッダー拡張をスキップ
-                if len(chunk_array) >= header_pos + 8:
-                    flags = np.int32((chunk_array[header_pos] << 24) | (chunk_array[header_pos+1] << 16) | \
-                                    (chunk_array[header_pos+2] << 8) | chunk_array[header_pos+3])
+                # ヘッダー本体 (11バイト) をスキップ
+                header_pos = 11
+                # フラグフィールド (4バイト) をスキップ
+                if len(chunk_array) >= header_pos + 4:
                     header_pos += 4
-                    ext_len = np.int32((chunk_array[header_pos] << 24) | (chunk_array[header_pos+1] << 16) | \
-                                      (chunk_array[header_pos+2] << 8) | chunk_array[header_pos+3])
+                    # 拡張ヘッダー長を読み取り (4バイト, ビッグエンディアン)
+                    ext_len = int.from_bytes(chunk_array[header_pos:header_pos+4], byteorder='big', signed=False)
                     header_pos += 4
-                    
+                    # 拡張データをスキップ
                     if ext_len > 0 and len(chunk_array) >= header_pos + ext_len:
                         header_pos += ext_len
-                        
                 print(f"ヘッダーを検出: 長さ={header_pos}バイト")
         
         # フィールド数が不明の場合は検出を試みる
@@ -805,6 +804,20 @@ class BinaryDataParser:
         while attempts < max_attempts:
             field_offsets, field_lengths = parse_binary_chunk(chunk_array, self.header_expected)
             self.header_expected = False  # 2回目以降はヘッダーを期待しない
+
+            # CPUデバッグ: lo_extendedprice列のndigitsとweightをログ出力
+            if field_offsets is not None and len(field_offsets) >= num_columns:
+                ext_idx = 9  # lo_extendedpriceカラムのインデックス (0-based)
+                field_offset = int(field_offsets[ext_idx])
+                header_pos = field_offset
+                if header_pos >= 0 and header_pos + 4 <= len(chunk_array):
+                    nd = (int(chunk_array[header_pos]) << 8) | int(chunk_array[header_pos+1])
+                    wt = (int(chunk_array[header_pos+2]) << 8) | int(chunk_array[header_pos+3])
+                    print(f"DEBUG CPU numeric header(lo_extendedprice): ndigits={nd}, weight={wt}")
+                else:
+                    print("DEBUG CPU numeric header: header_pos範囲外")
+            else:
+                print("DEBUG CPU numeric header: field_offsets不足またはNone")
             
             # 完全な行が得られた場合
             if len(field_offsets) > 0:

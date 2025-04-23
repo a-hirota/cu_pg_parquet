@@ -146,29 +146,29 @@ def decode_all_columns_kernel(raw_data, field_offsets, field_lengths,
                             num_scale_output[np.int32(col):np.int32(col + 1)],
                             row
                         )
-            else:  # 文字列型
-                # 事前計算したインデックスを使用（条件分岐削減）
-                str_col_idx = str_col_indices[col]
-                if str_col_idx >= 0:  # 有効な文字列カラム
-                    max_length = np.int32(col_lengths[col])
-                    
-                    # 文字列バッファの位置を計算
-                    buffer_offset = np.int32(str_offsets[str_col_idx])
-                    dst_pos = np.int32(buffer_offset + row * max_length)
-                    str_idx = np.int32(str_col_idx * chunk_size + row)
-                    
-                    if length == -1:  # NULL値
-                        # NULL値の場合は長さを0とする
-                        str_null_pos[str_idx] = 0
-                    else:
-                        # 文字列データの処理 - 専用関数を使用
-                        actual_length = process_string_data(
-                            raw_data, pos, length,
-                            str_outputs, dst_pos, max_length
-                        )
+            elif col_type == 2:  # 文字列型
+                # 文字列バッファが有効な場合のみ処理
+                if str_outputs is not None and str_null_pos is not None and str_offsets is not None:
+                    # 事前計算したインデックスを使用（条件分岐削減）
+                    str_col_idx = str_col_indices[col]
+                    if str_col_idx >= 0:  # 有効な文字列カラム
+                        max_length = np.int32(col_lengths[col])
+                        buffer_offset = np.int32(str_offsets[str_col_idx])
+                        dst_pos = np.int32(buffer_offset + row * max_length)
+                        str_idx = np.int32(str_col_idx * chunk_size + row)
                         
-                        # 実際の文字列長を記録
-                        str_null_pos[str_idx] = actual_length
+                        if length == -1:  # NULL値
+                            # NULL値の場合は長さを0とする
+                            str_null_pos[str_idx] = 0
+                        else:
+                            # 文字列データの処理 - 専用関数を使用
+                            actual_length = process_string_data(
+                                raw_data, pos, length,
+                                str_outputs, dst_pos, max_length
+                            )
+                            
+                            # 実際の文字列長を記録
+                            str_null_pos[str_idx] = actual_length
             
             # 次のカラムへ
             col += 1

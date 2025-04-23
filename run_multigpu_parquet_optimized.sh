@@ -1,152 +1,115 @@
 #!/bin/bash
-# このスクリプトは、OFFSET/LIMITを使用してpublic.lineorderテーブル全体を60000行毎にチャンク分割し、
-# process_large_dataset.py を用いてSQLクエリによりParquet変換を行います。
+# このスクリプトは、複合キー (lo_orderkey, lo_linenumber) を用いたキーセットページネーションにより、
+# lineorder テーブル全体を60000行毎にチャンク分割し、各チャンクをParquet変換します。
 #
-# 前提:
-#   - 環境変数等でPostgreSQL接続情報が設定済みであること。
-#   - process_large_dataset.py および gpupaser モジュールが正しく機能すること。
-#
-# この実装では、ダブルバッファリングの考え方を取り入れ、各チャンクのフェッチをバックグラウンドで開始し、
-# 現在のチャンク処理と並行して次チャンクの取得を試みます。フェッチ完了はポーリングによって確認し、
-# GPU処理待ち時間を最小化します。
+# 前提: 環境変数等でPostgreSQL接続情報が設定済みであること。
+#       process_large_dataset.py が適切に実行できること。
 
-# 設定
-CHUNK_SIZE=8000000
-# TOTAL_ROWS取得時に正しいユーザーでクエリを実行するために -U postgres を指定
-TOTAL_ROWS=$(psql -U postgres -qt -A -c "SELECT COUNT(*) FROM public.lineorder" | tr -d '[:space:]')
-OUTPUT_DIR="lineorder_offset_output"
-TEMP_DIR="/dev/shm/lineorder_tmp"
-TABLE="public.lineorder"
+# 初期境界の設定（テーブル内の最小値に合わせて適宜変更）
+CURRENT_ORDERKEY=0
+CURRENT_LINENUMBER=0
+
+CHUNK_SIZE=65000
+CHUNK=1
+OUTPUT_DIR="lineorder_keyset_output"
 
 # 出力ディレクトリの作成
-mkdir -p "${OUTPUT_DIR}"
-mkdir -p "${TEMP_DIR}"
+mkdir -p ${OUTPUT_DIR}
 
-echo "テーブル全体の行数: ${TOTAL_ROWS}"
-echo "チャンクサイズ: ${CHUNK_SIZE} 行"
-echo "Parquet出力ディレクトリ: ${OUTPUT_DIR}"
+# 並列実行のための最大プロセス数（環境に応じて調整）
+MAX_PARALLEL=1
+active_processes=0
 
-# GPUメモリクリア用関数
+# GPUメモリクリア用の関数
 function cleanup_gpu_memory() {
+    # NVIDIA-SMIがある場合のみ実行
     if command -v nvidia-smi &> /dev/null; then
         echo "GPUメモリをクリアします..."
         nvidia-smi --gpu-reset 2>/dev/null || echo "GPU reset not supported, continuing..."
     fi
 }
 
-# 次のチャンクをバックグラウンドでフェッチする関数
-function fetch_next_chunk() {
-    local offset=$1
-    local output_file=$2
-
-    echo "OFFSET ${offset} のデータをフェッチします（バックグラウンド）..."
-    # 新規接続でバイナリ形式のデータを取得
-    psql -U postgres -v ON_ERROR_STOP=1 -c "COPY (
-        SELECT * FROM ${TABLE}
-        OFFSET ${offset}
-        LIMIT ${CHUNK_SIZE}
-    ) TO STDOUT WITH (FORMAT BINARY)" > "${output_file}"
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR" > "${output_file}.status"
-    else
-        echo "SUCCESS" > "${output_file}.status"
-    fi
-}
-
-# 次のチャンクのデータを直接SQLクエリで処理する関数
-function process_chunk_sql() {
-    local offset=$1
-    local parquet_output=$2
-    local SQL_QUERY="SELECT * FROM ${TABLE} OFFSET ${offset} LIMIT ${CHUNK_SIZE}"
-    echo "チャンクデータをParquetに変換中 (SQL: ${SQL_QUERY})..."
-    python process_large_dataset.py --sql "${SQL_QUERY}" \
-                                       --output-format parquet \
-                                       --parquet "${parquet_output}" \
-                                       --chunk-size ${CHUNK_SIZE} \
-                                       --no-debug-files
-    return $?
-}
-
-# 初期チャンクをバックグラウンドでフェッチ (OFFSET 0)
-echo "初期チャンクを取得中..."
-CURRENT_CHUNK_FILE="${TEMP_DIR}/chunk_current.bin"
-NEXT_CHUNK_FILE="${TEMP_DIR}/chunk_next.bin"
-
-fetch_next_chunk 0 "${CURRENT_CHUNK_FILE}"
-# 確認のため、すぐにファイルサイズを取得（フェッチ完了まで数秒かかる可能性あり）
-FILESIZE=$(stat -c%s "${CURRENT_CHUNK_FILE}" 2>/dev/null || echo 0)
-if [ ${FILESIZE} -eq 0 ]; then
-    echo "初期チャンクのデータが取得できませんでした。終了します。"
-    rm -f "${CURRENT_CHUNK_FILE}" "${CURRENT_CHUNK_FILE}.status"
-    exit 1
-fi
-echo "初期チャンクのファイルサイズ: ${FILESIZE} bytes"
-
-# チャンク処理のメインループ
-CHUNK=1
-PROCESSED_ROWS=0
-NEXT_OFFSET=${CHUNK_SIZE}
-
-# 次のチャンクをバックグラウンドでフェッチ開始
-fetch_next_chunk ${NEXT_OFFSET} "${NEXT_CHUNK_FILE}" &
-# 非同期フェッチの完了は後でポーリングで確認
-FETCH_PID=$!
-
 while true; do
-    CURRENT_OFFSET=$(( (CHUNK-1)*CHUNK_SIZE ))
-    if [ ${CURRENT_OFFSET} -ge ${TOTAL_ROWS} ]; then
-        echo "すべてのチャンクが処理されました。"
-        break
-    fi
-    echo "【チャンク ${CHUNK} の処理開始】 (OFFSET: ${CURRENT_OFFSET})"
+    echo "チャンク ${CHUNK} 処理開始: 現在の境界 = (${CURRENT_ORDERKEY}, ${CURRENT_LINENUMBER})"
+    
+    # キーセットページネーションを使用したSQLクエリ
+    SQL_QUERY="SELECT * FROM lineorder WHERE lo_orderkey > ${CURRENT_ORDERKEY} OR (lo_orderkey = ${CURRENT_ORDERKEY} AND lo_linenumber > ${CURRENT_LINENUMBER}) ORDER BY lo_orderkey, lo_linenumber LIMIT ${CHUNK_SIZE}"
+    echo "DEBUG SQL_QUERY: ${SQL_QUERY}"
+    
+    # process_large_dataset.pyを使ってSQLクエリを処理、結果をParquetに保存
     PARQUET_OUTPUT="${OUTPUT_DIR}/lineorder_part${CHUNK}.parquet"
     
-    # 現在のチャンクデータはファイルからSQLモードで処理（Binary → Parquet）
-    process_chunk_sql ${CURRENT_OFFSET} "${PARQUET_OUTPUT}"
-    PROCESS_RESULT=$?
-    if [ ${PROCESS_RESULT} -ne 0 ]; then
-        echo "チャンク ${CHUNK} の変換処理でエラーが発生しました（コード: ${PROCESS_RESULT}）"
-        break
-    else
-        echo "チャンク ${CHUNK} の処理が完了しました"
-        PROCESSED_ROWS=$((PROCESSED_ROWS + CHUNK_SIZE))
-        if [ ${PROCESSED_ROWS} -gt ${TOTAL_ROWS} ]; then
-            PROCESSED_ROWS=${TOTAL_ROWS}
+    # プロセス実行とバックグラウンド処理（オプション）
+    if [ ${MAX_PARALLEL} -gt 1 ]; then
+        # 並列処理の場合
+        python process_large_dataset.py --sql "${SQL_QUERY}" \
+                                        --output-format parquet \
+                                        --parquet "${PARQUET_OUTPUT}" \
+                                        --chunk-size ${CHUNK_SIZE} \
+                                        --no-debug-files &
+        
+        # バックグラウンドプロセスのPIDを記録
+        pids[${active_processes}]=$!
+        active_processes=$((active_processes + 1))
+        
+        # 最大並列数に達したら、いずれかのプロセスの完了を待つ
+        if [ ${active_processes} -ge ${MAX_PARALLEL} ]; then
+            wait -n
+            active_processes=$((active_processes - 1))
         fi
-        PROGRESS=$((PROCESSED_ROWS * 100 / TOTAL_ROWS))
-        echo "進行状況: ${PROCESSED_ROWS}/${TOTAL_ROWS} 行処理完了 (${PROGRESS}%)"
+    else
+        # 逐次処理の場合
+        python process_large_dataset.py --sql "${SQL_QUERY}" \
+                                       --output-format parquet \
+                                       --parquet "${PARQUET_OUTPUT}" \
+                                       --chunk-size ${CHUNK_SIZE} \
+                                       --no-debug-files
+    
+        # 適宜GPUメモリのクリア
+        cleanup_gpu_memory
     fi
     
-    cleanup_gpu_memory
-
-    # 次のチャンクのフェッチ完了をポーリング（待機時間を短縮）
-    echo "【次のチャンクの準備待ち】"
-    while [ ! -f "${NEXT_CHUNK_FILE}.status" ]; do
-        sleep 0.5
-    done
-    STATUS=$(cat "${NEXT_CHUNK_FILE}.status")
-    if [ "${STATUS}" != "SUCCESS" ]; then
-        echo "次のチャンク取得時にエラーが発生しました。処理を終了します。"
+    # キーセットページネーションのため、今回抽出したチャンクの最終行のキーを取得する
+    LAST_BOUNDARY=$(psql -U postgres -t -A -c "SELECT lo_orderkey, lo_linenumber FROM (
+      ${SQL_QUERY}
+    ) AS sub ORDER BY lo_orderkey DESC, lo_linenumber DESC LIMIT 1;")
+    
+    # 結果が空ならば終了
+    if [ -z "${LAST_BOUNDARY}" ]; then
+        echo "これ以上のデータはありません。処理を終了します。"
         break
     fi
-
-    # 現在のチャンクファイルを次のチャンクに差し替え
-    mv "${NEXT_CHUNK_FILE}" "${CURRENT_CHUNK_FILE}"
-    rm -f "${NEXT_CHUNK_FILE}.status"
     
-    NEXT_OFFSET=$((NEXT_OFFSET + CHUNK_SIZE))
-    if [ ${NEXT_OFFSET} -lt ${TOTAL_ROWS} ]; then
-        fetch_next_chunk ${NEXT_OFFSET} "${NEXT_CHUNK_FILE}" &
-        FETCH_PID=$!
-    else
-        echo "すべてのチャンクがフェッチされました。次のオフセット (${NEXT_OFFSET}) がテーブルの行数 (${TOTAL_ROWS}) を超えています。"
+    # LAST_BOUNDARYは "値|値" の形式で返るので、分解する
+    NEW_ORDERKEY=$(echo ${LAST_BOUNDARY} | cut -d"|" -f1)
+    NEW_LINENUMBER=$(echo ${LAST_BOUNDARY} | cut -d"|" -f2)
+    
+    # 最新の境界値が取得できなければ終了
+    if [ -z "${NEW_ORDERKEY}" ] || [ -z "${NEW_LINENUMBER}" ]; then
+        echo "境界値の取得に失敗しました。終了します。"
+        break
     fi
+    
+    echo "新しい境界値: (${NEW_ORDERKEY}, ${NEW_LINENUMBER})"
+    
+    # 境界値に変化がなければ処理を終了（無限ループ防止）
+    if [ "${NEW_ORDERKEY}" = "${CURRENT_ORDERKEY}" ] && [ "${NEW_LINENUMBER}" = "${CURRENT_LINENUMBER}" ]; then
+        echo "境界値に変化がありません。処理を終了します。"
+        break
+    fi
+    
+    # 境界値を更新
+    CURRENT_ORDERKEY=${NEW_ORDERKEY}
+    CURRENT_LINENUMBER=${NEW_LINENUMBER}
+    
     CHUNK=$((CHUNK + 1))
 done
 
-rm -f "${CURRENT_CHUNK_FILE}" "${NEXT_CHUNK_FILE}" "${CURRENT_CHUNK_FILE}.status" "${NEXT_CHUNK_FILE}.status"
+# 残りの並列プロセスがあれば完了を待つ
+if [ ${MAX_PARALLEL} -gt 1 ]; then
+    echo "残りのプロセスの完了を待っています..."
+    wait
+fi
 
 echo "全チャンクの処理が完了しました。"
-echo "処理レコード数: ${PROCESSED_ROWS}/${TOTAL_ROWS} 行"
-echo "Parquetファイル出力ディレクトリ: ${OUTPUT_DIR}"
+echo "出力ディレクトリ: ${OUTPUT_DIR}"

@@ -465,6 +465,9 @@ class GPUDecoder:
                             num_lo_output[int_col_idx * rows_in_chunk:(int_col_idx + 1) * rows_in_chunk].copy_to_host(host_lo)
                             num_scale_output[int_col_idx:int_col_idx + 1].copy_to_host(host_scale)
                             
+                            # DEBUG: numeric列の変換値を確認
+                            print(f"DEBUG numeric column '{col.name}': hi[:5]={host_hi[:5]}, lo[:5]={host_lo[:5]}, scale={host_scale[0]}")
+                            
                             values = []
                             for j in range(rows_in_chunk):
                                 hi = host_hi[j]
