@@ -12,7 +12,7 @@ import time
 MAX_THREADS = int(os.environ.get('GPUPASER_MAX_THREADS', '1024'))
 MAX_BLOCKS = int(os.environ.get('GPUPASER_MAX_BLOCKS', '2048'))
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def decode_int32_be(data, pos):
     """
     4バイト整数のビッグエンディアンからのデコード
@@ -22,17 +22,25 @@ def decode_int32_be(data, pos):
         pos: 読み取り位置
         
     Returns:
-        デコードされた32ビット整数値
+        デコードされた32ビット整数値 (NULLは -1)
     """
-    # バイトを取得
-    b0 = np.int32(data[pos]) & 0xFF
-    b1 = np.int32(data[pos + 1]) & 0xFF
-    b2 = np.int32(data[pos + 2]) & 0xFF
-    b3 = np.int32(data[pos + 3]) & 0xFF
+    # バイトを取得して直接ビット演算（NumPy API使用せず）
+    b0 = (data[pos] & 0xFF)
+    b1 = (data[pos + 1] & 0xFF)
+    b2 = (data[pos + 2] & 0xFF)
+    b3 = (data[pos + 3] & 0xFF)
     
-    # ビッグエンディアンからリトルエンディアンに変換
+    # ビッグエンディアンからリトルエンディアンに変換し、符号付き int32 として返す
     val = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-    
+    # 0xFFFFFFFF を -1 に変換
+    if val == 0xFFFFFFFF:
+        return -1
+    # 他の負の値はそのまま（エラーの可能性）、正の値はそのまま
+    elif val >= 0x80000000:
+         # This case should ideally not happen for valid positive lengths
+         # but handles potential negative values other than -1 if they occur.
+         # Reinterpret as signed int32
+         return val - 0x100000000 
     return val
 
 @cuda.jit(device=True)
@@ -51,13 +59,14 @@ def find_next_row_start(data, start_pos, end_pos, num_cols, valid_cols=0):
         有効な行の先頭位置、見つからない場合は-1
     """
     pos = start_pos
+    array_size = data.shape[0]  # len()の代わりにshape[0]を使用
     while pos < end_pos - 1:
         # 残りのバイト数チェック
-        if pos + 2 > len(data):
+        if pos + 2 > array_size:
             return -1
             
         # タプルのフィールド数を確認
-        num_fields = (np.int32(data[pos]) << 8) | np.int32(data[pos + 1])
+        num_fields = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF)
         
         # 終端マーカーをチェック
         if num_fields == 0xFFFF:
@@ -98,8 +107,9 @@ def atomic_add_global(array, idx, val):
 def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths, 
                                         num_cols, header_size, row_start_positions=None):
     """
-    PostgreSQLバイナリデータを直接GPU上で解析するカーネル（1スレッド1行の最適化版）
-    
+    PostgreSQLバイナリデータを直接GPU上で解析するカーネル（1スレッド1行）
+    [Simplified and Corrected Version]
+
     Args:
         chunk_array: バイナリデータ配列
         field_offsets: フィールド位置の出力配列
@@ -112,100 +122,101 @@ def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths
     thread_id = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     
     # 有効な行数範囲チェック（field_offsetsの行数に基づく）
-    max_rows = field_offsets.size // num_cols
+    max_rows = field_offsets.shape[0]
     if thread_id >= max_rows:
         return  # 範囲外のスレッドは早期リターン
     
     # 行の開始位置を決定
     row_start = 0
     if row_start_positions is not None:
-        # 事前計算された行開始位置を使用（最も効率的）
-        if thread_id < len(row_start_positions):
+        if thread_id < row_start_positions.shape[0]:
             row_start = row_start_positions[thread_id]
-        else:
-            return  # 範囲外
-    else:
-        # 事前計算されていない場合、単純にヘッダー後からスキャンする
-        # 注：実際のプロダクション環境では、この部分は事前計算を推奨
-        valid_start = header_size
-        
-        # 前の行をスキップ
-        for i in range(thread_id):
-            # 行開始位置から先頭2バイトでフィールド数を取得
-            if valid_start + 2 > len(chunk_array):
-                return  # データの終端
-            
-            num_fields = (np.int32(chunk_array[valid_start]) << 8) | np.int32(chunk_array[valid_start + 1])
-            if num_fields == 0xFFFF:  # 終端マーカー
+            # 開始位置が無効な場合（例: CPU計算でエラー時に-1など）はスキップ
+            if row_start < 0:
+                # Ensure remaining fields for this row are marked NULL if skipped early
+                for field_idx in range(num_cols):
+                    field_lengths[thread_id, field_idx] = -1
+                    field_offsets[thread_id, field_idx] = 0
                 return
-                
-            # 各フィールドをスキップ
-            valid_start += 2  # フィールド数フィールドをスキップ
-            
-            for field_idx in range(num_fields):
-                if valid_start + 4 > len(chunk_array):
-                    return
-                    
-                field_len = decode_int32_be(chunk_array, valid_start)
-                valid_start += 4
-                
-                if field_len != -1 and field_len >= 0:
-                    valid_start += field_len
-        
-        row_start = valid_start
-    
+        else:
+            # row_start_positions 配列の範囲外
+            return
+    else:
+        # row_start_positions が提供されない場合はエラーとして扱うか、
+        # ここで非効率な計算を行う。今回は提供される前提でリターン。
+        # 安全のため、この行のフィールドをNULLとしてマーク
+        for field_idx in range(num_cols):
+            field_lengths[thread_id, field_idx] = -1
+            field_offsets[thread_id, field_idx] = 0
+        return
+
     # この時点で row_start は現在のスレッドが処理すべき行の開始位置
     pos = row_start
-    next_row_start = -1
-    
-    # フィールド数を確認
-    if pos + 2 > len(chunk_array):
-        return  # データの終端
-        
-    num_fields = (np.int32(chunk_array[pos]) << 8) | np.int32(chunk_array[pos + 1])
-    
-    # フィールド数が期待値と異なる場合
-    if num_fields != num_cols:
-        # オプション：管理用の共有メモリにエラー情報を書き込む
-        # ここではスキップして次の行に進む
+    array_size = chunk_array.shape[0]
+
+    # --- フィールド数読み込みと検証 ---
+    if pos + 2 > array_size:
+        # フィールド数を読み込む前にデータ終端
+        for field_idx in range(num_cols):
+            field_lengths[thread_id, field_idx] = -1
+            field_offsets[thread_id, field_idx] = 0
         return
-    
+
+    num_fields_read = ((chunk_array[pos] & 0xFF) << 8) | (chunk_array[pos + 1] & 0xFF)
+
+    # 終端マーカー (0xFFFF) チェック
+    if num_fields_read == 0xFFFF:
+        # この行以降はデータがないとみなし、この行をNULLで埋める
+        for field_idx in range(num_cols):
+            field_lengths[thread_id, field_idx] = -1
+            field_offsets[thread_id, field_idx] = 0
+        return
+
     pos += 2  # フィールド数フィールドをスキップ
-    
-    # 次の行の開始位置を探す（行終端に依存しない）
-    scan_pos = pos
-    for field_idx in range(num_fields):
-        if scan_pos + 4 > len(chunk_array):
+
+    # 実際に処理するフィールド数を決定 (読み取った数と期待値の小さい方)
+    fields_to_process = min(num_fields_read, num_cols)
+
+    # --- 各フィールドの処理ループ ---
+    for field_idx in range(fields_to_process):
+        # フィールド長読み込み前の境界チェック
+        if pos + 4 > array_size:
+            # 行の途中でデータ終端。残りのフィールドをNULLにする
+            for remaining_idx in range(field_idx, num_cols):
+                field_lengths[thread_id, remaining_idx] = -1
+                field_offsets[thread_id, remaining_idx] = 0
             return
-        field_len = decode_int32_be(chunk_array, scan_pos)
-        scan_pos += 4
-        if field_len != -1 and field_len >= 0:
-            scan_pos += field_len
-    next_row_start = scan_pos
-    
-    # この行のすべてのフィールドを処理（行長は次行開始位置から計算）
-    for field_idx in range(num_cols):
-        if pos + 4 > len(chunk_array):
-            return  # データの終端
-            
+
         # フィールド長を取得
         field_len = decode_int32_be(chunk_array, pos)
-        pos += 4
-        
-        # 出力インデックス - この行のこのフィールドの位置
-        out_idx = thread_id * num_cols + field_idx
-        
-        # 結果を保存
-        if field_len == -1:  # NULL値
-            field_offsets[out_idx] = 0
-        else:
-            field_offsets[out_idx] = pos
-        
-        field_lengths[out_idx] = field_len
-        
-        # フィールドデータをスキップ
-        if field_len != -1 and field_len >= 0:
-            pos += field_len
+        pos += 4 # フィールド長フィールドをスキップ
+
+        if field_len < 0:  # NULL値 (-1)
+            field_offsets[thread_id, field_idx] = 0
+            field_lengths[thread_id, field_idx] = -1
+        else: # Non-NULL value
+            data_start_pos = pos
+            # データ読み込み前の境界チェック
+            if pos + field_len > array_size:
+                # データが途中で切れている。このフィールドと残りをNULLにする
+                for remaining_idx in range(field_idx, num_cols):
+                    field_lengths[thread_id, remaining_idx] = -1
+                    field_offsets[thread_id, remaining_idx] = 0
+                return
+
+            # 有効なデータ。オフセットと長さを記録
+            field_offsets[thread_id, field_idx] = data_start_pos
+            field_lengths[thread_id, field_idx] = field_len
+            pos += field_len  # データフィールドをスキップ
+
+    # --- ループ後の処理 ---
+    # 読み取ったフィールド数が期待値より少ない場合、残りの列をNULLで埋める
+    if fields_to_process < num_cols:
+        for field_idx in range(fields_to_process, num_cols):
+            field_lengths[thread_id, field_idx] = -1
+            field_offsets[thread_id, field_idx] = 0
+
+    # next_row_start の計算と最後のpos調整は削除 (ループが正しくposを進めるため)
 
 @cuda.jit
 def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_cols, header_shared):
@@ -246,7 +257,7 @@ def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_co
         shared_row_count[0] = 0
     
     # データサイズ
-    array_size = len(chunk_array)
+    array_size = chunk_array.shape[0]
     
     # ヘッダー処理（スレッド0のみ）- 最適化バージョン
     if thread_id == 0:
@@ -280,7 +291,7 @@ def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_co
                 if array_size >= header_size + 2:
                     scan_pos = header_size
                     while scan_pos < min(array_size - 2, header_size + 1000):
-                        potential_field_count = (np.int32(chunk_array[scan_pos]) << 8) | np.int32(chunk_array[scan_pos + 1])
+                        potential_field_count = ((chunk_array[scan_pos] & 0xFF) << 8) | (chunk_array[scan_pos + 1] & 0xFF)
                         # 妥当な範囲の列数なら記録（0 < 列数 < 100）
                         if potential_field_count > 0 and potential_field_count < 100:
                             header_shared[2] = potential_field_count  # 有効列数を保存
@@ -349,7 +360,7 @@ def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_co
                 break
                 
             # フィールド数取得（キャッシュから）
-            num_fields = (np.int32(shared_cache[cache_offset]) << 8) | np.int32(shared_cache[cache_offset + 1])
+            num_fields = ((shared_cache[cache_offset] & 0xFF) << 8) | (shared_cache[cache_offset + 1] & 0xFF)
             
             # 終端マーカーのチェック
             if num_fields == 0xFFFF:
@@ -413,19 +424,23 @@ def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_co
                 field_len = decode_int32_be(chunk_array, pos)
                 
                 # 出力インデックス計算
-                out_idx = row_idx * num_cols + field_idx
+                # out_idx = row_idx * num_cols + field_idx # Use 2D index below
                 
-                # 結果を保存
-                if out_idx < field_offsets.shape[0]:
-                    field_offsets[out_idx] = pos + 4 if field_len != -1 else 0
-                    field_lengths[out_idx] = field_len
-                    
-                # ポインタを進める
+                # 結果を保存 (Use 2D indexing)
+                if row_idx < max_rows: # Check row index bound first
+                    if field_len < 0: # NULL
+                         field_offsets[row_idx, field_idx] = 0
+                         field_lengths[row_idx, field_idx] = -1
+                    else: # Non-NULL
+                         field_offsets[row_idx, field_idx] = pos + 4 # Offset is after length field
+                         field_lengths[row_idx, field_idx] = field_len
+
+                # ポインタを進める (length field)
                 pos += 4
                 
-                # フィールドデータをスキップ
-                if field_len != -1 and field_len >= 0:
-                    if pos + field_len > array_size:
+                # フィールドデータをスキップ (if not NULL)
+                if field_len >= 0: 
+                    if pos + field_len > array_size: # Bounds check
                         valid_row = False
                         break
                     pos += field_len

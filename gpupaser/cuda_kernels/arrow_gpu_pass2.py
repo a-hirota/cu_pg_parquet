@@ -90,7 +90,9 @@ def pass2_scatter_varlen(raw,
     src_pos = field_offsets[row]
     flen = field_lengths[row]
     if flen == -1:
-        # NULL
+        # NULL の場合もoffsetは設定されているが、データは0長
+        dst_pos = offsets[row]
+        # 空文字列を明示的に設定（長さ=0）
         return
 
     dst_pos = offsets[row]

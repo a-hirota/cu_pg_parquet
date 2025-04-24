@@ -57,7 +57,7 @@ PG_OID_TO_ARROW: Dict[int, Tuple[int, Optional[int]]] = {
     23: (INT32, 4),       # int4 / integer
     700: (FLOAT32, 4),    # float4 / real
     701: (FLOAT64, 8),    # float8 / double precision
-    1700: (UTF8, None),  # numeric → UTF8 variable length (NUMERIC as text)
+    1700: (UTF8, None),  # numeric → UTF8 variable length (ASCII string)
     16:  (BOOL, 1),       # boolean
     25:  (UTF8, None),    # text
     1042: (UTF8, None),   # bpchar

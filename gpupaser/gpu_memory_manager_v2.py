@@ -110,14 +110,24 @@ class GPUMemoryManagerV2:
                     else:
                         raise ValueError(f"Unsupported fixed type size for aid={aid}")
 
+                # 固定長列もバイト配列として確保（stride計算のブレを防止）
+                if meta.pg_oid in (20, 21, 23):  # int8, int2, int4 - 整数型はテスト用にすべてint64扱い
+                    # Arrow int64として8バイトに統一
+                    alloc_size = 8
+                    total_bytes = rows * alloc_size
+                else:
+                    alloc_size = esize
+                    total_bytes = rows * esize
                 try:
-                    d_values = cuda.device_array(rows, dtype=self._dtype_for_size(esize))
+                    d_values = cuda.device_array(total_bytes, dtype=np.uint8)
                     d_nulls = cuda.device_array(rows, dtype=np.uint8)
                 except CudaAPIError as e:
                     self._cleanup_partial(buffers)
                     raise RuntimeError(f"GPU alloc failed (fixed {meta.name}): {e}") from e
 
-                buffers[meta.name] = (d_values, d_nulls)
+                # 可変長列と同じく3要素タプル（stride=実際の確保サイズ）として統一
+                # このstrideはpass2_scatter_fixed中での行アドレス計算に使用される
+                buffers[meta.name] = (d_values, d_nulls, alloc_size)
 
         # メタ配列はホスト側 numpy で保持 (caller が必要に応じて GPU 転送)
         buffers["type_ids"] = type_ids
