@@ -1,4 +1,4 @@
-__pycache__/
+__pycache__
 gpupaser/__pycache__/
 gpupaser/cuda_kernels/__pycache__/
 gpupaser/data_processors/__pycache__/
