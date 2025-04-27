@@ -111,9 +111,8 @@ class GPUMemoryManagerV2:
                         raise ValueError(f"Unsupported fixed type size for aid={aid}")
 
                 # 固定長列もバイト配列として確保（stride計算のブレを防止）
-                if meta.pg_oid in (20, 21, 23):  # int8, int2, int4 - 整数型はテスト用にすべてint64扱い
-                    # Arrow int64として8バイトに統一
-                    alloc_size = 8
+                if meta.pg_oid in (20, 21, 23):  # int8, int2, int4 
+                    alloc_size = meta.elem_size
                     total_bytes = rows * alloc_size
                 else:
                     alloc_size = esize

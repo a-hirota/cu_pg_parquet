@@ -30,7 +30,7 @@ def meta_to_dict(meta: ColumnMeta) -> Dict[str, Any]:
     return {
         "name": meta.name,
         "pg_oid": meta.pg_oid,
-        "typmod": meta.typmod,
+        "pg_typmod": meta.pg_typmod,
         "arrow_id": meta.arrow_id,
         "elem_size": meta.elem_size,
         "arrow_param": meta.arrow_param,

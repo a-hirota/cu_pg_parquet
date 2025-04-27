@@ -2,7 +2,7 @@
   {
     "name": "lo_orderkey",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -13,7 +13,7 @@
   {
     "name": "lo_linenumber",
     "pg_oid": 23,
-    "typmod": 4,
+    "pg_typmod": 4,
     "arrow_id": 1,
     "elem_size": 4,
     "arrow_param": null
@@ -21,7 +21,7 @@
   {
     "name": "lo_custkey",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -32,7 +32,7 @@
   {
     "name": "lo_partkey",
     "pg_oid": 23,
-    "typmod": 4,
+    "pg_typmod": 4,
     "arrow_id": 1,
     "elem_size": 4,
     "arrow_param": null
@@ -40,7 +40,7 @@
   {
     "name": "lo_suppkey",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -51,7 +51,7 @@
   {
     "name": "lo_orderdate",
     "pg_oid": 23,
-    "typmod": 4,
+    "pg_typmod": 4,
     "arrow_id": 1,
     "elem_size": 4,
     "arrow_param": null
@@ -59,7 +59,7 @@
   {
     "name": "lo_orderpriority",
     "pg_oid": 1042,
-    "typmod": 15,
+    "pg_typmod": 15,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 11
@@ -67,7 +67,7 @@
   {
     "name": "lo_shippriority",
     "pg_oid": 1042,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": null
@@ -75,7 +75,7 @@
   {
     "name": "lo_quantity",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -86,7 +86,7 @@
   {
     "name": "lo_extendedprice",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -97,7 +97,7 @@
   {
     "name": "lo_ordertotalprice",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -108,7 +108,7 @@
   {
     "name": "lo_discount",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -119,7 +119,7 @@
   {
     "name": "lo_revenue",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -130,7 +130,7 @@
   {
     "name": "lo_supplycost",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -141,7 +141,7 @@
   {
     "name": "lo_tax",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -152,7 +152,7 @@
   {
     "name": "lo_commit_date",
     "pg_oid": 1042,
-    "typmod": 8,
+    "pg_typmod": 8,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 4
@@ -160,7 +160,7 @@
   {
     "name": "lo_shipmode",
     "pg_oid": 1042,
-    "typmod": 10,
+    "pg_typmod": 10,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 6

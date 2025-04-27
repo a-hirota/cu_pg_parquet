@@ -1,12 +1,20 @@
+# pycache is a common directory for Python bytecode files
 __pycache__
 gpupaser/__pycache__/
 gpupaser/cuda_kernels/__pycache__/
 gpupaser/data_processors/__pycache__/
 
+# output directories for various configurations
 lineorder_keyset_output/
 lineorder_multigpu_output/
 lineorder_offset_output/
+output/
+
+# old directories for previous runs
+old/
+
 memory-bank/
 
-old/
-output/
+cufile.log
+*.bin
+*.txt

@@ -2,7 +2,7 @@
   {
     "name": "c_custkey",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -13,7 +13,7 @@
   {
     "name": "c_name",
     "pg_oid": 1043,
-    "typmod": 25,
+    "pg_typmod": 25,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 21
@@ -21,7 +21,7 @@
   {
     "name": "c_address",
     "pg_oid": 1043,
-    "typmod": 25,
+    "pg_typmod": 25,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 21
@@ -29,7 +29,7 @@
   {
     "name": "c_city",
     "pg_oid": 1042,
-    "typmod": 10,
+    "pg_typmod": 10,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 6
@@ -37,7 +37,7 @@
   {
     "name": "c_nation",
     "pg_oid": 1042,
-    "typmod": 15,
+    "pg_typmod": 15,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 11
@@ -45,7 +45,7 @@
   {
     "name": "c_region",
     "pg_oid": 1042,
-    "typmod": 12,
+    "pg_typmod": 12,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 8
@@ -53,7 +53,7 @@
   {
     "name": "c_phone",
     "pg_oid": 1042,
-    "typmod": 15,
+    "pg_typmod": 15,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 11
@@ -61,7 +61,7 @@
   {
     "name": "c_mktsegment",
     "pg_oid": 1042,
-    "typmod": 10,
+    "pg_typmod": 10,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 6

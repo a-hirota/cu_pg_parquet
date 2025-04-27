@@ -34,7 +34,7 @@ class ColumnMeta:
     """
     name: str                     # 列名
     pg_oid: int                   # PostgreSQL 型 OID
-    typmod: int                   # typmod（-1 の場合は 0 を入れる）
+    pg_typmod: int                   # pg_typmod（-1 の場合は 0 を入れる）
     arrow_id: int                 # 上記 Arrow 型 ID
     elem_size: int                # 固定長型の 1 要素バイト長（可変長型は 0）
     arrow_param: Optional[Tuple[int, int]] = None
@@ -57,7 +57,7 @@ PG_OID_TO_ARROW: Dict[int, Tuple[int, Optional[int]]] = {
     23: (INT32, 4),       # int4 / integer
     700: (FLOAT32, 4),    # float4 / real
     701: (FLOAT64, 8),    # float8 / double precision
-    1700: (UTF8, None),  # numeric → UTF8 variable length (ASCII string)
+    1700: (DECIMAL128, 16), # numeric → Arrow Decimal128 (fixed 16 bytes)
     16:  (BOOL, 1),       # boolean
     25:  (UTF8, None),    # text
     1042: (UTF8, None),   # bpchar

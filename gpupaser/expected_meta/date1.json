@@ -2,7 +2,7 @@
   {
     "name": "d_datekey",
     "pg_oid": 23,
-    "typmod": 4,
+    "pg_typmod": 4,
     "arrow_id": 1,
     "elem_size": 4,
     "arrow_param": null
@@ -10,7 +10,7 @@
   {
     "name": "d_date",
     "pg_oid": 1042,
-    "typmod": 18,
+    "pg_typmod": 18,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 14
@@ -18,7 +18,7 @@
   {
     "name": "d_dayofweek",
     "pg_oid": 1042,
-    "typmod": 12,
+    "pg_typmod": 12,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 8
@@ -26,7 +26,7 @@
   {
     "name": "d_month",
     "pg_oid": 1042,
-    "typmod": 9,
+    "pg_typmod": 9,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 5
@@ -34,7 +34,7 @@
   {
     "name": "d_year",
     "pg_oid": 23,
-    "typmod": 4,
+    "pg_typmod": 4,
     "arrow_id": 1,
     "elem_size": 4,
     "arrow_param": null
@@ -42,7 +42,7 @@
   {
     "name": "d_yearmonthnum",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -53,7 +53,7 @@
   {
     "name": "d_yearmonth",
     "pg_oid": 1042,
-    "typmod": 7,
+    "pg_typmod": 7,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 3
@@ -61,7 +61,7 @@
   {
     "name": "d_daynuminweek",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -72,7 +72,7 @@
   {
     "name": "d_daynuminmonth",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -83,7 +83,7 @@
   {
     "name": "d_daynuminyear",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -94,7 +94,7 @@
   {
     "name": "d_monthnuminyear",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -105,7 +105,7 @@
   {
     "name": "d_weeknuminyear",
     "pg_oid": 1700,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 5,
     "elem_size": 16,
     "arrow_param": [
@@ -116,7 +116,7 @@
   {
     "name": "d_sellingseason",
     "pg_oid": 1042,
-    "typmod": 12,
+    "pg_typmod": 12,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": 8
@@ -124,7 +124,7 @@
   {
     "name": "d_lastdayinweekfl",
     "pg_oid": 1042,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": null
@@ -132,7 +132,7 @@
   {
     "name": "d_lastdayinmonthfl",
     "pg_oid": 1042,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": null
@@ -140,7 +140,7 @@
   {
     "name": "d_holidayfl",
     "pg_oid": 1042,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": null
@@ -148,7 +148,7 @@
   {
     "name": "d_weekdayfl",
     "pg_oid": 1042,
-    "typmod": 1,
+    "pg_typmod": 1,
     "arrow_id": 6,
     "elem_size": 0,
     "arrow_param": null

@@ -39,7 +39,7 @@ def load_column_meta(meta_path):
             ColumnMeta(
                 name=col["name"],
                 pg_oid=col["pg_oid"],
-                typmod=col.get("typmod", 0),
+                pg_typmod=col.get("pg_typmod", 0),
                 arrow_id=col["arrow_id"],
                 elem_size=col["elem_size"],
             )

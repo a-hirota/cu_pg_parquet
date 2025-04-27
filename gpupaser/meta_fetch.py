@@ -23,23 +23,22 @@ except ImportError:
     import psycopg2
     from psycopg2.extensions import cursor as CursorBase
 
+
 from .type_map import (
-    ColumnMeta,
-    PG_OID_TO_ARROW,
-    DECIMAL128,
-    UTF8,
-    UNKNOWN,
+    ColumnMeta,        # (name, pg_oid, pg_typmod, arrow_id, elem_size, arrow_param)
+    PG_OID_TO_ARROW,   # OID → (arrow_id, elem_size) 対応表
+    DECIMAL128, UTF8, UNKNOWN,
 )
 
 
-def _decode_numeric_typmod(typmod: int) -> Tuple[int, int]:
+def _decode_numeric_pg_typmod(pg_typmod: int) -> Tuple[int, int]:
     """
-    PostgreSQL numeric(p,s) typmod 値から (precision, scale) を返すヘルパ
-    typmod は ( (p << 16) | s ) + 4 という内部表現
+    PostgreSQL numeric(p,s) pg_typmod 値から (precision, scale) を返すヘルパ
+    pg_typmod は ( (p << 16) | s ) + 4 という内部表現
     """
-    if typmod <= 0:  # typmod==0 は未指定 (= variable)
+    if pg_typmod <= 0:  # pg_typmod==0 は未指定 (= variable)
         return (0, 0)
-    mod = typmod - 4
+    mod = pg_typmod - 4
     precision = (mod >> 16) & 0xFFFF
     scale = mod & 0xFFFF
     return precision, scale
@@ -64,9 +63,9 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
     * psycopg2 の `cursor.description` は sequence のようなタプルで、
       - name            : 列名
       - type_code       : OID
-      - internal_size   : typmod または fixed size
+      - internal_size   : pg_typmod または fixed size
       などを含む。
-    * ``internal_size < 0`` の場合は typmod が -internal_size として渡される。
+    * ``internal_size < 0`` の場合は pg_typmod が -internal_size として渡される。
       詳細: https://www.psycopg.org/docs/cursor.html#cursor.description
     """
     cur = conn.cursor()
@@ -76,14 +75,14 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
     for desc in cur.description:
         name = desc.name
         pg_oid: int = desc.type_code
-        typmod = desc.internal_size or 0  # None の場合は 0
+        pg_typmod = desc.internal_size or 0  # None の場合は 0
 
         # psycopg2/3 の仕様:
-        #   可変長型           typmod は -1 (固定サイズ不明) または -N (実質 typmod=N)
-        #   固定長型 (int4)    typmod は 4 のように固定バイト長正値
-        if typmod < 0:
-            typmod = -typmod
-        # typmod==0 or typmod==4 等もあり得る
+        #   可変長型           pg_typmod は -1 (固定サイズ不明) または -N (実質 pg_typmod=N)
+        #   固定長型 (int4)    pg_typmod は 4 のように固定バイト長正値
+        if pg_typmod < 0:
+            pg_typmod = -pg_typmod
+        # pg_typmod==0 or pg_typmod==4 等もあり得る
 
         # OID → Arrow 型 ID と要素サイズ
         arrow_id, elem = PG_OID_TO_ARROW.get(pg_oid, (UNKNOWN, None))
@@ -91,21 +90,21 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
 
         arrow_param: Optional[Tuple[int, int] | int] = None
 
-        # typmod による補正
+        # pg_typmod による補正
         if arrow_id == DECIMAL128:
             # numeric(p,s) → (precision, scale)
-            precision, scale = _decode_numeric_typmod(typmod)
+            precision, scale = _decode_numeric_pg_typmod(pg_typmod)
             arrow_param = (precision, scale)
         elif arrow_id == UTF8:
-            # VARCHAR(N) の N = typmod-4
-            if typmod > 4:
-                arrow_param = typmod - 4
+            # VARCHAR(N) の N = pg_typmod-4
+            if pg_typmod > 4:
+                arrow_param = pg_typmod - 4
 
         metas.append(
             ColumnMeta(
                 name=name,
                 pg_oid=pg_oid,
-                typmod=typmod,
+                pg_typmod=pg_typmod,
                 arrow_id=arrow_id,
                 elem_size=elem_size,
                 arrow_param=arrow_param,
