@@ -12,14 +12,14 @@ import time
 import numpy as np
 
 # プロジェクトルートを追加
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # Assuming src is importable directly now
 
-from gpupaser.pg_connector import PostgresConnector, get_binary_data
-from gpupaser.binary_parser import BinaryParser
-from gpupaser.memory_manager import GPUMemoryManager
-from gpupaser.gpu_decoder import GPUDecoder
-from gpupaser.output_handler import OutputHandler
-from gpupaser.utils import ColumnInfo
+from src.pg_connector import PostgresConnector, get_binary_data # Assuming get_binary_data is still in pg_connector
+# from src.binary_parser import BinaryParser # TODO: Verify BinaryParser equivalent (e.g., gpu_parse_wrapper?)
+from src.gpu_memory_manager_v2 import GPUMemoryManager # TODO: Verify class name and functionality match old GPUMemoryManager
+from src.gpu_decoder_v2 import decode_chunk # TODO: Verify usage. Old GPUDecoder might be different from gpu_decoder_v2.decode_chunk
+from src.output_handler import OutputHandler
+from src.type_map import ColumnMeta # TODO: Verify if ColumnInfo should be replaced by ColumnMeta
 
 def test_lineorder_binary_format(limit=5000, parquet_output="lineorder_binary_test.parquet"):
     """

@@ -42,7 +42,7 @@ while true; do
     # プロセス実行とバックグラウンド処理（オプション）
     if [ ${MAX_PARALLEL} -gt 1 ]; then
         # 並列処理の場合
-        python process_large_dataset.py --sql "${SQL_QUERY}" \
+        python src/main.py --sql "${SQL_QUERY}" \
                                         --output-format parquet \
                                         --parquet "${PARQUET_OUTPUT}" \
                                         --chunk-size ${CHUNK_SIZE} \
@@ -59,7 +59,7 @@ while true; do
         fi
     else
         # 逐次処理の場合
-        python process_large_dataset.py --sql "${SQL_QUERY}" \
+        python src/main.py --sql "${SQL_QUERY}" \
                                        --output-format parquet \
                                        --parquet "${PARQUET_OUTPUT}" \
                                        --chunk-size ${CHUNK_SIZE} \

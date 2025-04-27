@@ -24,9 +24,9 @@ from meta_fetch import ColumnMeta  # type: ignore
 
 
 DATA_CASES = [
-    ("lineorder", "expected_meta/lineorder.json", "lineorder_multigpu_output/lineorder.bin"),
-    ("customer", "expected_meta/customer.json", "lineorder_multigpu_output/customer.bin"),
-    ("date1", "expected_meta/date1.json", "lineorder_multigpu_output/date1.bin"),
+    ("lineorder", "test/expected_meta/lineorder.json", "input/lineorder.bin"),
+    ("customer", "test/expected_meta/customer.json", "input/customer.bin"),
+    ("date1", "test/expected_meta/date1.json", "input/date1.bin"),
 ]
 
 

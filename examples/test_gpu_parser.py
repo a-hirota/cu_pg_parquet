@@ -8,7 +8,7 @@ import time
 import sys
 from pathlib import Path
 import psycopg2
-from gpupaser.gpu_decoder import GPUDecoder
+from src.gpu_decoder import GPUDecoder # TODO: Verify if src.gpu_decoder exists and is the correct module. Consider src.gpu_decoder_v2.
 
 # GPUパーサーのデバッグテスト
 def test_gpu_parser(table="customer", limit=1000):

@@ -8,11 +8,11 @@ import os
 import sys
 import time
 import argparse
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
-from multiprocessing import Process, Queue
+import multiprocessing as mp
+from src.main import PgGpuProcessor
+from src.pg_connector import PostgresConnector
+
+# from src.utils import get_available_gpus # TODO: Verify if get_available_gpus is still needed and where it is located.
 
 # gpuPaserパッケージのパスを追加
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))

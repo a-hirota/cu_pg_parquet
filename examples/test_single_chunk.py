@@ -12,9 +12,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # カレントディレクトリをPYTHONPATHに追加
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # Assuming src is importable directly now
 
-from gpupaser.main import PgGpuProcessor
+from src.main import PgGpuProcessor
 
 def test_direct_parquet(output_file='./ray_output/customer_direct.parquet'):
     """直接SQL実行からcuDFでParquet出力"""

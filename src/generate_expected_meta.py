@@ -7,7 +7,7 @@ JSON 形式で snapshot ファイルに保存するユーティリティ。
         --dsn "dbname=postgres user=postgres host=localhost"
 
 保存先:
-    expected_meta/{table}.json
+    test/expected_meta/{table}.json
 """
 
 from __future__ import annotations

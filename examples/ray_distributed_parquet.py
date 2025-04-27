@@ -10,7 +10,7 @@ import time
 import glob
 from typing import Dict, List, Optional, Tuple
 
-from gpupaser.main import PgGpuProcessor
+from src.main import PgGpuProcessor
 
 def parse_args():
     """コマンドライン引数の解析"""
