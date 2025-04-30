@@ -24,14 +24,20 @@ from __future__ import annotations
 
 from typing import List, Dict, Any
 
+import warnings
 import numpy as np
 import cupy as cp
 import pyarrow as pa
-import pyarrow.compute as pc 
+import pyarrow.compute as pc
 try:
-    import pyarrow.cuda as pacuda
+    import pyarrow.cuda as pa_cuda
+    print("[gpu_decoder_v2] pyarrow.cuda imported successfully.")
+    PYARROW_CUDA_AVAILABLE = True
 except ImportError:
-    pacuda = None
+    pa_cuda = None
+    print("[gpu_decoder_v2] pyarrow.cuda not available.")
+    PYARROW_CUDA_AVAILABLE = False
+
 
 from numba import cuda
 
@@ -47,7 +53,23 @@ from .cuda_kernels.numeric_utils import int64_to_decimal_ascii  # noqa: F401  (i
 def build_validity_bitmap(valid_bool: np.ndarray) -> pa.Buffer:
     """Arrow の仕様 (LSB が行0、1=valid) に従ってビットマップを組み立てる"""
     bits_le = np.packbits(valid_bool.astype(np.uint8), bitorder="little")
-    return pa.py_buffer(bits_le.tobytes())
+    """Arrow の仕様 (LSB が行0、1=valid) に従ってビットマップを組み立てる"""
+    # Ensure input is a host numpy array
+    if isinstance(valid_bool, cp.ndarray):
+        valid_bool = valid_bool.get()
+    elif not isinstance(valid_bool, np.ndarray):
+        raise TypeError("Input must be a NumPy or CuPy array")
+
+    # Ensure it's contiguous boolean
+    valid_bool = np.ascontiguousarray(valid_bool, dtype=np.bool_)
+
+    # Pack bits using numpy
+    bits_le = np.packbits(valid_bool, bitorder='little')
+    return pa.py_buffer(bits_le)
+
+# TODO: Implement GPU version if performance becomes an issue
+# def build_validity_bitmap_gpu(valid_bool_dev: cp.ndarray) -> pa.Buffer:
+#     ...
 
 
 # ----------------------------------------------------------------------
@@ -79,13 +101,16 @@ def decode_chunk(
         raise ValueError("rows == 0")
 
     # ----------------------------------
-    # 1. GPU バッファ確保 (Arrow出力用)
+    # 1. GPU バッファ確保 (Arrow出力用) - 初期確保
     # ----------------------------------
     gmm = GPUMemoryManagerV2()
+    # bufs now contains offset buffers for varlen columns as well
+    # varlen: (d_values, d_nulls, d_offsets, max_len)
+    # fixed: (d_values, d_nulls, stride)
     bufs: Dict[str, Any] = gmm.initialize_device_buffers(columns, rows)
 
     # varlen_meta の準備 (Pass 2 で使用) - NUMERIC(DECIMAL128)は固定長なので除外
-    varlen_meta = []  # (col_idx, var_idx, name)
+    varlen_meta = []  # (col_idx, var_idx, name) # var_idx is the index within varlen columns
     fixedlen_meta = [] # (col_idx, name)
     for cidx, col in enumerate(columns):
         # Check arrow_id for variable length (UTF8, BINARY)
@@ -134,36 +159,40 @@ def decode_chunk(
     # --- END DEBUG ---
 
     # ----------------------------------
-    # 3. prefix‑sum offsets (GPU - CuPy)
+    # 3. prefix‑sum offsets (GPU - CuPy) & データバッファ再確保
     # ----------------------------------
-    print("--- Running Prefix Sum (GPU - CuPy) ---")
-    d_offsets = cuda.device_array((n_var, rows + 1), dtype=np.int32)
-    total_bytes = []
+    print("--- Running Prefix Sum (GPU - CuPy) & Reallocating Varlen Buffers ---")
+    total_bytes_list = [] # Store total bytes for each varlen column
+    values_dev_reallocated = [] # Store reallocated data buffers
 
-    # デバッグ: 可変長レングスを表示 (CPU計算結果)
-    for v in range(n_var):
-        print(f"Var column {v} lens = {host_var_lens[v, :5]}") # Print first 5 lengths
+    # Get the initially allocated offset buffers from gmm
+    # Assuming varlen tuple is (d_values, d_nulls, d_offsets, max_len)
+    initial_offset_buffers = [bufs[name][2] for _, _, name in varlen_meta]
 
-    for v in range(n_var):
-        cp_len = cp.asarray(d_var_lens[v]) 
-        cp_off = cp.concatenate([cp.zeros(1, dtype=np.int32), cp.cumsum(cp_len, dtype=np.int32)])
-        d_offsets[v] = cp_off
-        total_bytes.append(int(cp_off[-1].get()))
-    print("--- Finished Prefix Sum ---")
+    for v_idx, (cidx, _, name) in enumerate(varlen_meta):
+        # Calculate prefix sum using the lengths from Pass 1
+        cp_len = cp.asarray(d_var_lens[v_idx]) # Lengths for this varlen column
+        # Calculate offsets (including the initial 0)
+        cp_off = cp.cumsum(cp_len, dtype=np.int32)
+        total_bytes = int(cp_off[-1].get()) if rows > 0 else 0
+        total_bytes_list.append(total_bytes)
 
+        # Get the pre-allocated offset buffer for this column
+        d_offset_col = initial_offset_buffers[v_idx]
+        # Write the calculated offsets into the buffer (need to handle the initial 0)
+        d_offset_col[0] = 0
+        d_offset_col[1:] = cp_off # Write cumsum result
 
-    # 可変長 values バッファを調整 (max_len ではなく実サイズ)
-    values_dev = []
-    for (cidx, v_idx, name), tbytes in zip(varlen_meta, total_bytes):
-        # NUMERIC(1700) は ASCII 文字列化で最大 24B 程度になるため余裕を持たせる
-        col = columns[cidx]
-        if col.pg_oid == 1700:
-            tbytes = max(tbytes, rows * 24)
-        # 再確保して置換
-        new_buf = cuda.device_array(max(1, tbytes), dtype=np.uint8)
-        old_tuple = bufs[name]
-        bufs[name] = (new_buf, old_tuple[1], old_tuple[2] if len(old_tuple) > 2 else 0)
-        values_dev.append(new_buf)
+        # Reallocate the data buffer using the calculated total_bytes
+        new_data_buf = gmm.replace_varlen_data_buffer(name, total_bytes)
+        values_dev_reallocated.append(new_data_buf)
+
+        # Debug print
+        print(f"VarCol '{name}' (v_idx={v_idx}): Total Bytes={total_bytes}, Reallocated Buffer: {new_data_buf.device_ctypes_pointer.value if new_data_buf else 'None'}")
+        # print(f"  Offsets (first 5): {d_offset_col[:min(6, rows+1)].copy_to_host()}") # Debug: check offsets
+
+    print("--- Finished Prefix Sum & Reallocation ---")
+
 
     # ----------------------------------
     # 4. pass-2 scatter-copy per var-col (GPU Kernel)
@@ -172,25 +201,30 @@ def decode_chunk(
     threads = 256
     blocks = (rows + threads - 1) // threads
 
-    for i, (cidx, v_idx, name) in enumerate(varlen_meta):
-        # Ensure the column is actually variable length (UTF8/BINARY) before calling varlen kernel
+    for v_idx, (cidx, _, name) in enumerate(varlen_meta):
         col_meta = columns[cidx]
+        # Only run for actual variable length types
         if col_meta.arrow_id == UTF8 or col_meta.arrow_id == BINARY:
-            offsets_v = d_offsets[v_idx]
+            # Get the offset buffer (already filled by prefix sum)
+            d_offset_v = bufs[name][2] # Get from the updated bufs dict
+            # Get the reallocated data buffer
+            d_values_v = bufs[name][0] # Get from the updated bufs dict
+
+            # Get field offsets and lengths for this column from the Pass 0 result
             field_off_v = field_offsets_dev[:, cidx]
             field_len_v = field_lengths_dev[:, cidx]
-            # numeric_mode is no longer needed as NUMERIC is handled as fixed DECIMAL128
+
+            # Call the simplified kernel
             pass2_scatter_varlen[blocks, threads](
                 raw_dev,
                 field_off_v,
                 field_len_v,
-                offsets_v,
-                values_dev[v_idx], # Use the reallocated buffer
-                0 # numeric_mode = 0 (normal copy)
+                d_offset_v,    # Pass the offset buffer for this column
+                d_values_v     # Pass the reallocated data buffer
             )
         else:
             # This case should not happen if varlen_meta is built correctly
-            print(f"Warning: Column {name} in varlen_meta but is not UTF8/BINARY (arrow_id={col_meta.arrow_id}). Skipping varlen pass.")
+             warnings.warn(f"Column {name} in varlen_meta but is not UTF8/BINARY (arrow_id={col_meta.arrow_id}). Skipping varlen pass.")
 
     cuda.synchronize()
     print("--- Finished Pass 2 VarLen ---")
@@ -257,189 +291,183 @@ def decode_chunk(
 
 
     # ----------------------------------
-    # 5. Arrow RecordBatch 組立 (CPU)
+    # 5. Arrow RecordBatch 組立 (Zero-Copy where possible)
     # ----------------------------------
-    print("--- Assembling Arrow RecordBatch (CPU) ---")
+    print("--- Assembling Arrow RecordBatch (Zero-Copy Attempt) ---")
     arrays = []
+    # Get the full null bitmap from GPU once
+    # host_nulls_all was already copied for debugging, reuse it.
+    # If not debugging, copy here: host_nulls_all = d_nulls_all.copy_to_host()
+
     for cidx, col in enumerate(columns):
-        # Get the null mask (boolean array: True=valid, False=null)
-        null_np_col = np.ascontiguousarray(host_nulls_all[:, cidx])
-        boolean_mask = (null_np_col == 1)
+        print(f"Assembling column: {col.name} (Arrow ID: {col.arrow_id}, IsVar: {col.is_variable})")
+        # --- 1. Get Validity Buffer ---
+        # Get the boolean mask (True=valid) for this column from the host copy
+        boolean_mask_np = (host_nulls_all[:, cidx] == 1)
+        null_count = rows - np.count_nonzero(boolean_mask_np)
+        # Build the Arrow validity bitmap buffer (on host for now)
+        # build_validity_bitmap handles contiguous array conversion
+        try:
+            validity_buffer = build_validity_bitmap(boolean_mask_np)
+        except Exception as e_vb:
+            print(f"Error building validity bitmap for {col.name}: {e_vb}")
+            arrays.append(pa.nulls(rows)) # Fallback
+            continue
 
-        # --- Get data from GPU buffers to host numpy arrays ---
-        values_np = None
-        offsets_np = None # Only for varlen
-
-        if col.is_variable:
-            v_idx = var_indices_host[cidx]
-            # Ensure values_dev has data for this index
-            if v_idx < len(values_dev):
-                values_np = values_dev[v_idx].copy_to_host()
-                offsets_np = d_offsets[v_idx].copy_to_host()
-            else:
-                print(f"Warning: No data buffer found for varlen column {col.name} (v_idx={v_idx})")
-                # Handle error or create empty array? For now, skip.
-                continue
-        else: # Fixed-width
-            if col.name in bufs:
-                triple = bufs[col.name]
-                d_values = triple[0]
-                values_np = d_values.copy_to_host()
-            else:
-                print(f"Warning: No data buffer found for fixed column {col.name}")
-                # Handle error or create empty array? For now, skip.
-                continue
-
-        # --- Determine Arrow type for ALL columns based on ColumnMeta.arrow_id ---
+        # --- 2. Determine Arrow Type ---
         pa_type = None
         if col.arrow_id == DECIMAL128:
-            precision, scale = col.arrow_param or (38, 0) # Get precision/scale from meta_fetch result
-            # --- DEBUG PRINT START ---
-            print(f"DEBUG: Column='{col.name}', arrow_param={col.arrow_param}, Calculated Precision={precision}, Calculated Scale={scale}")
-            # --- DEBUG PRINT END ---
-            # Validate precision before calling pa.decimal128
+            # Precision/scale should be in col.arrow_param from meta_fetch
+            precision, scale = col.arrow_param or (38, 0)
             if not (1 <= precision <= 38):
-                 print(f"ERROR: Invalid precision {precision} for column {col.name}. Defaulting to (38, 0) for type creation, but data might be incorrect.")
-                 # Fallback or raise error? For now, try default for type creation
-                 precision, scale = 38, 0 # Use valid default for type creation
+                 warnings.warn(f"Invalid precision {precision} for DECIMAL column {col.name}. Using (38, 0).")
+                 precision, scale = 38, 0
             pa_type = pa.decimal128(precision, scale)
-        elif col.arrow_id == UTF8:
-             pa_type = pa.string()
-        elif col.arrow_id == BINARY:
-             pa_type = pa.binary()
+        elif col.arrow_id == UTF8: pa_type = pa.string()
+        elif col.arrow_id == BINARY: pa_type = pa.binary()
         elif col.arrow_id == INT16: pa_type = pa.int16()
         elif col.arrow_id == INT32: pa_type = pa.int32()
         elif col.arrow_id == INT64: pa_type = pa.int64()
         elif col.arrow_id == FLOAT32: pa_type = pa.float32()
         elif col.arrow_id == FLOAT64: pa_type = pa.float64()
-        elif col.arrow_id == BOOL: pa_type = pa.bool_()
+        elif col.arrow_id == BOOL: pa_type = pa.bool_() # Assuming stored as 1 byte in GPU buffer
         elif col.arrow_id == DATE32: pa_type = pa.date32()
-        elif col.arrow_id == TS64_US: pa_type = pa.timestamp('us')
+        elif col.arrow_id == TS64_US:
+            # Handle timezone explicitly using arrow_param if available
+            tz_info = col.arrow_param # Expects None or a timezone string
+            if tz_info is not None and not isinstance(tz_info, str):
+                 warnings.warn(f"Invalid timezone info in arrow_param for {col.name}: {tz_info}. Ignoring.")
+                 tz_info = None
+            # NOTE: meta_fetch.py currently does not populate arrow_param with timezone.
+            # This code assumes it might in the future.
+            print(f"Timestamp column {col.name}: using timezone '{tz_info}' from arrow_param.")
+            pa_type = pa.timestamp('us', tz=tz_info)
         else: # Includes UNKNOWN
-            print(f"Warning: Unhandled arrow_id {col.arrow_id} for column {col.name}. Falling back to binary.")
-            pa_type = pa.binary() # Safer fallback
+            warnings.warn(f"Unhandled arrow_id {col.arrow_id} for column {col.name}. Falling back to binary.")
+            pa_type = pa.binary() # Fallback to binary
 
-        # --- Create Arrow Array using pa.array() ---
-        # Initialize arr to None before the try block, ensure it's always assigned
+        # --- 3. Get Data/Offset Buffers (GPU Pointers) ---
         arr = None
         try:
-            if values_np is None:
-                print(f"Skipping array creation for {col.name} due to missing data.")
-                # Create a null array of the determined type if data is missing
-                if pa_type:
-                    arr = pa.nulls(rows, type=pa_type)
+            if col.is_variable:
+                # Get buffers from the potentially updated bufs dict
+                # Tuple: (d_values, d_nulls, d_offsets, max_len)
+                if col.name not in bufs or len(bufs[col.name]) != 4:
+                     raise ValueError(f"Variable length buffer tuple not found or invalid for {col.name}")
+                d_values_col = bufs[col.name][0] # Reallocated data buffer
+                d_offsets_col = bufs[col.name][2] # Offset buffer
+
+                if d_values_col is None or d_offsets_col is None:
+                     raise ValueError(f"Missing data or offset buffer for varlen column {col.name}")
+
+                # Wrap GPU buffers for PyArrow
+                if PYARROW_CUDA_AVAILABLE:
+                    pa_offset_buf = pa_cuda.as_cuda_buffer(d_offsets_col)
+                    pa_data_buf = pa_cuda.as_cuda_buffer(d_values_col)
                 else:
-                    # Fallback if pa_type couldn't be determined (should not happen with current logic)
-                    arr = pa.nulls(rows)
+                    # Fallback: Copy to host if pyarrow.cuda is not available
+                    warnings.warn("pyarrow.cuda not available. Copying varlen data/offsets to host for Arrow assembly.")
+                    pa_offset_buf = pa.py_buffer(d_offsets_col.copy_to_host())
+                    pa_data_buf = pa.py_buffer(d_values_col.copy_to_host())
 
-            elif pa.types.is_binary(pa_type) or pa.types.is_string(pa_type):
-                if offsets_np is None:
-                    print(f"Skipping array creation for {col.name} due to missing offsets.")
-                    continue
-                # Reconstruct list of Python bytes/strings from buffers
-                list_data = []
-                for r in range(rows):
-                    if boolean_mask[r]: # If valid
-                        start = offsets_np[r]
-                        end = offsets_np[r+1]
-                        byte_slice = values_np[start:end]
-                        if pa.types.is_string(pa_type):
-                            try:
-                                list_data.append(bytes(byte_slice).decode('utf-8'))
-                            except UnicodeDecodeError:
-                                print(f"Warning: UTF-8 decode error in {col.name} row {r}. Appending None.")
-                                list_data.append(None)
-                                boolean_mask[r] = False # Mark as null if decode fails
-                        else:
-                            list_data.append(bytes(byte_slice))
-                    else: # If null
-                        list_data.append(None)
-                 # Create array from list
-                arr = pa.array(list_data, type=pa_type, mask=~boolean_mask) # Mask is True for NULL
-            elif pa.types.is_fixed_size_binary(pa_type):
-                # Need item size for fixed binary
-                item_size = pa_type.byte_width
-                # Reshape or view needed? values_np is currently uint8 flat buffer
-                # Example: Assuming data is tightly packed
-                list_data = [bytes(values_np[r*item_size:(r+1)*item_size]) if boolean_mask[r] else None for r in range(rows)]
-                arr = pa.array(list_data, type=pa_type, mask=~boolean_mask)
-            elif pa.types.is_boolean(pa_type):
-                # Assuming boolean is stored as 1 byte (0 or 1)
-                # Need to view the uint8 buffer as bool
-                arr = pa.array(values_np.view(np.bool_), type=pa_type, mask=~boolean_mask)
-            elif pa.types.is_decimal(pa_type):
-                # Handle Decimal128 - needs buffer view/cast
-                item_size = 16 # bytes
-                if values_np.size != rows * item_size:
-                    raise ValueError(f"Buffer size {values_np.size} incorrect for Decimal128 column {col.name} ({rows} * {item_size})")
-                # Create buffer for Arrow - assumes values_np contains raw 16-byte LE integers
-                arrow_data_buf = pa.py_buffer(values_np)
+                # Create array using from_buffers
+                if pa.types.is_string(pa_type):
+                    arr = pa.StringArray.from_buffers(pa_type, rows, [validity_buffer, pa_offset_buf, pa_data_buf], null_count=null_count)
+                elif pa.types.is_binary(pa_type):
+                    arr = pa.BinaryArray.from_buffers(pa_type, rows, [validity_buffer, pa_offset_buf, pa_data_buf], null_count=null_count)
+                else: # Fallback if type mismatch
+                    warnings.warn(f"Type mismatch for varlen column {col.name}. Expected String/Binary, got {pa_type}. Creating null array.")
+                    arr = pa.nulls(rows, type=pa_type)
 
-                # どのビルドでも確実に動く自前実装を使う
-                validity_buf = build_validity_bitmap(boolean_mask) 
+            else: # Fixed-width
+                # Get buffer from bufs dict
+                # Tuple: (d_values, d_nulls, stride)
+                if col.name not in bufs or len(bufs[col.name]) != 3:
+                     raise ValueError(f"Fixed length buffer tuple not found or invalid for {col.name}")
+                d_values_col = bufs[col.name][0]
+                stride = bufs[col.name][2]
+                expected_item_size = pa_type.byte_width if hasattr(pa_type, 'byte_width') else stride # Use stride if byte_width not available (e.g., bool)
 
-                arr = pa.Decimal128Array.from_buffers(pa_type, rows, [validity_buf, arrow_data_buf], null_count=rows - np.count_nonzero(boolean_mask))
+                if d_values_col is None:
+                     raise ValueError(f"Missing data buffer for fixed column {col.name}")
 
-            elif pa.types.is_date(pa_type) or pa.types.is_timestamp(pa_type) or pa.types.is_integer(pa_type) or pa.types.is_floating(pa_type):
-                # For primitive types, view the buffer with the correct numpy dtype
-                try:
-                    # Determine numpy dtype directly from pyarrow type without pandas
-                    if pa.types.is_int16(pa_type): np_dtype = np.int16
-                    elif pa.types.is_int32(pa_type): np_dtype = np.int32
-                    elif pa.types.is_int64(pa_type): np_dtype = np.int64
-                    elif pa.types.is_float32(pa_type): np_dtype = np.float32
-                    elif pa.types.is_float64(pa_type): np_dtype = np.float64
-                    elif pa.types.is_date32(pa_type): np_dtype = np.int32 # date32 is days since epoch (int32)
-                    elif pa.types.is_timestamp(pa_type): np_dtype = np.int64 # timestamp is typically int64
-                    else:
-                        raise TypeError(f"Cannot determine numpy dtype for Arrow type {pa_type}")
+                # Check if data is contiguous or needs gathering due to stride
+                is_contiguous = (stride == expected_item_size)
 
-                    # Ensure buffer size is compatible with dtype itemsize
-                    item_size = np.dtype(np_dtype).itemsize
-                    if values_np.size % item_size != 0:
-                        raise ValueError(f"Buffer size {values_np.size} not divisible by itemsize {item_size} for {col.name}")
-                    # Create array using view and mask
-                    # Check if stride was used during allocation
-                    _d_vals, _d_nulls, stride_alloc = bufs[col.name] # Get stride from bufs
-                    if stride_alloc == item_size: # Tightly packed
-                        arr = pa.array(values_np.view(np_dtype), type=pa_type, mask=~boolean_mask)
-                    else: # Need to gather elements
-                        print(f"Warning: Gathering elements for {col.name} due to stride {stride_alloc} != itemsize {item_size}")
+                # Wrap GPU buffer or copy if needed
+                if PYARROW_CUDA_AVAILABLE and is_contiguous:
+                    pa_data_buf = pa_cuda.as_cuda_buffer(d_values_col)
+                else:
+                    if not is_contiguous:
+                        warnings.warn(f"Copying fixed-length column {col.name} to host due to stride ({stride} != {expected_item_size}).")
+                        # Gather data on host
+                        host_vals_np = d_values_col.copy_to_host()
+                        np_dtype = pa_type.to_pandas_dtype() # Get numpy dtype
                         gathered_data = np.empty(rows, dtype=np_dtype)
+                        item_size = np.dtype(np_dtype).itemsize
                         for r in range(rows):
-                            if boolean_mask[r]:
-                                start_byte = r * stride_alloc
-                                # Ensure we don't read past the end of values_np
-                                if start_byte + item_size <= values_np.size:
-                                     gathered_data[r] = np.frombuffer(values_np[start_byte:start_byte+item_size], dtype=np_dtype)[0]
-                                else:
-                                    print(f"Error: Out-of-bounds read attempted for {col.name} row {r}")
-                                    # Handle error, maybe set to null?
-                                    boolean_mask[r] = False # Mark as null
-                            # else: let numpy handle default for masked elements
-                        arr = pa.array(gathered_data, type=pa_type, mask=~boolean_mask)
-                except (TypeError, ValueError, AttributeError) as e_view:
-                    print(f"Error creating primitive array for {col.name} (type {pa_type}): {e_view}. Buffer content: {values_np[:20]}")
-                    arr = pa.nulls(rows, type=pa_type) # Fallback to null array
-            else:
-                print(f"Unhandled Arrow type {pa_type} for column {col.name}. Creating null array.")
-                arr = pa.nulls(rows, type=pa_type) # Fallback for unhandled types
+                             start_byte = r * stride
+                             if start_byte + item_size <= host_vals_np.size:
+                                 gathered_data[r] = np.frombuffer(host_vals_np[start_byte:start_byte+item_size], dtype=np_dtype)[0]
+                             else: # Should not happen if allocation was correct
+                                 warnings.warn(f"Potential out-of-bounds read during gather for {col.name} row {r}")
+                                 # Set to default value or handle as null? For now, let numpy decide default.
+                        pa_data_buf = pa.py_buffer(gathered_data)
+                    else:
+                        warnings.warn(f"pyarrow.cuda not available. Copying fixed column {col.name} to host.")
+                        pa_data_buf = pa.py_buffer(d_values_col.copy_to_host())
 
-        except Exception as e_create:
-            print(f"Error creating Arrow array for column {col.name}: {e_create}")
-            # Assign a null array as fallback if arr wasn't created successfully
-            if arr is None:
-                try:
-                    arr = pa.nulls(rows, type=pa_type if pa_type else pa.null())
-                except Exception as e_fallback: # Failsafe if pa_type itself is bad
-                    print(f"Error creating fallback null array for {col.name}: {e_fallback}")
-                    arr = pa.nulls(rows) # Absolute fallback
 
-        # Append exactly **once** and skip the duplicated builder below
-        if arr is None:
-            arr = pa.nulls(rows, type=pa_type)  
+                # Create array using from_buffers
+                # Note: For boolean, from_buffers expects a bit-packed buffer.
+                if pa.types.is_boolean(pa_type):
+                     # Strategy: Copy byte-per-bool data from GPU, pack on CPU, then use from_buffers.
+                     # This avoids needing a GPU packing kernel for now.
+                     warnings.warn("Packing boolean data on CPU before using from_buffers.")
+                     host_byte_bools = d_values_col.copy_to_host()
+                     # Ensure stride is handled if necessary (though bool stride is likely 1)
+                     if not is_contiguous:
+                         # This path should ideally not be hit for bool (stride=1)
+                         # but handle defensively.
+                         warnings.warn(f"Gathering boolean bytes due to stride {stride} != 1.")
+                         np_byte_type = np.uint8
+                         gathered_bytes = np.empty(rows, dtype=np_byte_type)
+                         item_size = 1 # bool is 1 byte here
+                         for r in range(rows):
+                             start_byte = r * stride
+                             if start_byte + item_size <= host_byte_bools.size:
+                                 gathered_bytes[r] = np.frombuffer(host_byte_bools[start_byte:start_byte+item_size], dtype=np_byte_type)[0]
+                             else:
+                                 warnings.warn(f"Potential out-of-bounds read during bool gather for {col.name} row {r}")
+                         host_byte_bools = gathered_bytes
+
+                     # Pack the bytes into bits (LSB order for Arrow)
+                     packed_bits = np.packbits(host_byte_bools.view(np.bool_), bitorder='little')
+                     pa_data_buf = pa.py_buffer(packed_bits)
+                     # Now use from_buffers with the packed data buffer
+                     arr = pa.BooleanArray.from_buffers(pa_type, rows, [validity_buffer, pa_data_buf], null_count=null_count)
+                elif pa.types.is_decimal(pa_type):
+                     arr = pa.Decimal128Array.from_buffers(pa_type, rows, [validity_buffer, pa_data_buf], null_count=null_count)
+                elif pa.types.is_fixed_size_list(pa_type) or pa.types.is_fixed_size_binary(pa_type) or \
+                     pa.types.is_primitive(pa_type): # Catches numeric, date, timestamp etc.
+                     arr = pa.Array.from_buffers(pa_type, rows, [validity_buffer, pa_data_buf], null_count=null_count)
+                else:
+                     warnings.warn(f"Cannot use from_buffers for fixed type {pa_type} of column {col.name}. Falling back to host copy and pa.array().")
+                     # Fallback to host copy for unsupported types
+                     host_vals_np = d_values_col.copy_to_host()
+                     np_dtype = pa_type.to_pandas_dtype()
+                     arr = pa.array(host_vals_np.view(np_dtype), type=pa_type, mask=~boolean_mask_np)
+
+
+        except Exception as e_assembly:
+            print(f"Error assembling Arrow array for column {col.name} (type {pa_type}): {e_assembly}")
+            arr = pa.nulls(rows, type=pa_type if pa_type else pa.null()) # Fallback
+
+        if arr is None: # Should not happen with fallbacks, but as a safeguard
+            print(f"Array creation failed unexpectedly for {col.name}. Creating null array.")
+            arr = pa.nulls(rows, type=pa_type if pa_type else pa.null())
+
         arrays.append(arr)
-        continue     # ← これで以降の重複ブロックを飛ばす
 
     batch = pa.RecordBatch.from_arrays(arrays, [c.name for c in columns])
     print("--- Finished Arrow Assembly ---")
