@@ -23,12 +23,12 @@ import pyarrow as pa
 
 from numba import cuda
 
-# Import necessary functions from the correct modules
-from .meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
-from .gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size # Import detect_pg_header_size
-from .gpu_decoder_v2 import decode_chunk
+# Import necessary functions from the correct modules using absolute paths from root
+from src.meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
+from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size # Import detect_pg_header_size
+from src.gpu_decoder_v2 import decode_chunk
 # Import the CPU row start calculator (or define it here if preferred)
-from .test_single_row_pg_parser import calculate_row_starts_cpu
+from test.test_single_row_pg_parser import calculate_row_starts_cpu # Assuming test is importable from root
 
 
 ROWS = 5
@@ -140,14 +140,14 @@ def test_e2e_postgres_arrow():
 
     # 結果比較
     
-    # NUMERIC(1700)カラムは比較から除外
+    # NUMERIC(1700)カラムも含めて比較対象とする
     numeric_cols = [c.name for c in columns if c.pg_oid == 1700]
-    
-    # 正数型カラム (整数, 浮動小数点)
-    numeric_type_cols = [
-        c.name for c in columns 
-        if c.pg_oid in (20, 21, 23, 700, 701)  # int8/int4/int2/float4/float8
-        and c.name not in numeric_cols  # NUMERIC(1700)は除外
+    print(f"NUMERIC columns to compare: {numeric_cols}")
+
+    # 比較対象カラム (整数, 浮動小数点, Decimal128)
+    comparable_cols = [
+        c.name for c in columns
+        if c.pg_oid in (20, 21, 23, 700, 701, 1700) # Include NUMERIC OID 1700
     ]
     
     # 検証を始める前にカラム名とデータ型を表示
@@ -159,24 +159,24 @@ def test_e2e_postgres_arrow():
         print(f"{c.name}: OID={c.pg_oid}, Type={arrow_id_str}, IsVar={is_variable_str}")
 
     
-    # 想定データを表示
+    # 想定データを表示 (全カラム)
     print("\n--- Expected Data ---")
     for col in expected_tb.column_names:
-        if col in numeric_cols:
-            continue
+        # if col in numeric_cols: # Keep numeric columns for display
+        #     continue
         print(f"Column {col}: {expected_tb[col]}")
-        
-    # 実際のデータを表示
+
+    # 実際のデータを表示 (全カラム)
     print("\n--- Actual Data ---")
     for col in result_tb.column_names:
-        if col in numeric_cols:
-            continue
+        # if col in numeric_cols: # Keep numeric columns for display
+        #     continue
         print(f"Column {col}: {result_tb[col]}")
     
-    # 修正が成功していれば、整数型カラムは正常に変換できるはず
+    # 修正が成功していれば、対象カラムは正常に変換できるはず
     # 1つずつ検証して、可能なカラムだけ比較
     all_comparisons_passed = True # Track overall success
-    for col in numeric_type_cols:
+    for col in comparable_cols: # Use the list including numeric columns
         col_comparison_passed = True # Track success for this column
         try:
             # Ensure both tables have the column before comparing
@@ -205,11 +205,18 @@ def test_e2e_postgres_arrow():
                          col_comparison_passed = False
                          all_comparisons_passed = False
                     elif not np.isclose(exp_val, act_val): # Use isclose for float comparison
-                         print(f"警告: {col}[{row}] 不一致: 期待値={exp_val}, 実際={act_val}")
+                         print(f"警告: {col}[{row}] 不一致 (float): 期待値={exp_val}, 実際={act_val}")
                          col_comparison_passed = False
                          all_comparisons_passed = False
-                elif exp_val != act_val:
-                    print(f"警告: {col}[{row}] 不一致: 期待値={exp_val}, 実際={act_val}")
+                # Add specific comparison for Decimal type
+                elif isinstance(exp_val, pa.Decimal128Scalar) and isinstance(act_val, pa.Decimal128Scalar):
+                     # Direct comparison should work for Decimal128Scalar
+                     if exp_val != act_val:
+                          print(f"警告: {col}[{row}] 不一致 (Decimal): 期待値={exp_val}, 実際={act_val}")
+                          col_comparison_passed = False
+                          all_comparisons_passed = False
+                elif exp_val != act_val: # For integers and other types
+                    print(f"警告: {col}[{row}] 不一致 (other): 期待値={exp_val} (type {type(exp_val)}), 実際={act_val} (type {type(act_val)})")
                     col_comparison_passed = False
                     all_comparisons_passed = False
             

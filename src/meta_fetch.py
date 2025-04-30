@@ -37,6 +37,8 @@ def _decode_numeric_pg_typmod(pg_typmod: int) -> Tuple[int, int]:
     pg_typmod は ( (p << 16) | s ) + 4 という内部表現
     """
     if pg_typmod <= 0:  # pg_typmod==0 は未指定 (= variable)
+        if pg_typmod == -1:
+            return (38,0)
         return (0, 0)
     mod = pg_typmod - 4
     precision = (mod >> 16) & 0xFFFF

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from numba import cuda
 
-from .gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
+from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
 
 
 # 1行だけの最小限の COPY BINARY データを作成
