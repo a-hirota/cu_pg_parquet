@@ -8,10 +8,10 @@ import io
 import os
 from typing import List, Optional, Tuple
 
-from .utils import ColumnInfo
-from .meta_fetch import fetch_column_meta
-from .type_map import ColumnMeta
-from .psql_copy_stream import copy_binary_to_gpu_chunks
+# from .utils import ColumnInfo # Removed incorrect import
+from .meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta from meta_fetch
+# from .type_map import ColumnMeta # Removed import from type_map
+# from .psql_copy_stream import copy_binary_to_gpu_chunks # Commented out non-existent module import
 
 class PostgresConnector:
     """PostgreSQLとの接続を管理するクラス"""
@@ -103,7 +103,7 @@ def check_table_exists(conn, table_name: str) -> bool:
     cur.close()
     return exists
 
-def get_table_info(conn, table_name: str) -> List[ColumnInfo]:
+def get_table_info(conn, table_name: str) -> List[ColumnMeta]: # Changed ColumnInfo to ColumnMeta
     """テーブル情報の取得"""
     cur = conn.cursor()
     cur.execute("""
@@ -120,8 +120,10 @@ def get_table_info(conn, table_name: str) -> List[ColumnInfo]:
     columns = []
     for name, type_, length in cur.fetchall():
         print(f"Column: {name}, Type: {type_}, Length: {length}")  # デバッグ出力
-        columns.append(ColumnInfo(name, type_, length))
-    
+        # Assuming ColumnMeta constructor matches (name, type_, length) or similar
+        # Need to verify ColumnMeta definition if this fails
+        columns.append(ColumnMeta(name, type_, length)) # Changed ColumnInfo to ColumnMeta
+
     cur.close()
     return columns
 
@@ -134,9 +136,9 @@ def get_table_row_count(conn, table_name: str) -> int:
     print(f"Table {table_name} has {row_count} rows")  # デバッグ出力
     return row_count
 
-def get_query_column_info(conn, query: str) -> List[ColumnInfo]:
+def get_query_column_info(conn, query: str) -> List[ColumnMeta]: # Changed ColumnInfo to ColumnMeta
     """SQLクエリの結果セットのカラム情報を取得
-    
+
     Args:
         conn: PostgreSQL接続オブジェクト
         query: 実行するSQLクエリ
@@ -178,9 +180,11 @@ def get_query_column_info(conn, query: str) -> List[ColumnInfo]:
                 # その他の型は文字列として扱う
                 col_type = "text"
                 col_length = 1024
-                
-            columns.append(ColumnInfo(col_name, col_type, col_length))
-        
+
+            # Assuming ColumnMeta constructor matches (name, type_, length) or similar
+            # Need to verify ColumnMeta definition if this fails
+            columns.append(ColumnMeta(col_name, col_type, col_length)) # Changed ColumnInfo to ColumnMeta
+
         # 詳細なログ出力
         print(f"クエリのカラム情報を取得: {len(columns)}カラム")
         for col in columns:

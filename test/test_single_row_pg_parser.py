@@ -67,14 +67,14 @@ def calculate_row_starts_cpu(raw_data, header_size, num_rows):
     ヘッダー後の潜在的なパディング/フラグをスキップし、
     各行のフィールドを正しく読み進めて次の行の開始位置を特定します。
     """
-    print(f"[calculate_row_starts_cpu] Input: header_size={header_size}, num_rows={num_rows}, data_len={len(raw_data)}") # DEBUG
+    # print(f"[calculate_row_starts_cpu] Input: header_size={header_size}, num_rows={num_rows}, data_len={len(raw_data)}") # DEBUG
     row_starts = np.full(num_rows, -1, dtype=np.int32) # Initialize with -1 (invalid)
     pos = header_size
     array_size = len(raw_data)
     current_row_index = 0
 
     while current_row_index < num_rows and pos < array_size:
-        print(f"[calculate_row_starts_cpu] Trying Row {current_row_index}: Current pos={pos}") # DEBUG
+        # print(f"[calculate_row_starts_cpu] Trying Row {current_row_index}: Current pos={pos}") # DEBUG
 
         # --- Find the actual start of the row data ---
         # Peek ahead to find the first valid num_fields
@@ -87,19 +87,19 @@ def calculate_row_starts_cpu(raw_data, header_size, num_rows):
             potential_num_fields = (raw_data[pos] << 8) | raw_data[pos + 1]
 
             if potential_num_fields == 0xFFFF: # EOF marker
-                 print(f"[calculate_row_starts_cpu] Found EOF marker while searching for row start at pos={pos}") # DEBUG
+                 # print(f"[calculate_row_starts_cpu] Found EOF marker while searching for row start at pos={pos}") # DEBUG
                  pos = array_size # Stop processing
                  break
 
             # Check for a reasonable number of fields
             if potential_num_fields > 0 and potential_num_fields < 1000: # Adjust 1000 if needed
-                 print(f"[calculate_row_starts_cpu] Found potential row start with {potential_num_fields} fields at pos={pos}") # DEBUG
+                 # print(f"[calculate_row_starts_cpu] Found potential row start with {potential_num_fields} fields at pos={pos}") # DEBUG
                  found_start = True
                  break # Found the likely start
 
             # If not a valid field count or EOF, advance by one byte and retry
             pos += 1
-            print(f"[calculate_row_starts_cpu] Skipping byte, new search pos={pos}") # DEBUG
+            # print(f"[calculate_row_starts_cpu] Skipping byte, new search pos={pos}") # DEBUG
 
         if not found_start or pos >= array_size:
              print(f"[calculate_row_starts_cpu] Could not find valid row start after pos={original_search_pos}. Stopping.") # DEBUG
