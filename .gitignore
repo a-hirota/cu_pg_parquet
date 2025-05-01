@@ -13,7 +13,7 @@ output/
 # old directories for previous runs
 old/
 
-memory-bank/
+# memory-bank
 
 cufile.log
 *.bin
