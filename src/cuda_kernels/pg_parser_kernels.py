@@ -7,6 +7,7 @@ import numpy as np
 from numba import cuda
 import math
 import time
+from numba import int64, int32
 
 # 環境変数から最適化パラメータを取得
 MAX_THREADS = int(os.environ.get('GPUPASER_MAX_THREADS', '1024'))
@@ -42,6 +43,38 @@ def decode_int32_be(data, pos):
          # Reinterpret as signed int32
          return val - 0x100000000 
     return val
+
+@cuda.jit
+def calculate_row_lengths_gpu(raw, rows, header, row_len_out):
+    """
+    各スレッド＝1 行で 行バイト長 を求める簡易カーネル
+    (Plan-C 用 / NULL 判定あり / 境界チェックあり)
+    """
+    rid = cuda.grid(1)
+    if rid >= rows:
+        return
+
+    pos = header
+    # 先頭から自分の行までシリアルに飛ぶ（簡易版）
+    for _ in range(rid):
+        nf = read_uint16_be(raw, pos)
+        if nf == 0xFFFF:
+            row_len_out[rid] = -1
+            return
+        pos += 2
+        for _ in range(nf):
+            fl = decode_int32_be(raw, pos)
+            pos += 4 + max(fl, 0)
+
+    start = pos
+    nf = read_uint16_be(raw, pos)
+    pos += 2
+    for _ in range(nf):
+        fl = decode_int32_be(raw, pos)
+        pos += 4 + max(fl, 0)
+
+    row_len_out[rid] = pos - start
+
 
 @cuda.jit(device=True)
 def find_next_row_start(data, start_pos, end_pos, num_cols, valid_cols=0):
@@ -102,6 +135,247 @@ def atomic_add_global(array, idx, val):
     # 古い実装（compare_and_swapを使用）だとNumba 0.56以降でエラーが発生するため、
     # 単純なatomic.addを使用する実装に変更
     return cuda.atomic.add(array, idx, val)
+
+@cuda.jit(device=True, inline=True)
+def read_uint16_be(data, pos):
+    """ Reads a 16-bit unsigned integer in big-endian format. """
+    b0 = data[pos]
+    b1 = data[pos + 1]
+    return (b0 << 8) | b1
+
+@cuda.jit
+def count_rows_gpu(raw, header_size, row_cnt):
+    """
+    各スレッドが (header_size + tid) から stride=gridsize で走査し、
+    行ヘッダ (uint16 != 0xFFFF) を検出したらその行を最後までスキップして
+    ローカルカウンタをインクリメント。
+    """
+    pos   = header_size + cuda.grid(1)      # 走査開始
+    step  = cuda.gridsize(1)                # 全スレッド合計の stride
+    end   = raw.size - 2                    # uint16 読み込み可否境界
+    local = 0
+
+    while pos < end:
+        num = read_uint16_be(raw, pos)      # Use helper
+        if num == 0xFFFF:                   # COPY‐BINARY 終端
+            break
+
+        cur = pos + 2                       # フィールド長へ
+        # Check if reading num_fields itself is valid before loop
+        if cur > raw.size: # Need at least 2 bytes for num_fields
+             break
+
+        valid_row_parse = True
+        for _ in range(num):                # num == ncols
+            if cur + 4 > raw.size:          # 異常終了 guard (check against raw.size)
+                valid_row_parse = False
+                break
+            flen = decode_int32_be(raw, cur) # Use existing helper
+            cur += 4                        # 長さ部スキップ
+            if flen > 0:
+                if cur + flen > raw.size:   # Check bounds before skipping data
+                    valid_row_parse = False
+                    break
+                cur += flen                # データ部スキップ
+            elif flen < -1: # Invalid length
+                valid_row_parse = False
+                break
+            # If flen is -1 (NULL), cur is already advanced by 4
+
+        if valid_row_parse:
+            local += 1
+            # Move pos to the end of the successfully parsed row *before* adding step
+            pos = cur
+            # Advance pos by step
+            pos += step
+        else:
+            # If parsing failed mid-row, advance by step from the *original* starting pos
+            # to avoid getting stuck on corrupted data.
+            pos = header_size + cuda.grid(1) + step # Advance from original start + step
+            # This might still miss rows if step is large. Consider smaller steps or error flags.
+            # Let's just advance by step for now.
+            pos += step # Advance by step
+
+
+
+@cuda.jit(device=True, inline=True)
+def max(a, b):
+    # Numba CUDA device functions don't support standard max directly sometimes
+    return a if a > b else b
+
+@cuda.jit
+def parse_fields_from_offsets_gpu(raw, ncols, rows,
+                                  row_offsets_in, f_off_out, f_len_out):
+    """
+    GPU kernel to parse fields based on pre-calculated row start offsets (Plan C approach).
+
+    Args:
+        raw: GPU device array containing the raw binary data.
+        ncols: Number of columns per row.
+        rows: Total number of rows.
+        row_offsets_in: GPU device array containing the start offset of each row.
+        f_off_out: GPU device array (rows, ncols) for field start offsets (absolute).
+        f_len_out: GPU device array (rows, ncols) for field lengths (-1 for NULL).
+    """
+    gtid = cuda.grid(1) # Global thread ID = row index
+
+    if gtid >= rows:
+        return
+
+    row_start = row_offsets_in[gtid]
+    pos = row_start
+    data_len = raw.size
+
+    # --- Validate row_start and read num_fields ---
+    if pos < 0 or pos + 2 > data_len: # Invalid start offset or not enough data for num_fields
+        # Mark all fields as NULL for this row
+        for c in range(ncols):
+            f_len_out[gtid, c] = -1
+            f_off_out[gtid, c] = 0
+        return # Skip processing this row
+
+    nf = read_uint16_be(raw, pos)
+    pos += 2
+
+    if nf == 0xFFFF: # End of data marker found unexpectedly at row start
+         # Mark all fields as NULL
+         for c in range(ncols):
+            f_len_out[gtid, c] = -1
+            f_off_out[gtid, c] = 0
+         return # Skip processing this row
+
+    # --- Parse Fields ---
+    fields_to_process = min(nf, ncols) # Process up to the expected number of columns
+
+    for c in range(fields_to_process):
+        # Check bounds before reading field length
+        if pos + 4 > data_len:
+            # Mark remaining fields as NULL if data ends unexpectedly
+            for rem_c in range(c, ncols):
+                f_len_out[gtid, rem_c] = -1
+                f_off_out[gtid, rem_c] = 0
+            return # Stop processing this row
+
+        fl = decode_int32_be(raw, pos)
+        field_data_start = pos + 4
+
+        if fl < 0: # NULL value
+            f_len_out[gtid, c] = -1
+            f_off_out[gtid, c] = 0 # Use 0 for offset of NULL
+            pos += 4 # Advance past the length field
+        else: # Non-NULL value
+            # Check bounds before accessing/skipping data
+            if field_data_start + fl > data_len:
+                # Mark remaining fields as NULL if data ends unexpectedly
+                for rem_c in range(c, ncols):
+                    f_len_out[gtid, rem_c] = -1
+                    f_off_out[gtid, rem_c] = 0
+                return # Stop processing this row
+
+            f_len_out[gtid, c] = fl
+            f_off_out[gtid, c] = field_data_start # Store absolute offset
+            pos += 4 + fl # Advance past length and data
+
+    # --- Fill remaining expected columns with NULL ---
+    # This handles cases where nf < ncols
+    for c in range(fields_to_process, ncols):
+         f_len_out[gtid, c] = -1
+         f_off_out[gtid, c] = 0
+
+@cuda.jit(device=True, inline=True)
+def read_uint16_be(data, pos):
+    """ Reads a 16-bit unsigned integer in big-endian format. """
+    b0 = data[pos]
+    b1 = data[pos + 1]
+    return (b0 << 8) | b1
+
+@cuda.jit
+def parse_rows_and_fields_gpu(raw_data, ncols, rows, header_size,
+                              row_offsets_out, field_offsets_out, field_lengths_out,
+                              global_prefix_sum_counter):
+    """
+    GPU kernel to parse PostgreSQL COPY BINARY data, calculating row offsets
+    and field offsets/lengths in a single pass (Plan D).
+
+    Args:
+        raw_data: GPU device array containing the raw binary data.
+        ncols: Number of columns per row.
+        rows: Total number of rows (pre-calculated by count_rows_gpu).
+        header_size: Size of the file header in bytes.
+        row_offsets_out: GPU device array to store the start offset of each row.
+        field_offsets_out: GPU device array (rows, ncols) for field start offsets (relative to row start).
+        field_lengths_out: GPU device array (rows, ncols) for field lengths (-1 for NULL).
+        global_prefix_sum_counter: GPU device array (single element) for global atomic counter,
+                                   initialized to header_size before kernel launch.
+    """
+    # Thread identification
+    tid = cuda.grid(1) # Global thread ID
+    bid = cuda.blockIdx.x
+    tx = cuda.threadIdx.x
+    block_dim = cuda.blockDim.x
+
+    # Shared memory for block-local prefix sum of row lengths
+    # Size needs to be block_dim
+    sh_row_lengths = cuda.shared.array(shape=MAX_THREADS, dtype=int64) # Use constant or dynamically allocated size
+
+    # --- Calculate row length for the current thread's assigned row ---
+    my_row_length = int64(0)
+    current_pos = int64(0) # Placeholder, actual start pos determined later
+
+    if tid < rows:
+        row_start = row_offsets_out[tid]
+        pos = row_start
+        data_len = raw_data.shape[0]
+
+        if pos < 0 or pos + 2 > data_len: # Invalid start offset
+            for c in range(ncols):
+                field_lengths_out[tid, c] = -1
+                field_offsets_out[tid, c] = 0
+            return
+
+        num_fields_read = read_uint16_be(raw_data, pos)
+        pos += 2
+
+        if num_fields_read == 0xFFFF: # Should not happen if row_offsets is correct
+                for c in range(ncols):
+                    field_lengths_out[tid, c] = -1
+                    field_offsets_out[tid, c] = 0
+                return
+
+        fields_to_process = min(num_fields_read, ncols)
+
+        for c in range(fields_to_process):
+            if pos + 4 > data_len:
+                # Mark remaining as NULL
+                for rem_c in range(c, ncols):
+                    field_lengths_out[tid, rem_c] = -1
+                    field_offsets_out[tid, rem_c] = 0
+                return # Exit row processing
+
+            field_len = decode_int32_be(raw_data, pos)
+            field_data_start = pos + 4
+
+            if field_len < 0: # NULL
+                field_offsets_out[tid, c] = 0 # Or relative offset 0 within row? Let's use absolute.
+                field_lengths_out[tid, c] = -1
+                pos += 4
+            else: # Non-NULL
+                if field_data_start + field_len > data_len:
+                    # Mark remaining as NULL
+                    for rem_c in range(c, ncols):
+                        field_lengths_out[tid, rem_c] = -1
+                        field_offsets_out[tid, rem_c] = 0
+                    return # Exit row processing
+
+                field_offsets_out[tid, c] = field_data_start
+                field_lengths_out[tid, c] = field_len
+                pos += 4 + field_len
+
+        # Fill remaining expected columns with NULL if num_fields_read < ncols
+        for c in range(fields_to_process, ncols):
+                field_lengths_out[tid, c] = -1
+                field_offsets_out[tid, c] = 0
+
 
 @cuda.jit
 def parse_binary_format_kernel_one_row(chunk_array, field_offsets, field_lengths, 
