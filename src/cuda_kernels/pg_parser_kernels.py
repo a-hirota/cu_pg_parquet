@@ -45,36 +45,102 @@ def decode_int32_be(data, pos):
     return val
 
 @cuda.jit
-def calculate_row_lengths_gpu(raw, rows, header, row_len_out):
+def calculate_row_lengths_and_null_flags_gpu(raw_data, max_rows, num_fields,
+                                            row_starts, row_lengths, null_flags):
     """
-    各スレッド＝1 行で 行バイト長 を求める簡易カーネル
-    (Plan-C 用 / NULL 判定あり / 境界チェックあり)
+    GPU kernel to parse PostgreSQL COPY BINARY data and compute each row's byte length 
+    and NULL flags matrix. Each thread processes one row.
+    
+    Args:
+        raw_data: uint8 device array containing the binary COPY data (big-endian format).
+        max_rows: int32, maximum number of rows to process (upper bound of rows in data).
+        num_fields: int32, number of columns (fields) per row (fixed schema).
+        row_starts: int32 device array of length >= max_rows, containing the byte offset 
+                    where each row starts in raw_data.
+        row_lengths: int32 device array (length >= max_rows) to store the output byte length of each row.
+        null_flags: int8 device 2D array of shape (max_rows, num_fields) to store NULL flags 
+                    (1 if the field is NULL, 0 if not) for each row and column.
     """
-    rid = cuda.grid(1)
-    if rid >= rows:
+    rid = cuda.grid(1)  # global thread index (row index)
+    if rid >= max_rows:
+        return  # thread is out of range of actual rows
+    
+    # Get start position of this row in the raw data
+    start_pos = row_starts[rid]
+    data_len = raw_data.shape[0]
+    # Validate start position and ensure we have at least 2 bytes for the field count
+    if start_pos < 0 or start_pos + 2 > data_len:
+        # Invalid offset or no room for field count – mark this row as empty/invalid
+        row_lengths[rid] = -1
+        for c in range(num_fields):
+            null_flags[rid, c] = 1
         return
-
-    pos = header
-    # 先頭から自分の行までシリアルに飛ぶ（簡易版）
-    for _ in range(rid):
-        nf = read_uint16_be(raw, pos)
-        if nf == 0xFFFF:
-            row_len_out[rid] = -1
+    
+    # Read the number of fields (uint16 big-endian) at the start of the row
+    num_fields_in_row = read_uint16_be(raw_data, start_pos)
+    if num_fields_in_row == 0xFFFF:
+        # End-of-data marker encountered at this row's start – no actual row data
+        row_lengths[rid] = -1
+        for c in range(num_fields):
+            null_flags[rid, c] = 1
+        return
+    
+    # Determine how many fields to process (should equal num_fields for valid rows)
+    fields_to_process = num_fields_in_row
+    if fields_to_process > num_fields:
+        fields_to_process = num_fields  # limit to expected number of columns
+    
+    pos = start_pos + 2  # position now at the first field-length entry
+    # Parse each field in this row
+    for c in range(fields_to_process):
+        # Ensure there's enough data to read the 4-byte field length
+        if pos + 4 > data_len:
+            # Not enough bytes to read the next field length – treat remaining fields as NULL
+            row_lengths[rid] = -1 # Mark row as problematic
+            null_flags[rid, c] = 1
+            for rem_c in range(c + 1, num_fields): # Null out remaining expected fields
+                null_flags[rid, rem_c] = 1
             return
-        pos += 2
-        for _ in range(nf):
-            fl = decode_int32_be(raw, pos)
-            pos += 4 + max(fl, 0)
-
-    start = pos
-    nf = read_uint16_be(raw, pos)
-    pos += 2
-    for _ in range(nf):
-        fl = decode_int32_be(raw, pos)
-        pos += 4 + max(fl, 0)
-
-    row_len_out[rid] = pos - start
-
+        
+        field_len = decode_int32_be(raw_data, pos)
+        pos += 4  # advance past the length field itself
+        
+        if field_len < 0: # Handles NULL (-1)
+            # NULL field: mark flag and no data bytes to skip
+            null_flags[rid, c] = 1
+        else:
+            # Non-NULL field: mark flag and skip the field data bytes
+            null_flags[rid, c] = 0
+            if pos + field_len > data_len:
+                # Not enough data for the declared field length – treat as error
+                row_lengths[rid] = -1 # Mark row as problematic
+                # Mark this and remaining fields as NULL (data truncated)
+                null_flags[rid, c] = 1
+                for rem_c in range(c + 1, num_fields): # Null out remaining expected fields
+                    null_flags[rid, rem_c] = 1
+                return
+            pos += field_len  # skip over the actual field data bytes
+    
+    # Mark any remaining expected fields as NULL if the row had fewer fields than expected
+    for c in range(fields_to_process, num_fields):
+        null_flags[rid, c] = 1
+    
+    # If the data row contains more fields than expected (fields_to_process was limited),
+    # skip over the extra fields to reach the true end of the row.
+    if num_fields_in_row > num_fields:
+        for _ in range(num_fields, num_fields_in_row):
+            if pos + 4 > data_len: # Check before reading length
+                break 
+            extra_field_len = decode_int32_be(raw_data, pos)
+            pos += 4 # Advance past the length
+            if extra_field_len >= 0: # If not NULL
+                if pos + extra_field_len > data_len:
+                    break # data ended unexpectedly
+                pos += extra_field_len
+            # If extra_field_len is < 0 (NULL), pos is already advanced past length, no data to skip
+    
+    # Calculate the total byte length of this row
+    row_lengths[rid] = pos - start_pos
 
 @cuda.jit(device=True)
 def find_next_row_start(data, start_pos, end_pos, num_cols, valid_cols=0):
@@ -281,13 +347,6 @@ def parse_fields_from_offsets_gpu(raw, ncols, rows,
     for c in range(fields_to_process, ncols):
          f_len_out[gtid, c] = -1
          f_off_out[gtid, c] = 0
-
-@cuda.jit(device=True, inline=True)
-def read_uint16_be(data, pos):
-    """ Reads a 16-bit unsigned integer in big-endian format. """
-    b0 = data[pos]
-    b1 = data[pos + 1]
-    return (b0 << 8) | b1
 
 @cuda.jit
 def parse_rows_and_fields_gpu(raw_data, ncols, rows, header_size,

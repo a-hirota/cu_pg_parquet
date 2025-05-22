@@ -2,8 +2,7 @@
 PostgreSQLへの接続とデータ取得モジュール
 """
 
-import psycopg2
-import psycopg
+import psycopg # Use only psycopg (v3)
 import io
 import os
 from typing import List, Optional, Tuple
@@ -28,19 +27,17 @@ class PostgresConnector:
     def connect(self):
         """PostgreSQL接続を確立"""
         try:
-            self.conn = psycopg2.connect(
-                dbname=self.dbname,
-                user=self.user,
-                password=self.password,
-                host=self.host
-            )
+            # Construct DSN string for psycopg (v3)
+            dsn = f"dbname='{self.dbname}' user='{self.user}' password='{self.password}' host='{self.host}'"
+            self.conn = psycopg.connect(dsn)
             return True
         except Exception as e:
             print(f"PostgreSQL接続エラー: {e}")
             return False
-            
+
     def check_table_exists(self, table_name):
         """テーブルの存在チェック"""
+        # This function is defined globally, ensure it's compatible or update it
         return check_table_exists(self.conn, table_name)
         
     def get_table_info(self, table_name):
@@ -82,12 +79,8 @@ class PostgresConnector:
 
 def connect_to_postgres(dbname='postgres', user='postgres', password='postgres', host='localhost'):
     """PostgreSQLへの接続を確立する"""
-    conn = psycopg2.connect(
-        dbname=dbname,
-        user=user,
-        password=password,
-        host=host
-    )
+    dsn = f"dbname='{dbname}' user='{user}' password='{password}' host='{host}'"
+    conn = psycopg.connect(dsn)
     return conn
 
 def check_table_exists(conn, table_name: str) -> bool:
@@ -225,7 +218,10 @@ def get_binary_data(conn, table_name: str, limit: Optional[int] = None, offset: 
         sql_query = f"SELECT * FROM {table_name} {limit_clause} {offset_clause}"
     
     print(f"実行クエリ: {sql_query}")
-    cur.copy_expert(f"COPY ({sql_query}) TO STDOUT (FORMAT BINARY)", buffer)
+    # Use cursor.copy() for psycopg (v3)
+    with cur.copy(f"COPY ({sql_query}) TO STDOUT (FORMAT BINARY)") as copy:
+        for data_chunk in copy: # Iterate over data chunks from the COPY operation
+            buffer.write(data_chunk)
     
     # バッファをメモリに固定
     buffer_data = buffer.getvalue()
