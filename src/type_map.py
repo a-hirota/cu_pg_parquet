@@ -1,10 +1,4 @@
-"""
-PG OID → Arrow 型マッピングと ColumnMeta 定義モジュール
-
-• ColumnMeta ... RowDescription 取得結果を保持する不変データクラス
-• Arrow 型 ID を int 定数で提供（Numba / CUDA で扱いやすい形）
-• PG_OID_TO_ARROW ... PostgreSQL の OID を Arrow 型 ID と要素バイト長へ変換する辞書
-"""
+"""PG OID → Arrow 型マッピングと ColumnMeta 定義"""
 
 from __future__ import annotations
 

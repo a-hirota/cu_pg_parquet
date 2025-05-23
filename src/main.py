@@ -1,26 +1,16 @@
-"""
-PostgreSQL-GPU処理パイプライン メインモジュール
-"""
+"""PostgreSQL-GPU処理パイプライン メインモジュール"""
 
 import time
 import numpy as np
 from typing import Dict, List, Optional, Any
 
-# Use ColumnMeta from meta_fetch
 from .pg_connector import connect_to_postgres, check_table_exists, get_table_info, get_table_row_count, get_binary_data, get_query_column_info
-# from .binary_parser import BinaryDataParser # Removed non-existent module import
-# Assuming GPUMemoryManagerV2 and GPUDecoderV2 are the correct classes now based on memory bank
 from .gpu_memory_manager_v2 import GPUMemoryManagerV2
-# Import GPU parser function and header detection
 from .gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
-# Import CPU row start calculator from test code (adjust path if needed)
-# This might need a better location in the future
 from test.test_single_row_pg_parser import calculate_row_starts_cpu
-from .gpu_decoder_v2 import GPUDecoderV2 as GPUDecoder # Alias for consistency if needed, or update class name below
+from .gpu_decoder_v2 import GPUDecoderV2 as GPUDecoder
 from .output_handler import OutputHandler
-# Assuming ChunkConfig might be defined elsewhere or not needed directly in main's __main__ block
-# from .utils import ChunkConfig, ColumnInfo # Removed ColumnInfo, assuming ChunkConfig is handled elsewhere or utils.py doesn't exist
-from .meta_fetch import ColumnMeta # Import ColumnMeta
+from .meta_fetch import ColumnMeta
 
 class PgGpuProcessor:
     """PostgreSQLデータGPU処理の統合クラス"""
@@ -28,22 +18,17 @@ class PgGpuProcessor:
     # Update __init__ to use V2 classes if that's the current standard
     def __init__(self, dbname='postgres', user='postgres', password='postgres', host='localhost', parquet_output=None, block_size=None, thread_count=None):
         """初期化"""
-        # Consider using GPUPASER_PG_DSN environment variable if available
         dsn = os.environ.get("GPUPASER_PG_DSN")
         if dsn:
              print("Using DSN from GPUPASER_PG_DSN environment variable.")
-             # Assuming connect_to_postgres can handle DSN string directly or needs parsing
-             # For now, stick to individual parameters if connect_to_postgres expects them
-             # self.conn = connect_to_postgres(dsn=dsn) # Example if it supports DSN
-             self.conn = connect_to_postgres(dbname, user, password, host) # Keep original for now
+             self.conn = connect_to_postgres(dbname, user, password, host)
         else:
              self.conn = connect_to_postgres(dbname, user, password, host)
 
-        self.memory_manager = GPUMemoryManagerV2() # Use V2
-        # self.parser = BinaryDataParser() # Removed parser instantiation
-        self.gpu_decoder = GPUDecoder() # Use V2 (aliased or direct)
+        self.memory_manager = GPUMemoryManagerV2()
+        self.gpu_decoder = GPUDecoder()
         self.output_handler = OutputHandler(parquet_output)
-        self.parquet_output = parquet_output # Store parquet_output path
+        self.parquet_output = parquet_output
         self.block_size = block_size
         self.thread_count = thread_count
         
@@ -208,95 +193,17 @@ class PgGpuProcessor:
             
             print(f"\n== チャンク {chunk_count}: {processed_rows+1}～{processed_rows+current_chunk_size}行目を処理 (全{total_rows}行中) ==")
             
-            # GPUバッファの初期化（各チャンクごとに新しいバッファを作成）
             buffers = self.memory_manager.initialize_device_buffers(columns, current_chunk_size)
-            # Import cuda here if not already imported globally
             from numba import cuda
-            import cupy as cp # Import cupy for device array transfer
+            import cupy as cp
 
-            # Transfer the entire buffer_data for this chunk to GPU
-            # Note: This assumes buffer_data contains ONLY the data for the current chunk.
-            # If buffer_data contains the *entire* result set, we need slicing logic here.
-            # Assuming get_binary_data fetches the whole result, we need to handle chunking differently.
-            # Let's refine the logic assuming buffer_data holds the *entire* binary result.
-
-            # --- Refined Logic for Chunking with GPU Parsing ---
-            # 1. Transfer the *entire* buffer_data to GPU *once* before the loop (if possible)
-            #    Or transfer chunk by chunk if memory is limited. Assuming full transfer for now.
-            #    This needs adjustment based on how get_binary_data works.
-            #    For now, let's assume buffer_data is the full data and we process it in chunks conceptually.
-
-            # We need raw_dev (full data on GPU) and row_start_positions_dev (for the full data)
-            # These should ideally be calculated *outside* the loop.
-
-            # --- Placeholder: Assume these are calculated before the loop ---
-            # raw_dev = cuda.to_device(np.frombuffer(buffer_data, dtype=np.uint8))
-            # header_size = detect_pg_header_size(buffer_data[:128]) # Use host buffer for header detection
-            # row_start_positions_host = calculate_row_starts_cpu(np.frombuffer(buffer_data, dtype=np.uint8), header_size, total_rows)
-            # row_start_positions_dev = cuda.to_device(row_start_positions_host)
-            # --- End Placeholder ---
-
-            # Inside the loop, we operate on slices/views or pass offsets
-
-            # For this chunk:
-            start_row_idx = processed_rows
-            rows_in_this_chunk = current_chunk_size # Target rows for this chunk
-
-            # We need field_offsets_dev and field_lengths_dev for *this specific chunk*
-            # parse_binary_chunk_gpu likely operates on the whole buffer.
-            # We need to adapt how we call it or how we interpret its results per chunk.
-
-            # --- Simplification Attempt: Parse the whole data once, then use results ---
-            # This requires calculating offsets/lengths for all rows upfront.
-            # Let's assume we have field_offsets_dev_all and field_lengths_dev_all for total_rows
-
-            # --- Placeholder 2: Assume full parse results exist ---
-            # field_offsets_dev_all, field_lengths_dev_all = parse_binary_chunk_gpu(...) # Called before loop
-            # --- End Placeholder 2 ---
-
-            # Get the slice for the current chunk
-            # field_offsets_chunk = field_offsets_dev_all[start_row_idx : start_row_idx + rows_in_this_chunk]
-            # field_lengths_chunk = field_lengths_dev_all[start_row_idx : start_row_idx + rows_in_this_chunk]
-            # rows_in_chunk = field_offsets_chunk.shape[0] # Actual rows in this slice
-
-            # --- Reality Check: The original code parsed chunk by chunk conceptually ---
-            # Let's stick to that but use the GPU parser. This implies parsing *within* the loop,
-            # which might be inefficient if the parser needs the full context or if data transfer is repeated.
-            # Reverting to a structure closer to the original, but using the GPU parser.
-
-            # --- Attempt to integrate GPU parsing within the loop ---
-            # This part needs careful implementation based on parse_binary_chunk_gpu's exact behavior.
-            # Assuming parse_binary_chunk_gpu can work on the full raw_dev but return results
-            # relevant to the specified rows/offsets. This might not be how it's designed.
-
-            # TODO: Integrate GPU parsing logic here.
-            # The current plan is to:
-            # 1. Calculate raw_dev and row_start_positions_dev for the *entire* buffer_data *before* this loop.
-            # 2. Call parse_binary_chunk_gpu *once* before this loop to get field_offsets_dev_all and field_lengths_dev_all.
-            # 3. Inside this loop, slice the results:
-            #    field_offsets = field_offsets_dev_all[start_row_idx : start_row_idx + current_chunk_size]
-            #    field_lengths = field_lengths_dev_all[start_row_idx : start_row_idx + current_chunk_size]
-            #    rows_in_chunk = field_offsets.shape[0] # Use actual rows from slice
-            #    chunk_array = raw_dev # Pass the full raw_dev or relevant slice if needed by decode_chunk
-
-            # --- TEMPORARY: Raise error until GPU parsing is integrated ---
+            # TODO: GPU parsing integration needed
             raise NotImplementedError("GPU parsing logic needs to be integrated in _process_data_in_chunks.")
-            # --- END TEMPORARY ---
-
-            # The following code assumes field_offsets, field_lengths, rows_in_chunk, and chunk_array
-            # are correctly populated by the (currently missing) GPU parsing logic above.
-            # --- TEMPORARY: Raise error until GPU parsing is integrated ---
-            # raise NotImplementedError("GPU parsing logic needs to be integrated in _process_data_in_chunks.")
-            # --- END TEMPORARY ---
-
-            # The following code assumes field_offsets, field_lengths, rows_in_chunk, and chunk_array
-            # are correctly populated by the (currently missing) GPU parsing logic above.
-
-            # TODO: Replace the following placeholder values with actual results from GPU parsing logic
-            rows_in_chunk = current_chunk_size # Placeholder - get actual rows from parsing
-            chunk_array = None # Placeholder - get from parsing
-            field_offsets = None # Placeholder - get from parsing
-            field_lengths = None # Placeholder - get from parsing
+            
+            rows_in_chunk = current_chunk_size
+            chunk_array = None
+            field_offsets = None
+            field_lengths = None
 
             # Check if rows exist *before* the try block
             if rows_in_chunk == 0:
@@ -404,51 +311,36 @@ class PgGpuProcessor:
         # カラム情報を最初の行から推定（簡易版）
         import pandas as pd
         
-        # まずCPUで簡易パースして列数とタイプを推定
         try:
             parser = BinaryDataParser(use_gpu=False)
             chunk_array, field_offsets, field_lengths, rows_in_chunk = parser.parse_chunk(
-                buffer_data,
-                max_chunk_size=len(buffer_data),
-                max_rows=10000  # 十分な行数を指定
+                buffer_data, max_chunk_size=len(buffer_data), max_rows=10000
             )
             
             if rows_in_chunk == 0:
                 print("有効な行がありません")
                 return None
                 
-            # 最初の行から列数を推定
-            if rows_in_chunk > 0:
-                # フィールド数をカウント
-                field_count = 0
-                for i in range(min(100, len(field_lengths))):
-                    if field_lengths[i] != 0:
-                        field_count += 1
-                    else:
-                        break
+            field_count = 0
+            for i in range(min(100, len(field_lengths))):
+                if field_lengths[i] != 0:
+                    field_count += 1
+                else:
+                    break
                         
-                # 先頭行のフィールド数から推定
-                num_cols = field_count
-            else:
-                num_cols = 0
+            num_cols = field_count if rows_in_chunk > 0 else 0
             
             if num_cols == 0:
                 print("列情報を取得できませんでした")
                 return None
                 
-            # PostgreSQLメタデータAPIを使用して正確なカラム型情報を取得
             columns = get_query_column_info(self.conn, query)
             
-            # カラム情報が取得できない場合はフォールバック
             if not columns:
                 print("PostgreSQLメタデータからカラム情報を取得できませんでした。デフォルト設定を使用します。")
-                # デフォルトのカラム情報を作成（すべて文字列型と仮定）
                 columns = []
                 for i in range(num_cols):
-                    # Use ColumnMeta here
-                    columns.append(ColumnMeta(f"col_{i}", 0, -1, UNKNOWN, 0, 1, -1)) # Provide default values for ColumnMeta fields
-                    # Example: ColumnMeta(name, pg_oid, typmod, arrow_id, elem_size, is_variable, var_index)
-                    # Adjust default values as needed based on ColumnMeta definition
+                    columns.append(ColumnMeta(f"col_{i}", 0, -1, UNKNOWN, 0, 1, -1))
 
             # GPUバッファの初期化
             buffers = self.memory_manager.initialize_device_buffers(columns, rows_in_chunk)

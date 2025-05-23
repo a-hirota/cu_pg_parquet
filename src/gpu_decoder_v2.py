@@ -1,24 +1,4 @@
-"""
-gpu_decoder_v2.py
-=================
-GPUMemoryManagerV2 を用いて
-
-  1. pass‑1 (len/null 収集) - GPUで実行
-  2. prefix‑sum で offsets / total_bytes - GPU(CuPy)で実行
-  3. pass‑2 (scatter‑copy, NUMERIC→UTF8 文字列化) - GPUカーネルで実行
-  4. Arrow RecordBatch を生成 - CPUで実行
-
-までを 1 関数 `decode_chunk()` で実行するラッパ。
-
-前提
------
-* PostgreSQL COPY BINARY 解析済みの
-    - `field_offsets` (rows, ncols) int32 DeviceNDArray
-    - `field_lengths` (rows, ncols) int32 DeviceNDArray
-  を受け取る。 (現在は `gpu_parse_wrapper.py` の CPU 実装の結果)
-
-* ColumnMeta 配列は `meta_fetch.fetch_column_meta()` で取得済みとする。
-"""
+"""GPU COPY BINARY → Arrow RecordBatch 2パス変換"""
 
 from __future__ import annotations
 
@@ -51,25 +31,15 @@ from .cuda_kernels.arrow_gpu_pass2_decimal128 import pass2_scatter_decimal128 # 
 from .cuda_kernels.numeric_utils import int64_to_decimal_ascii  # noqa: F401  (import for Numba registration)
 
 def build_validity_bitmap(valid_bool: np.ndarray) -> pa.Buffer:
-    """Arrow の仕様 (LSB が行0、1=valid) に従ってビットマップを組み立てる"""
-    bits_le = np.packbits(valid_bool.astype(np.uint8), bitorder="little")
-    """Arrow の仕様 (LSB が行0、1=valid) に従ってビットマップを組み立てる"""
-    # Ensure input is a host numpy array
+    """Arrow validity bitmap (LSB=行0, 1=valid)"""
     if isinstance(valid_bool, cp.ndarray):
         valid_bool = valid_bool.get()
     elif not isinstance(valid_bool, np.ndarray):
         raise TypeError("Input must be a NumPy or CuPy array")
 
-    # Ensure it's contiguous boolean
     valid_bool = np.ascontiguousarray(valid_bool, dtype=np.bool_)
-
-    # Pack bits using numpy
     bits_le = np.packbits(valid_bool, bitorder='little')
     return pa.py_buffer(bits_le)
-
-# TODO: Implement GPU version if performance becomes an issue
-# def build_validity_bitmap_gpu(valid_bool_dev: cp.ndarray) -> pa.Buffer:
-#     ...
 
 
 # ----------------------------------------------------------------------

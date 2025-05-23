@@ -1,19 +1,4 @@
-"""
-GPU メモリ確保ロジック (Arrow ColumnMeta ベース, v2)
-
-サポート範囲
--------------
-* 固定長型 : INT{16,32,64}, FLOAT{32,64}, DECIMAL128, BOOL, DATE32, TS64_US
-* 可変長型 : UTF8, BINARY
-  - NUMERIC は今回は UTF8 として扱う (可変長文字列)
-* Arrow 型 ID や各型長は ``type_map.ColumnMeta`` / ``arrow_utils`` で管理
-
-API
------
-GPUMemoryManagerV2.initialize_device_buffers(columns, rows_in_batch) -> dict
-    * 各カラム名 → device array (cuda.devicearray.DeviceNDArray) を返却
-    * 補助メタ : ``type_ids`` / ``elem_sizes`` / ``param1`` / ``param2`` も返す
-"""
+"""GPU メモリ確保 (Arrow ColumnMeta ベース, v2)"""
 
 from __future__ import annotations
 

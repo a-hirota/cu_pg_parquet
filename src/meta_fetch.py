@@ -1,15 +1,4 @@
-"""
-RowDescription から Arrow 変換用メタデータ (ColumnMeta) を生成するモジュール
-
-使い方例:
-    import psycopg2
-    from meta_fetch import fetch_column_meta
-
-    conn = psycopg2.connect("dbname=postgres user=postgres")
-    metas = fetch_column_meta(conn, "SELECT * FROM lineorder LIMIT 100")
-    for m in metas:
-        print(m)
-"""
+"""RowDescription → Arrow ColumnMeta 変換"""
 
 from __future__ import annotations
 

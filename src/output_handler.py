@@ -1,47 +1,34 @@
-"""
-デコード結果の処理と出力を管理するモジュール
-"""
+"""デコード結果の処理と出力を管理"""
 
 import numpy as np
 from typing import Dict, List, Any
 
 class ResultAggregator:
-    """結果データの集約を管理するクラス"""
+    """結果データの集約を管理"""
     
     def __init__(self):
-        """初期化"""
-        self.results = {}  # {column_name: data_list}
+        self.results = {}
     
     def add_chunk_results(self, chunk_results: Dict[str, Any]):
-        """チャンク結果を追加"""
-        # 初期化
         if not self.results:
             self.results = {col_name: [] for col_name in chunk_results.keys()}
         
-        # 結果を追加
         for col_name, data in chunk_results.items():
             if col_name in self.results:
                 self.results[col_name].append(data)
     
     def get_aggregated_results(self):
-        """集約された結果を取得"""
         final_results = {}
-        
         for col_name, chunks in self.results.items():
             if not chunks:
                 continue
-                
             if isinstance(chunks[0], np.ndarray):
-                # NumPy配列の場合は連結
                 final_results[col_name] = np.concatenate(chunks)
             else:
-                # リストの場合はフラット化
                 final_results[col_name] = [item for chunk in chunks for item in chunk]
-        
         return final_results
     
     def clear(self):
-        """結果をクリア"""
         self.results = {}
 
 class OutputHandler:
