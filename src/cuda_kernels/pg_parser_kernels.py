@@ -13,6 +13,25 @@ from numba import int64, int32
 MAX_THREADS = int(os.environ.get('GPUPASER_MAX_THREADS', '1024'))
 MAX_BLOCKS = int(os.environ.get('GPUPASER_MAX_BLOCKS', '2048'))
 
+# デバッグ設定
+GPUPGPARSER_DEBUG_KERNELS = os.environ.get('GPUPGPARSER_DEBUG_KERNELS', '0').lower() in ('1', 'true')
+DEBUG_ARRAY_SIZE = 1024 if GPUPGPARSER_DEBUG_KERNELS else 0 # デバッグ無効時はサイズ0
+
+@cuda.jit(device=True)
+def _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, val1, val2, status_code):
+    # debug_array: [tid, pos, val1, val2, status_code]
+    # status_code: e.g., 0=info, 1=valid_row, 2=invalid_row, 3=eof, 4=boundary_error
+    # This function is only effective if GPUPGPARSER_DEBUG_KERNELS was true during JIT compilation
+    # However, Numba JIT compiles device functions based on their usage.
+    # A runtime check inside the kernel calling this is better.
+    idx = cuda.atomic.add(debug_idx_atomic, 0, 1)
+    if idx * 5 < DEBUG_ARRAY_SIZE * 5 : # Check against compile-time DEBUG_ARRAY_SIZE
+        debug_array[idx * 5 + 0] = tid
+        debug_array[idx * 5 + 1] = pos
+        debug_array[idx * 5 + 2] = val1 # e.g., num_fields or a specific field_len
+        debug_array[idx * 5 + 3] = val2 # e.g., a field_len or other relevant value
+        debug_array[idx * 5 + 4] = status_code
+
 @cuda.jit(device=True, inline=True)
 def decode_int32_be(data, pos):
     """
@@ -210,7 +229,7 @@ def read_uint16_be(data, pos):
     return (b0 << 8) | b1
 
 @cuda.jit
-def count_rows_gpu(raw, header_size, row_cnt):
+def count_rows_gpu(raw, header_size, row_cnt, debug_array=None, debug_idx_atomic=None): # Add debug args
     """
     各スレッドが (header_size + tid) から stride=gridsize で走査し、
     行ヘッダ (uint16 != 0xFFFF) を検出したらその行を最後までスキップして
@@ -220,16 +239,39 @@ def count_rows_gpu(raw, header_size, row_cnt):
     step  = cuda.gridsize(1)                # 全スレッド合計の stride
     end   = raw.size - 2                    # uint16 読み込み可否境界
     local = 0
+    tid = cuda.grid(1) # Get thread ID for debug
+
+    # Debug loop counter for this thread
+    debug_loops_done = 0
+    max_debug_loops_per_thread = 3 # Record first few attempts per thread
 
     while pos < end:
+        # Conditional debug recording at the start of the loop
+        if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+            # Status code 10: Start of while loop iteration in count_rows_gpu
+            _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, step, end, 10)
+
         num = read_uint16_be(raw, pos)      # Use helper
+
+        # Conditional debug recording after reading num_fields
+        if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+            # Status code 11: Read num_fields in count_rows_gpu
+             _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num, 0, 11)
+
+
         if num == 0xFFFF:                   # COPY‐BINARY 終端
+            if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                # Status code 12: EOF marker found in count_rows_gpu
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num, 0, 12)
             break
 
         cur = pos + 2                       # フィールド長へ
         # Check if reading num_fields itself is valid before loop
         if cur > raw.size: # Need at least 2 bytes for num_fields
-             break
+            if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                 # Status code 13: Boundary error before field loop in count_rows_gpu
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num, cur, 13)
+            break
 
         valid_row_parse = True
         for _ in range(num):                # num == ncols
@@ -245,22 +287,31 @@ def count_rows_gpu(raw, header_size, row_cnt):
                 cur += flen                # データ部スキップ
             elif flen < -1: # Invalid length
                 valid_row_parse = False
+                if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                    _record_debug_info_device(debug_array, debug_idx_atomic, tid, cur - 4, num, flen, 15) # Invalid flen
                 break
             # If flen is -1 (NULL), cur is already advanced by 4
 
         if valid_row_parse:
             local += 1
+            if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num, local, 16) # Valid row parsed
             # Move pos to the end of the successfully parsed row *before* adding step
             pos = cur
             # Advance pos by step
             pos += step
         else:
-            # If parsing failed mid-row, advance by step from the *original* starting pos
-            # to avoid getting stuck on corrupted data.
-            pos = header_size + cuda.grid(1) + step # Advance from original start + step
-            # This might still miss rows if step is large. Consider smaller steps or error flags.
-            # Let's just advance by step for now.
-            pos += step # Advance by step
+            if GPUPGPARSER_DEBUG_KERNELS and tid < 2 and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num, 0, 17) # Invalid row parse
+            # If parsing failed mid-row, advance from the current `pos` by `step`.
+            # `pos` is currently at the beginning of the row that failed to parse.
+            # So, the next scan position for this thread should be `pos + step`.
+            pos += step
+        
+        debug_loops_done +=1
+            
+    if local > 0:
+        cuda.atomic.add(row_cnt, 0, local) # Add local count to global counter
 
 
 
@@ -800,3 +851,97 @@ def parse_binary_format_kernel(chunk_array, field_offsets, field_lengths, num_co
         # すでに担当範囲の終端に達していたら終了
         if pos >= end_offset:
             break
+
+@cuda.jit
+def find_row_start_offsets_gpu(raw, header_size, row_starts_out, row_count_out, debug_array=None, debug_idx_atomic=None): # Add debug args
+    """
+    PostgreSQL COPY BINARYデータから各行の開始オフセットを検出し、配列に記録するGPUカーネル。
+    
+    複数スレッドが (header_size + thread_id) からグリッド全体のストライドでデータを走査し、 
+    行の先頭（2バイトのフィールド数 != 0xFFFF）を見つけたらそのバイトオフセットを記録する。
+    各行のフィールド長も確認し、データ範囲を超える不正な行があればその開始位置は記録しない。
+    終端マーカー (0xFFFF) に達するかデータ末尾に到達した時点で処理を終了する。
+    検出された行数は row_count_out[0] に格納される。
+    
+    Args:
+        raw: バイナリデータ配列（uint8 型のGPUデバイス配列）
+        header_size: ヘッダー部分のバイトサイズ（行データの開始オフセット）
+        row_starts_out: 各行の開始オフセット（int32）を書き込む出力配列
+        row_count_out: 検出した行数を格納するための配列（int32型、長さ1を想定）
+    """
+    # Simplified sequential scan by thread 0 for correctness check
+    tid = cuda.grid(1)
+    
+    if tid == 0: # Only thread 0 performs the scan
+        pos = header_size
+        data_len = raw.size
+        current_row_count = 0
+        max_rows_to_store = row_starts_out.shape[0]
+
+        debug_loops_done = 0
+        max_debug_loops_per_thread = 20 # Allow more loops for sequential scan debug
+
+        while pos < data_len - 1:
+            if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, data_len, current_row_count, 30) # Start of loop iteration
+
+            if pos + 1 >= data_len:
+                if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                    _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, 0, 0, 34) # Boundary error before num_fields
+                break
+            
+            num_fields = read_uint16_be(raw, pos)
+
+            if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num_fields, 0, 31) # Read num_fields
+
+            if num_fields == 0xFFFF:
+                if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                    _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, num_fields, 0, 32) # EOF
+                break
+            
+            row_start_candidate = pos
+            cur = pos + 2
+            valid_row = True
+            for j in range(num_fields):
+                if cur + 4 > data_len:
+                    valid_row = False
+                    if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                        _record_debug_info_device(debug_array, debug_idx_atomic, tid, cur, num_fields, j, 35) # Boundary error field_len
+                    break
+                field_len = decode_int32_be(raw, cur)
+                cur += 4
+                if field_len >= 0:
+                    if cur + field_len > data_len:
+                        valid_row = False
+                        if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                            _record_debug_info_device(debug_array, debug_idx_atomic, tid, cur - 4, num_fields, field_len, 36) # Boundary error field_data
+                        break
+                    cur += field_len
+                elif field_len < -1:
+                    valid_row = False
+                    if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                        _record_debug_info_device(debug_array, debug_idx_atomic, tid, cur - 4, num_fields, field_len, 37) # Invalid field_len
+                    break
+            
+            if valid_row:
+                if current_row_count < max_rows_to_store:
+                    row_starts_out[current_row_count] = row_start_candidate
+                current_row_count += 1
+                if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                     _record_debug_info_device(debug_array, debug_idx_atomic, tid, row_start_candidate, num_fields, current_row_count, 38) # Valid row
+                pos = cur # Move to the start of the next potential row
+            else:
+                # If row is invalid, try to advance by 1 byte to find next potential row start.
+                # This is a simple recovery, might not be robust for all malformed data.
+                if GPUPGPARSER_DEBUG_KERNELS and debug_loops_done < max_debug_loops_per_thread and debug_array is not None and debug_idx_atomic is not None:
+                    _record_debug_info_device(debug_array, debug_idx_atomic, tid, row_start_candidate, num_fields, 0, 39) # Invalid row
+                pos = row_start_candidate + 1 
+            
+            debug_loops_done += 1
+            if debug_loops_done >= max_debug_loops_per_thread and GPUPGPARSER_DEBUG_KERNELS: # Ensure we break if only debugging limited loops
+                break
+
+
+        # After loop, thread 0 updates the global count
+        cuda.atomic.add(row_count_out, 0, current_row_count)

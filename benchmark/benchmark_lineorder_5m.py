@@ -100,10 +100,12 @@ def run_benchmark():
     print("GPUでパース中 (行数カウント、オフセット計算、フィールド解析)...")
     start_parse_time = time.time()
     # Call the updated wrapper which now handles row counting and offset calculation internally
+    # Enable GPU row detection for better performance
     field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu(
         raw_dev,
         ncols=ncols,
-        header_size=header_size
+        header_size=header_size,
+        use_gpu_row_detection=True  # Ensure GPU row detection is used
         # rows and row_start_positions are no longer passed
     )
     parse_time = time.time() - start_parse_time
