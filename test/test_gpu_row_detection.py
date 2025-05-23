@@ -95,8 +95,8 @@ def test_gpu_row_detection():
         field_offsets_gpu_dev, field_lengths_gpu_dev = parse_binary_chunk_gpu(
             raw_dev,
             ncols=2,  # 期待するカラム数
-            header_size=header_size_known, # Use known header size for test
-            use_gpu_row_detection=True
+            header_size=header_size_known # Use known header size for test
+            # use_gpu_row_detection is now removed
         )
         
         # 結果を確認
@@ -108,50 +108,20 @@ def test_gpu_row_detection():
         print(f"   Field offsets (GPU):\n{offsets_gpu}")
         print(f"   Field lengths (GPU):\n{lengths_gpu}")
         
-        # CPUフォールバックとの比較
-        print("\n--- Testing CPU Fallback (use_gpu_row_detection=False) ---")
-        field_offsets_cpu_dev, field_lengths_cpu_dev = parse_binary_chunk_gpu(
-            raw_dev,
-            ncols=2,
-            header_size=header_size_known, # Use known header size for test
-            use_gpu_row_detection=False  # CPU fallback
-        )
+        # Expected results for this specific test data
+        # Row 1: "test", NULL
+        # Row 2: "hello", "world"
+        # Expected lengths: [[4, -1], [5, 5]]
+        expected_lengths = np.array([[4, -1], [5, 5]], dtype=np.int32)
         
-        offsets_cpu = field_offsets_cpu_dev.copy_to_host()
-        lengths_cpu = field_lengths_cpu_dev.copy_to_host()
-        
-        print(f"✓ CPU parsing (CPU row detection) completed")
-        print(f"   Detected rows: {offsets_cpu.shape[0]}")
-        print(f"   Field offsets (CPU):\n{offsets_cpu}")
-        print(f"   Field lengths (CPU):\n{lengths_cpu}")
-        
-        # 結果比較
-        # Check number of rows first
-        if offsets_gpu.shape[0] != offsets_cpu.shape[0]:
-            print(f"✗ Row count mismatch: GPU={offsets_gpu.shape[0]}, CPU={offsets_cpu.shape[0]}")
-            return False
-
-        if np.array_equal(offsets_gpu, offsets_cpu) and np.array_equal(lengths_gpu, lengths_cpu):
-            print("✓ GPU and CPU results match!")
-            # Expected results for this specific test data
-            # Row 1: "test", NULL
-            # Row 2: "hello", "world"
-            # Expected lengths: [[4, -1], [5, 5]]
-            expected_lengths = np.array([[4, -1], [5, 5]], dtype=np.int32)
-            if offsets_gpu.shape[0] == 2 and np.array_equal(lengths_gpu, expected_lengths):
-                 print("✓ Lengths match expected values.")
-                 return True
-            else:
-                 print("✗ Lengths do NOT match expected values.")
-                 print(f"  Expected lengths:\n{expected_lengths}")
-                 return False
+        if offsets_gpu.shape[0] == 2 and np.array_equal(lengths_gpu, expected_lengths):
+             print("✓ GPU results match expected values.")
+             return True
         else:
-            print("✗ GPU and CPU results differ!")
-            if not np.array_equal(offsets_gpu, offsets_cpu):
-                print("  Offset diff detected.")
-            if not np.array_equal(lengths_gpu, lengths_cpu):
-                print("  Length diff detected.")
-            return False
+             print("✗ GPU results do NOT match expected values.")
+             print(f"  Expected rows: 2, Got: {offsets_gpu.shape[0]}")
+             print(f"  Expected lengths:\n{expected_lengths}")
+             return False
             
     except Exception as e:
         print(f"✗ Test failed: {e}")

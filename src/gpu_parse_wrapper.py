@@ -84,9 +84,9 @@ def parse_binary_chunk_gpu(
     ncols: int,
     threads_per_block: int = 256,
     header_size: int | None = None,
-    use_gpu_row_detection: bool = True,
+    # use_gpu_row_detection: bool = True, # This parameter is no longer used
 ):
-    """Parse COPY BINARY on GPU, fallback where needed."""
+    """Parse COPY BINARY on GPU."""
 
     if header_size is None:
         header_size = detect_pg_header_size(raw_dev[:128].copy_to_host())
@@ -134,44 +134,36 @@ def parse_binary_chunk_gpu(
     if rows <= 0:
         return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
 
-    # --- Row starts ----------------------------------------------------------
-    if use_gpu_row_detection:
-        row_starts_tmp = cuda.device_array(rows, np.int32)
-        row_count_actual_dev = cuda.device_array(1, np.int32)
-        row_count_actual_dev[0] = 0
-        
-        # Prepare debug arrays for find_row_start_offsets_gpu
-        if GPUPGPARSER_DEBUG_KERNELS_WRAPPER and KERNEL_DEBUG_ARRAY_SIZE > 0:
-            # Potentially reuse dbg_arr_count, dbg_idx_count if appropriate,
-            # or create new ones if separate debug info is needed.
-            # For simplicity, let's create new ones for this kernel call.
-            # Resetting the index is important if reusing.
-            dbg_arr_find = cuda.device_array(KERNEL_DEBUG_ARRAY_SIZE * 5, np.int32)
-            dbg_idx_find = cuda.device_array(1, np.int32)
-            dbg_idx_find[0] = 0
-        else:
-            dbg_arr_find = cuda.device_array(1 * 5, np.int32) # Dummy
-            dbg_idx_find = cuda.device_array(1, np.int32)    # Dummy
-            dbg_idx_find[0] = 0
-
-        find_row_start_offsets_gpu[blocks, threads](
-            raw_dev, header_size, row_starts_tmp, row_count_actual_dev, dbg_arr_find, dbg_idx_find
-        )
-        cuda.synchronize()
-
-        actual_rows = int(row_count_actual_dev.copy_to_host()[0])
-        if actual_rows == 0:
-            return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
-        row_starts_dev = cuda.device_array(actual_rows, np.int32)
-        row_starts_dev[:] = row_starts_tmp[:actual_rows]
-        rows = actual_rows
+    # --- Row starts (GPU implementation) ----------------------------------------------------------
+    row_starts_tmp = cuda.device_array(rows, np.int32) # Initial allocation based on count_rows_gpu
+    row_count_actual_dev = cuda.device_array(1, np.int32)
+    row_count_actual_dev[0] = 0
+    
+    # Prepare debug arrays for find_row_start_offsets_gpu
+    if GPUPGPARSER_DEBUG_KERNELS_WRAPPER and KERNEL_DEBUG_ARRAY_SIZE > 0:
+        dbg_arr_find = cuda.device_array(KERNEL_DEBUG_ARRAY_SIZE * 5, np.int32)
+        dbg_idx_find = cuda.device_array(1, np.int32)
+        dbg_idx_find[0] = 0
     else:
-        row_starts_host = build_pg_row_starts_cpu(raw_dev.copy_to_host(), header_size, rows)
-        valid = row_starts_host[row_starts_host != -1]
-        if len(valid) == 0:
-            return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
-        rows = len(valid)
-        row_starts_dev = cuda.to_device(valid)
+        dbg_arr_find = cuda.device_array(1 * 5, np.int32) # Dummy
+        dbg_idx_find = cuda.device_array(1, np.int32)    # Dummy
+        dbg_idx_find[0] = 0
+
+    find_row_start_offsets_gpu[blocks, threads](
+        raw_dev, header_size, row_starts_tmp, row_count_actual_dev, dbg_arr_find, dbg_idx_find
+    )
+    cuda.synchronize()
+
+    actual_rows = int(row_count_actual_dev.copy_to_host()[0])
+    if actual_rows == 0:
+        # If find_row_start_offsets_gpu finds no rows, even if count_rows_gpu found some,
+        # it means no valid row structures were identified by the more detailed scan.
+        return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
+    
+    # Create a device array of the correct size based on actual_rows found
+    row_starts_dev = cuda.device_array(actual_rows, np.int32)
+    row_starts_dev[:] = row_starts_tmp[:actual_rows] # Copy from the temporary (potentially larger) array
+    rows = actual_rows # Update rows to the count from find_row_start_offsets_gpu
 
     # --- Lengths & nulls -----------------------------------------------------
     row_lengths_dev = cuda.device_array(rows, np.int32)
