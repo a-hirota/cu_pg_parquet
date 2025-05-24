@@ -13,24 +13,8 @@ from numba import int64, int32
 MAX_THREADS = int(os.environ.get('GPUPASER_MAX_THREADS', '1024'))
 MAX_BLOCKS = int(os.environ.get('GPUPASER_MAX_BLOCKS', '2048'))
 
-# デバッグ設定
 GPUPGPARSER_DEBUG_KERNELS = os.environ.get('GPUPGPARSER_DEBUG_KERNELS', '0').lower() in ('1', 'true')
-DEBUG_ARRAY_SIZE = 1024 if GPUPGPARSER_DEBUG_KERNELS else 0 # デバッグ無効時はサイズ0
-
-@cuda.jit(device=True)
-def _record_debug_info_device(debug_array, debug_idx_atomic, tid, pos, val1, val2, status_code):
-    # debug_array: [tid, pos, val1, val2, status_code]
-    # status_code: e.g., 0=info, 1=valid_row, 2=invalid_row, 3=eof, 4=boundary_error
-    # This function is only effective if GPUPGPARSER_DEBUG_KERNELS was true during JIT compilation
-    # However, Numba JIT compiles device functions based on their usage.
-    # A runtime check inside the kernel calling this is better.
-    idx = cuda.atomic.add(debug_idx_atomic, 0, 1)
-    if idx * 5 < DEBUG_ARRAY_SIZE * 5 : # Check against compile-time DEBUG_ARRAY_SIZE
-        debug_array[idx * 5 + 0] = tid
-        debug_array[idx * 5 + 1] = pos
-        debug_array[idx * 5 + 2] = val1 # e.g., num_fields or a specific field_len
-        debug_array[idx * 5 + 3] = val2 # e.g., a field_len or other relevant value
-        debug_array[idx * 5 + 4] = status_code
+DEBUG_ARRAY_SIZE = 1024 if GPUPGPARSER_DEBUG_KERNELS else 0
 
 @cuda.jit(device=True, inline=True)
 def decode_int32_be(data, pos):

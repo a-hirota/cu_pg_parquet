@@ -11,11 +11,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 try:
     import pyarrow.cuda as pa_cuda
-    print("[gpu_decoder_v2] pyarrow.cuda imported successfully.")
     PYARROW_CUDA_AVAILABLE = True
 except ImportError:
     pa_cuda = None
-    print("[gpu_decoder_v2] pyarrow.cuda not available.")
     PYARROW_CUDA_AVAILABLE = False
 
 
@@ -118,15 +116,7 @@ def decode_chunk(
     cuda.synchronize()
     print("--- Finished Pass 1 (GPU) ---")
 
-    # --- DEBUG: Check Pass 1 Output (copy from GPU) ---
-    print("\n--- After Pass 1 (GPU) ---")
-    host_nulls_all = d_nulls_all.copy_to_host() # Copy result for printing
-    print(f"d_nulls_all (first 3 rows, 5 cols):\n{host_nulls_all[:min(3, rows), :min(5, ncols)]}")
-    if n_var > 0:
-        host_var_lens = d_var_lens.copy_to_host() # Copy result for printing
-        # d_var_lens is (n_var, rows), print first 3 columns (rows) for first 5 var columns
-        print(f"d_var_lens (first 5 var cols, 3 rows):\n{host_var_lens[:min(5, n_var), :min(3, rows)]}")
-    # --- END DEBUG ---
+    host_nulls_all = d_nulls_all.copy_to_host()
 
     # ----------------------------------
     # 3. prefix‑sum offsets (GPU - CuPy) & データバッファ再確保
