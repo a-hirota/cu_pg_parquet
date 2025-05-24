@@ -140,18 +140,50 @@ def decode_chunk(
     initial_offset_buffers = [bufs[name][2] for _, _, name in varlen_meta]
 
     for v_idx, (cidx, _, name) in enumerate(varlen_meta):
+        print(f"\n--- DEBUG: Processing varlen column '{name}' (v_idx={v_idx}, cidx={cidx}) ---")
+        
         # Calculate prefix sum using the lengths from Pass 1
         cp_len = cp.asarray(d_var_lens[v_idx]) # Lengths for this varlen column
+        print(f"Lengths from Pass 1 (first 10): {cp_len[:min(10, len(cp_len))].get()}")
+        print(f"Lengths stats: min={cp_len.min().get()}, max={cp_len.max().get()}, mean={cp_len.mean().get():.2f}")
+        
         # Calculate offsets (including the initial 0)
         cp_off = cp.cumsum(cp_len, dtype=np.int32)
         total_bytes = int(cp_off[-1].get()) if rows > 0 else 0
         total_bytes_list.append(total_bytes)
+        
+        print(f"Prefix sum offsets (first 10): {cp_off[:min(10, len(cp_off))].get()}")
+        print(f"Total bytes calculated: {total_bytes}")
 
         # Get the pre-allocated offset buffer for this column
         d_offset_col = initial_offset_buffers[v_idx]
+        print(f"Offset buffer shape: {d_offset_col.shape}, dtype: {d_offset_col.dtype}")
+        
         # Write the calculated offsets into the buffer (need to handle the initial 0)
-        d_offset_col[0] = 0
-        d_offset_col[1:] = cp_off # Write cumsum result
+        print("Writing offsets to GPU buffer...")
+        try:
+            d_offset_col[0] = 0
+            print(f"Set offset[0] = 0")
+            
+            # Check type compatibility before assignment
+            print(f"cp_off type: {type(cp_off)}, dtype: {cp_off.dtype}")
+            print(f"d_offset_col[1:] type: {type(d_offset_col[1:])}, dtype: {d_offset_col[1:].dtype}")
+            
+            # Convert to ensure compatible assignment
+            cp_off_as_cupy = cp.asarray(cp_off, dtype=np.int32)
+            d_offset_col[1:rows+1] = cp_off_as_cupy  # Ensure we don't write beyond buffer
+            
+            print(f"Successfully wrote {len(cp_off)} offsets to buffer")
+            
+            # Verify the written offsets
+            written_offsets = d_offset_col[:min(10, rows+1)].copy_to_host()
+            print(f"Verified offsets in buffer (first 10): {written_offsets}")
+            
+        except Exception as e_offset_write:
+            print(f"ERROR writing offsets to buffer: {e_offset_write}")
+            print(f"Exception type: {type(e_offset_write)}")
+            import traceback
+            traceback.print_exc()
 
         # Reallocate the data buffer using the calculated total_bytes
         new_data_buf = gmm.replace_varlen_data_buffer(name, total_bytes)
@@ -159,7 +191,7 @@ def decode_chunk(
 
         # Debug print
         print(f"VarCol '{name}' (v_idx={v_idx}): Total Bytes={total_bytes}, Reallocated Buffer: {new_data_buf.device_ctypes_pointer.value if new_data_buf else 'None'}")
-        # print(f"  Offsets (first 5): {d_offset_col[:min(6, rows+1)].copy_to_host()}") # Debug: check offsets
+        print(f"--- End processing '{name}' ---")
 
     print("--- Finished Prefix Sum & Reallocation ---")
 
@@ -173,6 +205,8 @@ def decode_chunk(
 
     for v_idx, (cidx, _, name) in enumerate(varlen_meta):
         col_meta = columns[cidx]
+        print(f"\n--- DEBUG: Pass 2 VarLen for '{name}' (v_idx={v_idx}, cidx={cidx}) ---")
+        
         # Only run for actual variable length types
         if col_meta.arrow_id == UTF8 or col_meta.arrow_id == BINARY:
             # Get the offset buffer (already filled by prefix sum)
@@ -184,7 +218,14 @@ def decode_chunk(
             field_off_v = field_offsets_dev[:, cidx]
             field_len_v = field_lengths_dev[:, cidx]
 
+            # DEBUG: Check field information before kernel
+            host_field_off = field_off_v[:min(5, rows)].copy_to_host()
+            host_field_len = field_len_v[:min(5, rows)].copy_to_host()
+            print(f"Field offsets (first 5): {host_field_off}")
+            print(f"Field lengths (first 5): {host_field_len}")
+
             # Call the simplified kernel
+            print(f"Launching pass2_scatter_varlen kernel with blocks={blocks}, threads={threads}")
             pass2_scatter_varlen[blocks, threads](
                 raw_dev,
                 field_off_v,
@@ -192,6 +233,34 @@ def decode_chunk(
                 d_offset_v,    # Pass the offset buffer for this column
                 d_values_v     # Pass the reallocated data buffer
             )
+            cuda.synchronize()
+            print(f"Kernel completed for '{name}'")
+            
+            # DEBUG: Check data buffer content after kernel
+            if d_values_v.size > 0:
+                sample_size = min(100, d_values_v.size)
+                sample_data = d_values_v[:sample_size].copy_to_host()
+                print(f"Data buffer sample (first {sample_size} bytes): {sample_data[:50]}...")
+                
+                # Try to decode first string using offsets
+                host_offsets_post = d_offset_v[:min(5, rows+1)].copy_to_host()
+                print(f"Offsets after kernel (first 5): {host_offsets_post}")
+                
+                if len(host_offsets_post) > 1:
+                    try:
+                        start = host_offsets_post[0]
+                        end = host_offsets_post[1]
+                        if 0 <= start < end <= d_values_v.size:
+                            first_string_bytes = d_values_v[start:end].copy_to_host()
+                            decoded = first_string_bytes.tobytes().decode('utf-8', errors='replace')
+                            print(f"First string decoded: '{decoded}'")
+                        else:
+                            print(f"Invalid first string range: [{start}:{end}] (buffer size: {d_values_v.size})")
+                    except Exception as e_decode:
+                        print(f"Error decoding first string: {e_decode}")
+            else:
+                print(f"Data buffer is empty for '{name}'")
+            
         else:
             # This case should not happen if varlen_meta is built correctly
              warnings.warn(f"Column {name} in varlen_meta but is not UTF8/BINARY (arrow_id={col_meta.arrow_id}). Skipping varlen pass.")
@@ -330,24 +399,164 @@ def decode_chunk(
                 if d_values_col is None or d_offsets_col is None:
                      raise ValueError(f"Missing data or offset buffer for varlen column {col.name}")
 
+                # DEBUG: Check buffer content before PyArrow assembly
+                print(f"\n--- DEBUG: {col.name} varlen buffer analysis ---")
+                host_offsets = d_offsets_col.copy_to_host()
+                host_values = d_values_col.copy_to_host() if d_values_col.size > 0 else np.array([], dtype=np.uint8)
+                print(f"Offsets shape: {host_offsets.shape}, dtype: {host_offsets.dtype}")
+                print(f"Values shape: {host_values.shape}, dtype: {host_values.dtype}")
+                print(f"First 10 offsets: {host_offsets[:min(10, len(host_offsets))]}")
+                print(f"Last 5 offsets: {host_offsets[-5:] if len(host_offsets) >= 5 else host_offsets}")
+                print(f"Values size: {len(host_values)} bytes")
+                
+                # Check if offsets are monotonic and valid
+                if len(host_offsets) > 1:
+                    offsets_diff = np.diff(host_offsets)
+                    print(f"Offset differences (first 10): {offsets_diff[:min(10, len(offsets_diff))]}")
+                    print(f"Min offset diff: {np.min(offsets_diff)}, Max: {np.max(offsets_diff)}")
+                    if np.any(offsets_diff < 0):
+                        print("WARNING: Non-monotonic offsets detected!")
+                
+                # Check sample string data
+                if len(host_values) > 0 and len(host_offsets) > 1:
+                    try:
+                        # Try to decode first few strings
+                        for i in range(min(3, len(host_offsets)-1)):
+                            start = host_offsets[i]
+                            end = host_offsets[i+1]
+                            if 0 <= start <= end <= len(host_values):
+                                string_bytes = host_values[start:end]
+                                try:
+                                    decoded_str = string_bytes.tobytes().decode('utf-8', errors='replace')
+                                    print(f"String {i}: [{start}:{end}] = '{decoded_str[:50]}{'...' if len(decoded_str) > 50 else ''}'")
+                                except Exception as e_decode:
+                                    print(f"String {i}: [{start}:{end}] decode error: {e_decode}")
+                            else:
+                                print(f"String {i}: Invalid range [{start}:{end}] (values size: {len(host_values)})")
+                    except Exception as e_sample:
+                        print(f"Error sampling strings: {e_sample}")
+
                 # Wrap GPU buffers for PyArrow
                 if PYARROW_CUDA_AVAILABLE:
                     pa_offset_buf = pa_cuda.as_cuda_buffer(d_offsets_col)
                     pa_data_buf = pa_cuda.as_cuda_buffer(d_values_col)
+                    print(f"Using CUDA buffers for {col.name}")
                 else:
                     # Fallback: Copy to host if pyarrow.cuda is not available
                     warnings.warn("pyarrow.cuda not available. Copying varlen data/offsets to host for Arrow assembly.")
-                    pa_offset_buf = pa.py_buffer(d_offsets_col.copy_to_host())
-                    pa_data_buf = pa.py_buffer(d_values_col.copy_to_host())
+                    pa_offset_buf = pa.py_buffer(host_offsets)
+                    pa_data_buf = pa.py_buffer(host_values)
+                    print(f"Using host buffers for {col.name}")
 
+                # DEBUG: Check PyArrow buffer properties
+                print(f"PyArrow offset buffer: size={pa_offset_buf.size}, address={pa_offset_buf.address}")
+                print(f"PyArrow data buffer: size={pa_data_buf.size}, address={pa_data_buf.address}")
+                
                 # Create array using from_buffers
-                if pa.types.is_string(pa_type):
-                    arr = pa.StringArray.from_buffers(pa_type, rows, [validity_buffer, pa_offset_buf, pa_data_buf], null_count=null_count)
-                elif pa.types.is_binary(pa_type):
-                    arr = pa.BinaryArray.from_buffers(pa_type, rows, [validity_buffer, pa_offset_buf, pa_data_buf], null_count=null_count)
-                else: # Fallback if type mismatch
-                    warnings.warn(f"Type mismatch for varlen column {col.name}. Expected String/Binary, got {pa_type}. Creating null array.")
+                # Ensure parameters are correct Python types
+                rows_int = int(rows)
+                null_count_int = int(null_count)
+                print(f"Attempting from_buffers for {col.name}: type={pa_type}, rows={rows_int}, null_count={null_count_int}")
+                print(f"Parameter types: rows={type(rows_int)}, null_count={type(null_count_int)}")
+                print(f"Buffer types: validity={type(validity_buffer)}, offset={type(pa_offset_buf)}, data={type(pa_data_buf)}")
+                
+                # DETAILED DEBUGGING: Check PyArrow version and signature
+                print(f"PyArrow version: {pa.__version__}")
+                import inspect
+                try:
+                    sig = inspect.signature(pa.StringArray.from_buffers)
+                    print(f"StringArray.from_buffers signature: {sig}")
+                except:
+                    print("Could not inspect StringArray.from_buffers signature")
+                
+                # DETAILED DEBUGGING: Check buffer contents
+                try:
+                    offset_bytes = pa_offset_buf.to_pybytes()
+                    offset_as_int32 = np.frombuffer(offset_bytes, dtype=np.int32)
+                    print(f"Offset buffer raw bytes (first 40): {offset_bytes[:40].hex()}")
+                    print(f"Offset as int32 array (first 10): {offset_as_int32[:10]}")
+                    print(f"Offset buffer size: {len(offset_bytes)} bytes, expected: {(rows_int + 1) * 4}")
+                    
+                    data_bytes = pa_data_buf.to_pybytes()
+                    print(f"Data buffer raw bytes (first 40): {data_bytes[:40].hex()}")
+                    print(f"Data buffer size: {len(data_bytes)} bytes")
+                    
+                    # System info
+                    import sys
+                    print(f"System byte order: {sys.byteorder}")
+                    print(f"NumPy int32 dtype: {np.dtype(np.int32)}")
+                    print(f"Host offsets dtype: {host_offsets.dtype}")
+                    print(f"Host offsets flags: {host_offsets.flags}")
+                    
+                except Exception as e_debug:
+                    print(f"Error during buffer inspection: {e_debug}")
+                
+                # DETAILED DEBUGGING: Test minimal case first
+                print("\n--- Testing minimal StringArray.from_buffers ---")
+                try:
+                    test_data = b"helloworldtest"
+                    test_offsets = np.array([0, 5, 10, 14], dtype=np.int32)
+                    test_offset_buf = pa.py_buffer(test_offsets)
+                    test_data_buf = pa.py_buffer(test_data)
+                    test_arr = pa.StringArray.from_buffers(
+                        length=3,
+                        value_offsets=test_offset_buf,
+                        data=test_data_buf,
+                        null_bitmap=None
+                    )
+                    print("Minimal test: SUCCESS")
+                except Exception as e_minimal:
+                    print(f"Minimal test failed: {e_minimal}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # The issue might be that PyArrow expects specific buffer order or None for validity
+                # Let's try without the null_count parameter first, and with None for validity if no nulls
+                if null_count_int == 0:
+                    validity_arg = None
+                else:
+                    validity_arg = validity_buffer
+                
+                # DETAILED DEBUGGING: Check each argument separately
+                print(f"\n--- Checking from_buffers arguments ---")
+                print(f"pa_type: {pa_type}")
+                print(f"rows_int: {rows_int} (type: {type(rows_int)})")
+                print(f"validity_arg: {validity_arg}")
+                print(f"pa_offset_buf: {pa_offset_buf} (size: {pa_offset_buf.size})")
+                print(f"pa_data_buf: {pa_data_buf} (size: {pa_data_buf.size})")
+                
+                try:
+                    if pa.types.is_string(pa_type):
+                        # Try the standard Arrow StringArray.from_buffers signature                        
+                        arr = pa.StringArray.from_buffers(
+                            length=rows_int,
+                            value_offsets=pa_offset_buf,
+                            data=pa_data_buf,
+                            null_bitmap=validity_arg,
+                            null_count=null_count_int
+                        )
+                        print(f"SUCCESS: StringArray created for {col.name}")
+                    elif pa.types.is_binary(pa_type):
+                        arr = pa.BinaryArray.from_buffers(
+                            length=rows_int,
+                            value_offsets=pa_offset_buf,
+                            data=pa_data_buf,
+                            null_bitmap=validity_arg,
+                            null_count=null_count_int
+                        )
+                        print(f"SUCCESS: BinaryArray created for {col.name}")
+                    else: # Fallback if type mismatch
+                        warnings.warn(f"Type mismatch for varlen column {col.name}. Expected String/Binary, got {pa_type}. Creating null array.")
+                        arr = pa.nulls(rows_int, type=pa_type)
+                except Exception as e_from_buffers:
+                    print(f"ERROR in from_buffers for {col.name}: {e_from_buffers}")
+                    print(f"Exception type: {type(e_from_buffers)}")
+                    import traceback
+                    print("Full traceback:")
+                    traceback.print_exc()
+                    # Create fallback null array
                     arr = pa.nulls(rows, type=pa_type)
+                    print(f"Created fallback null array for {col.name}")
 
             else: # Fixed-width
                 # Get buffer from bufs dict
