@@ -20,7 +20,7 @@ import pyarrow.json as paj
 
 from gpu_parse_wrapper import parse_binary_chunk_gpu
 from gpu_decoder_v2 import decode_chunk
-from meta_fetch import ColumnMeta  # type: ignore
+from src.type_map import ColumnMeta
 
 
 DATA_CASES = [

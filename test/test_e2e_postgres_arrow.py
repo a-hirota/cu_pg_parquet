@@ -24,9 +24,10 @@ import pyarrow as pa
 from numba import cuda
 
 # Import necessary functions from the correct modules using absolute paths from root
-from src.meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
-from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size # Import detect_pg_header_size
-from src.gpu_decoder_v2 import decode_chunk
+from meta_fetch import fetch_column_meta
+from src.type_map import ColumnMeta
+from gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
+from gpu_decoder_v2 import decode_chunk
 # Import the CPU row start calculator (or define it here if preferred)
 from test.test_single_row_pg_parser import calculate_row_starts_cpu # Assuming test is importable from root
 
