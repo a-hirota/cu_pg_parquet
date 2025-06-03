@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Dict, Any
 
+import os
 import warnings
 import numpy as np
 import cupy as cp
@@ -25,7 +26,7 @@ from .gpu_memory_manager_v2 import GPUMemoryManagerV2
 from .cuda_kernels.arrow_gpu_pass1 import pass1_len_null # Use Pass 1 GPU Kernel
 from .cuda_kernels.arrow_gpu_pass2 import pass2_scatter_varlen
 from .cuda_kernels.arrow_gpu_pass2_fixed import pass2_scatter_fixed
-from .cuda_kernels.arrow_gpu_pass2_decimal128 import pass2_scatter_decimal128 # Import the new kernel
+from .cuda_kernels.arrow_gpu_pass2_decimal128 import pass2_scatter_decimal128, pass2_scatter_decimal128_optimized, pass2_scatter_decimal64_optimized
 from .cuda_kernels.numeric_utils import int64_to_decimal_ascii  # noqa: F401  (import for Numba registration)
 
 def build_validity_bitmap(valid_bool: np.ndarray) -> pa.Buffer:
@@ -269,16 +270,53 @@ def decode_chunk(
         # fixed-length: includes INTs, FLOATs, BOOL, DATE, TS, and now DECIMAL128
         d_vals, d_nulls_col, stride = bufs[name]
 
-        # Check for DECIMAL128 and call the specific kernel
+        # Check for DECIMAL128 and call the appropriate kernel
         if col.arrow_id == DECIMAL128:
-            print(f"Running Pass 2 kernel for DECIMAL128 column {name}")
-            pass2_scatter_decimal128[blocks, threads](
-                raw_dev,
-                field_offsets_dev[:, cidx], # Offsets for this column
-                field_lengths_dev[:, cidx], # Lengths (needed for signature, maybe useful for validation inside kernel)
-                d_vals,                     # Output buffer for this column
-                stride                      # Should be 16 for Decimal128
-            )
+            # Check if optimization is enabled via environment variable
+            use_optimization = os.environ.get("USE_DECIMAL_OPTIMIZATION", "1") == "1"
+            
+            if use_optimization:
+                print(f"Running Pass 2 OPTIMIZED kernel for DECIMAL128 column {name}")
+                
+                # Extract scale from ColumnMeta.arrow_param
+                precision, scale = col.arrow_param or (38, 0)
+                target_scale = scale  # Use the column's defined scale
+                
+                print(f"DECIMAL128 {name}: precision={precision}, scale={scale}")
+                
+                # Choose optimal kernel based on precision
+                if precision <= 18 and stride == 8:
+                    # Use Decimal64 optimization for high precision cases
+                    print(f"Using Decimal64 optimized kernel for {name} (precision={precision})")
+                    pass2_scatter_decimal64_optimized[blocks, threads](
+                        raw_dev,
+                        field_offsets_dev[:, cidx],
+                        field_lengths_dev[:, cidx],
+                        d_vals,
+                        stride,
+                        target_scale
+                    )
+                else:
+                    # Use Decimal128 optimized kernel
+                    print(f"Using Decimal128 optimized kernel for {name} (precision={precision})")
+                    pass2_scatter_decimal128_optimized[blocks, threads](
+                        raw_dev,
+                        field_offsets_dev[:, cidx],
+                        field_lengths_dev[:, cidx],
+                        d_vals,
+                        stride,
+                        target_scale
+                    )
+            else:
+                # Use original kernel for comparison
+                print(f"Running Pass 2 ORIGINAL kernel for DECIMAL128 column {name} (optimization disabled)")
+                pass2_scatter_decimal128[blocks, threads](
+                    raw_dev,
+                    field_offsets_dev[:, cidx], # Offsets for this column
+                    field_lengths_dev[:, cidx], # Lengths (needed for signature, maybe useful for validation inside kernel)
+                    d_vals,                     # Output buffer for this column
+                    stride                      # Should be 16 for Decimal128
+                )
         else:
             # Call the existing generic fixed-length kernel for other types
             pass2_scatter_fixed[blocks, threads](

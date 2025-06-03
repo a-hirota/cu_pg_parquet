@@ -93,9 +93,25 @@ class GPUMemoryManagerV2:
             else:
                 esize = arrow_elem_size(aid)
                 if esize == 0:
-                    # DECIMAL128 を固定長 16 byte として扱う
+                    # DECIMAL128 を固定長として扱う（precision≤18なら8バイト最適化）
                     if aid == DECIMAL128:
-                        esize = 16
+                        # Check if optimization is enabled via environment variable
+                        import os
+                        use_optimization = os.environ.get("USE_DECIMAL_OPTIMIZATION", "1") == "1"
+                        
+                        if use_optimization:
+                            # Extract precision from meta.arrow_param for optimization
+                            precision, scale = meta.arrow_param or (38, 0)
+                            if precision <= 18:
+                                esize = 8  # Use Decimal64 optimization
+                                print(f"[GPUMemoryManagerV2] Using Decimal64 optimization for {meta.name} (precision={precision})")
+                            else:
+                                esize = 16  # Standard Decimal128
+                                print(f"[GPUMemoryManagerV2] Using standard Decimal128 for {meta.name} (precision={precision})")
+                        else:
+                            # Always use 16 bytes when optimization is disabled
+                            esize = 16
+                            print(f"[GPUMemoryManagerV2] Using standard Decimal128 for {meta.name} (optimization disabled)")
                     else:
                         raise ValueError(f"Unsupported fixed type size for aid={aid}")
 
