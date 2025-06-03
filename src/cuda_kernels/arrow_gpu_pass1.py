@@ -20,7 +20,7 @@ from numba import cuda
 
 
 @cuda.jit
-def pass1_len_null(field_lengths, var_indices, d_var_lens, d_nulls):
+def pass1_len_null(field_lengths, var_indices, d_var_lens, d_nulls, numeric_string_cols=None):
     """
     Parameters
     ----------
@@ -57,7 +57,21 @@ def pass1_len_null(field_lengths, var_indices, d_var_lens, d_nulls):
         # 可変長列なら長さを保存
         v_idx = var_indices[col]
         if v_idx != -1:
-            d_var_lens[v_idx, row] = 0 if is_null else flen
+            if is_null:
+                d_var_lens[v_idx, row] = 0
+            else:
+                # Check if this is a NUMERIC→STRING column
+                is_numeric_string = False
+                if numeric_string_cols is not None and col < len(numeric_string_cols):
+                    is_numeric_string = numeric_string_cols[col] == 1
+                
+                if is_numeric_string:
+                    # Estimate string length for NUMERIC (conservative estimate)
+                    # NUMERIC can be up to 1000 digits, estimate ~20 chars for typical values
+                    estimated_len = min(20, max(8, flen * 2))  # At least 8, at most 20 chars
+                    d_var_lens[v_idx, row] = estimated_len
+                else:
+                    d_var_lens[v_idx, row] = flen
 
 
 __all__ = ["pass1_len_null"]

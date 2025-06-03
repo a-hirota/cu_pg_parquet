@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Tuple, Any, Protocol
 
 # psycopg2/3 動的インポート
@@ -83,9 +84,23 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
 
         # pg_typmod による補正
         if arrow_id == DECIMAL128:
-            # numeric(p,s) → (precision, scale)
-            precision, scale = _decode_numeric_pg_typmod(pg_typmod)
-            arrow_param = (precision, scale)
+            # NUMERIC列を文字列として扱うかどうかの判定
+            use_string_for_numeric = os.environ.get("NUMERIC_AS_STRING", "0") == "1"
+            
+            if use_string_for_numeric:
+                # NUMERIC列を文字列として扱う（高速化のため）
+                print(f"INFO: Converting NUMERIC column '{name}' to STRING for performance")
+                arrow_id = UTF8
+                elem_size = 0  # 可変長
+                # VARCHAR相当として扱う（推定最大長）
+                precision, scale = _decode_numeric_pg_typmod(pg_typmod)
+                # NUMERICの最大文字列長を推定（符号+桁数+小数点+NULL終端の余裕）
+                estimated_max_len = max(20, precision + 5) if precision > 0 else 20
+                arrow_param = estimated_max_len
+            else:
+                # 従来通りDECIMAL128として処理
+                precision, scale = _decode_numeric_pg_typmod(pg_typmod)
+                arrow_param = (precision, scale)
         elif arrow_id == UTF8:
             # VARCHAR(N) の N = pg_typmod-4
             if pg_typmod > 4:

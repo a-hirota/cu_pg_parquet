@@ -19,6 +19,7 @@ except ImportError:
 
 
 from numba import cuda
+import time
 
 from .type_map import *
 from .gpu_memory_manager_v2 import GPUMemoryManagerV2
@@ -73,8 +74,14 @@ def decode_chunk(
         raise ValueError("rows == 0")
 
     # --- 10のべき乗テーブルをGPUに転送 ---
+    print(f"DECIMAL PASS2 DEBUG: Transferring pow10 tables to GPU...")
+    table_transfer_start = time.time()
     d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
     d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
+    cuda.synchronize()
+    table_transfer_time = time.time() - table_transfer_start
+    print(f"DECIMAL PASS2 DEBUG: Pow10 table transfer time: {table_transfer_time:.6f} seconds")
+    print(f"DECIMAL PASS2 DEBUG: Table size: lo={POW10_TABLE_LO_HOST.nbytes} bytes, hi={POW10_TABLE_HI_HOST.nbytes} bytes")
 
     # ----------------------------------
     # 1. GPU バッファ確保 (Arrow出力用) - 初期確保
@@ -114,12 +121,24 @@ def decode_chunk(
     threads_pass1 = 256 # Or use a configurable value
     blocks_pass1 = (rows + threads_pass1 - 1) // threads_pass1
 
+    # Prepare NUMERIC→STRING column mapping
+    numeric_string_cols = np.zeros(ncols, dtype=np.int32)
+    use_numeric_string = os.environ.get("NUMERIC_AS_STRING", "0") == "1"
+    if use_numeric_string:
+        for cidx, col in enumerate(columns):
+            if col.pg_oid == 1700:  # NUMERIC OID
+                numeric_string_cols[cidx] = 1
+                print(f"Pass1: Marking column {col.name} for NUMERIC→STRING conversion")
+    
+    d_numeric_string_cols = cuda.to_device(numeric_string_cols)
+    
     # Launch Pass 1 kernel
     pass1_len_null[blocks_pass1, threads_pass1](
         field_lengths_dev, # Input: lengths calculated by Pass 0
         var_indices_dev,   # Input: mapping from col index to varlen index
         d_var_lens,        # Output: lengths for varlen columns
-        d_nulls_all        # Output: null bitmap (Arrow format: 0=NULL, 1=Valid)
+        d_nulls_all,       # Output: null bitmap (Arrow format: 0=NULL, 1=Valid)
+        d_numeric_string_cols  # Input: NUMERIC→STRING column flags
     )
     cuda.synchronize()
     print("--- Finished Pass 1 (GPU) ---")
@@ -222,14 +241,21 @@ def decode_chunk(
             print(f"Field offsets (first 5): {host_field_off}")
             print(f"Field lengths (first 5): {host_field_len}")
 
-            # Call the simplified kernel
+            # Check if this is a NUMERIC column converted to string
+            is_numeric_string = (col_meta.pg_oid == 1700 and col_meta.arrow_id == UTF8)  # 1700 is NUMERIC OID
+            numeric_mode = 1 if is_numeric_string else 0
+            
             print(f"Launching pass2_scatter_varlen kernel with blocks={blocks}, threads={threads}")
+            if is_numeric_string:
+                print(f"Using NUMERIC→STRING conversion mode for column {name}")
+            
             pass2_scatter_varlen[blocks, threads](
                 raw_dev,
                 field_off_v,
                 field_len_v,
                 d_offset_v,    # Pass the offset buffer for this column
-                d_values_v     # Pass the reallocated data buffer
+                d_values_v,    # Pass the reallocated data buffer
+                numeric_mode   # 0=normal copy, 1=NUMERIC→string
             )
             cuda.synchronize()
             print(f"Kernel completed for '{name}'")
@@ -291,6 +317,26 @@ def decode_chunk(
                 
                 print(f"DECIMAL128 {name}: precision={precision}, scale={scale}")
                 
+                # --- DEBUG: Memory and performance analysis ---
+                print(f"DECIMAL PASS2 DEBUG: Analyzing performance for column {name}")
+                print(f"DECIMAL PASS2 DEBUG: Processing {rows} rows, stride={stride}")
+                print(f"DECIMAL PASS2 DEBUG: Data buffer size: {d_vals.size} bytes ({d_vals.size/(1024*1024):.2f} MB)")
+                print(f"DECIMAL PASS2 DEBUG: GPU blocks={blocks}, threads={threads}")
+                
+                # GPU memory info
+                try:
+                    free_mem, total_mem = cuda.current_context().get_memory_info()
+                    used_mem = total_mem - free_mem
+                    print(f"DECIMAL PASS2 DEBUG: GPU memory - Used: {used_mem/(1024**3):.2f} GB, Free: {free_mem/(1024**3):.2f} GB, Total: {total_mem/(1024**3):.2f} GB")
+                except Exception as e:
+                    print(f"DECIMAL PASS2 DEBUG: Could not get GPU memory info: {e}")
+                
+                # --- DEBUG: Start timing with CUDA events for precise GPU timing ---
+                start_event = cuda.event()
+                end_event = cuda.event()
+                start_time = time.time()
+                start_event.record()
+                
                 # Choose optimal kernel based on precision
                 if precision <= 18 and stride == 8:
                     # Use Decimal64 optimization for high precision cases
@@ -318,9 +364,39 @@ def decode_chunk(
                         d_pow10_table_lo,
                         d_pow10_table_hi
                     )
+                
+                end_event.record()
+                cuda.synchronize()
+                end_time = time.time()
+                
+                # Calculate both CPU and GPU timing
+                cpu_kernel_time = end_time - start_time
+                gpu_kernel_time = cuda.event_elapsed_time(start_event, end_event) / 1000.0  # Convert ms to seconds
+                
+                # Calculate performance metrics
+                bytes_processed = rows * stride  # Output bytes
+                input_data_estimate = rows * 20  # Rough estimate of input NUMERIC data size
+                total_bytes = bytes_processed + input_data_estimate
+                cpu_bandwidth_gb_s = (total_bytes / (1024**3)) / cpu_kernel_time if cpu_kernel_time > 0 else 0
+                gpu_bandwidth_gb_s = (total_bytes / (1024**3)) / gpu_kernel_time if gpu_kernel_time > 0 else 0
+                
+                print(f"DECIMAL PASS2 TIMING: {name} CPU timing: {cpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING: {name} GPU timing: {gpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING: {name} Sync overhead: {cpu_kernel_time - gpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING: {name} processed {rows} rows, {gpu_kernel_time/rows*1000:.3f} ms per row (GPU)")
+                print(f"DECIMAL PASS2 TIMING: {name} CPU bandwidth: {cpu_bandwidth_gb_s:.2f} GB/s")
+                print(f"DECIMAL PASS2 TIMING: {name} GPU bandwidth: {gpu_bandwidth_gb_s:.2f} GB/s")
+                print(f"DECIMAL PASS2 TIMING: {name} output data: {bytes_processed} bytes ({bytes_processed/(1024*1024):.2f} MB)")
+                # --- END DEBUG ---
             else:
                 # Use original kernel for comparison
                 print(f"Running Pass 2 ORIGINAL kernel for DECIMAL128 column {name} (optimization disabled)")
+                
+                # --- DEBUG: Start timing for original decimal conversion pass2 ---
+                start_event_orig = cuda.event()
+                end_event_orig = cuda.event()
+                start_time = time.time()
+                start_event_orig.record()
                 pass2_scatter_decimal128[blocks, threads](
                     raw_dev,
                     field_offsets_dev[:, cidx], # Offsets for this column
@@ -328,6 +404,29 @@ def decode_chunk(
                     d_vals,                     # Output buffer for this column
                     stride                      # Should be 16 for Decimal128
                 )
+                end_event_orig.record()
+                cuda.synchronize()
+                end_time = time.time()
+                
+                # Calculate both CPU and GPU timing for original kernel
+                cpu_kernel_time = end_time - start_time
+                gpu_kernel_time = cuda.event_elapsed_time(start_event_orig, end_event_orig) / 1000.0  # Convert ms to seconds
+                
+                # Calculate performance metrics for original kernel
+                bytes_processed = rows * stride  # Output bytes
+                input_data_estimate = rows * 20  # Rough estimate of input NUMERIC data size
+                total_bytes = bytes_processed + input_data_estimate
+                cpu_bandwidth_gb_s = (total_bytes / (1024**3)) / cpu_kernel_time if cpu_kernel_time > 0 else 0
+                gpu_bandwidth_gb_s = (total_bytes / (1024**3)) / gpu_kernel_time if gpu_kernel_time > 0 else 0
+                
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} CPU timing: {cpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} GPU timing: {gpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} Sync overhead: {cpu_kernel_time - gpu_kernel_time:.6f} seconds")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} processed {rows} rows, {gpu_kernel_time/rows*1000:.3f} ms per row (GPU)")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} CPU bandwidth: {cpu_bandwidth_gb_s:.2f} GB/s")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} GPU bandwidth: {gpu_bandwidth_gb_s:.2f} GB/s")
+                print(f"DECIMAL PASS2 TIMING (ORIGINAL): {name} output data: {bytes_processed} bytes ({bytes_processed/(1024*1024):.2f} MB)")
+                # --- END DEBUG ---
         else:
             # Call the existing generic fixed-length kernel for other types
             pass2_scatter_fixed[blocks, threads](
