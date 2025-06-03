@@ -15,47 +15,42 @@ from numba import cuda, uint64, int64, uint16, int16, uint8, boolean
 import numpy as np
 
 # ==================================================
-# 10^n 定数ルックアップ関数 (インライン実装)
+# 10^n 定数テーブル (ホスト側で準備)
 # ==================================================
+# Decimal128は最大38桁なので、10^0 から 10^38 まで対応
+_POW10_TABLE_SIZE = 39
+POW10_TABLE_LO_HOST = np.zeros(_POW10_TABLE_SIZE, dtype=np.uint64)
+POW10_TABLE_HI_HOST = np.zeros(_POW10_TABLE_SIZE, dtype=np.uint64)
 
-@cuda.jit(device=True, inline=True)
-def get_pow10_64(n):
-    """10^n を返す (nは0-17の範囲、64ビット値)"""
-    if n == 0: return uint64(1)
-    elif n == 1: return uint64(10)
-    elif n == 2: return uint64(100)
-    elif n == 3: return uint64(1000)
-    elif n == 4: return uint64(10000)
-    elif n == 5: return uint64(100000)
-    elif n == 6: return uint64(1000000)
-    elif n == 7: return uint64(10000000)
-    elif n == 8: return uint64(100000000)
-    elif n == 9: return uint64(1000000000)
-    elif n == 10: return uint64(10000000000)
-    elif n == 11: return uint64(100000000000)
-    elif n == 12: return uint64(1000000000000)
-    elif n == 13: return uint64(10000000000000)
-    elif n == 14: return uint64(100000000000000)
-    elif n == 15: return uint64(1000000000000000)
-    elif n == 16: return uint64(10000000000000000)
-    elif n == 17: return uint64(100000000000000000)
-    else: return uint64(0)  # 範囲外は0
-
-@cuda.jit(device=True, inline=True)
-def get_pow10_128(n):
-    """10^n を128ビット値として返す (hi, lo)"""
-    if n <= 17:
-        return uint64(0), get_pow10_64(n)
-    else:
-        # 18以降は実行時計算 (簡易実装)
-        if n == 18:
-            return uint64(0), uint64(0)  # 実際は1000000000000000000だが64ビット超過
-        elif n == 19:
-            return uint64(0), uint64(0)  # 実際は10000000000000000000だが64ビット超過
-        elif n == 20:
-            return uint64(5), uint64(7766279631452241920)  # 10^20の近似
+for i in range(_POW10_TABLE_SIZE):
+    val = 10**i
+    POW10_TABLE_LO_HOST[i] = val & 0xFFFFFFFFFFFFFFFF
+    POW10_TABLE_HI_HOST[i] = (val >> 64) & 0xFFFFFFFFFFFFFFFF
+    
+    # GPU定数メモリへのコピーは削除し、ホスト配列はそのまま保持
+    # D_POW10_TABLE_LO = cuda.const.array_like(POW10_TABLE_LO_HOST) # 削除
+    # D_POW10_TABLE_HI = cuda.const.array_like(POW10_TABLE_HI_HOST) # 削除
+    
+    # ==================================================
+    # 10^n 定数ルックアップ関数 (デバイス配列を引数として使用)
+    # ==================================================
+    
+    @cuda.jit(device=True, inline=True)
+    def get_pow10_64(n, d_pow10_table_lo, d_pow10_table_hi):
+        """10^n を返す (64ビット値、デバイス配列テーブル使用)"""
+        if 0 <= n < d_pow10_table_lo.shape[0]:
+            # nが19以下（d_pow10_table_hi[n]が0）の場合のみ安全にLOだけで返す
+            if d_pow10_table_hi[n] == 0:
+                return d_pow10_table_lo[n]
+        return uint64(0)  # 範囲外または64bitで表現不可
+    
+    @cuda.jit(device=True, inline=True)
+    def get_pow10_128(n, d_pow10_table_lo, d_pow10_table_hi):
+        """10^n を128ビット値として返す (hi, lo、デバイス配列テーブル使用)"""
+        if 0 <= n < d_pow10_table_lo.shape[0]:
+            return d_pow10_table_hi[n], d_pow10_table_lo[n]
         else:
-            # より大きな値は実行時に計算
+            # テーブル範囲外の場合は0を返す
             return uint64(0), uint64(0)
 
 # ==================================================
@@ -171,8 +166,8 @@ def accumulate_base1e9_fast(val_hi, val_lo, digits, nd):
     return result_hi, result_lo
 
 @cuda.jit(device=True, inline=True)
-def apply_scale_fast(val_hi, val_lo, source_scale, target_scale):
-    """スケール調整の高速実装"""
+def apply_scale_fast(val_hi, val_lo, source_scale, target_scale, d_pow10_table_lo, d_pow10_table_hi):
+    """スケール調整の高速実装 (デバイス配列テーブル使用)"""
     if source_scale == target_scale:
         return val_hi, val_lo
     
@@ -180,33 +175,30 @@ def apply_scale_fast(val_hi, val_lo, source_scale, target_scale):
     
     if scale_diff > 0:
         # スケールアップ: 10^scale_diff を乗算
-        if scale_diff <= 17:
-            # 64ビット範囲内の10^nを使用
-            pow_lo = get_pow10_64(scale_diff)
-            if pow_lo > 0:
-                return mul128_u64_fast(val_hi, val_lo, pow_lo)
-        elif scale_diff <= 20:
-            # 128ビット範囲内の10^nを使用
-            pow_hi, pow_lo = get_pow10_128(scale_diff)
-            if pow_hi == 0 and pow_lo > 0:
-                return mul128_u64_fast(val_hi, val_lo, pow_lo)
-            # 128×128乗算が必要な場合は簡易実装
-        return uint64(0), uint64(0)  # オーバーフロー
-    else:
+        pow_hi, pow_lo = get_pow10_128(scale_diff, d_pow10_table_lo, d_pow10_table_hi)
+        if pow_hi == 0 and pow_lo == 0 and scale_diff != 0: # テーブル範囲外などで0が返ってきた
+            return uint64(0), uint64(0) # オーバーフローとして扱う
+        
+        if pow_hi == 0: # 乗数が64ビットに収まる場合
+            return mul128_u64_fast(val_hi, val_lo, pow_lo)
+        else:
+            # 128bit * 128bit乗算が必要になるケース。現状のmul128_u64_fastでは対応不可。
+            # READMEの範囲を超える大きなスケールアップはオーバーフローとして扱う。
+            return uint64(0), uint64(0) # オーバーフロー
+    else: # scale_diff < 0
         # スケールダウン: 10^(-scale_diff) で除算
         abs_diff = -scale_diff
-        if abs_diff <= 17:
-            # 64ビット範囲内の10^nを使用
-            pow_lo = get_pow10_64(abs_diff)
-            if pow_lo > 0:
-                return div128_u64_fast(val_hi, val_lo, pow_lo)
-        elif abs_diff <= 20:
-            # 128ビット範囲内の10^nを使用
-            pow_hi, pow_lo = get_pow10_128(abs_diff)
-            if pow_hi == 0 and pow_lo > 0:
-                return div128_u64_fast(val_hi, val_lo, pow_lo)
-            # 128÷128除算が必要な場合は簡易実装
-        return uint64(0), uint64(0)  # アンダーフロー
+        pow_hi, pow_lo = get_pow10_128(abs_diff, d_pow10_table_lo, d_pow10_table_hi)
+        if pow_hi == 0 and pow_lo == 0 and abs_diff != 0: # テーブル範囲外などで0が返ってきた
+            return uint64(0), uint64(0) # アンダーフローとして扱う
+
+        if pow_hi == 0: # 除数が64ビットに収まる場合
+            if pow_lo == 0: return uint64(0), uint64(0) # 0除算回避 (べき乗が0だった場合)
+            return div128_u64_fast(val_hi, val_lo, pow_lo)
+        else:
+            # 128bit / 128bit除算が必要になるケース。現状のdiv128_u64_fastでは対応不可。
+            # 大きなスケールダウンはアンダーフローとして扱う。
+            return uint64(0), uint64(0) # アンダーフロー
 
 # ==================================================
 # 出力ヘルパー
@@ -238,10 +230,12 @@ def pass2_scatter_decimal128_optimized(
     field_lengths,      # const int32_t* __restrict__ (size=rows)
     dst_buf,           # uint8_t* (output buffer)
     stride,            # int (must be 16)
-    target_scale       # int (列統一スケール)
+    target_scale,      # int (列統一スケール)
+    d_pow10_table_lo,  # device array
+    d_pow10_table_hi   # device array
 ):
     """
-    最適化版 Decimal128 変換カーネル
+    最適化版 Decimal128 変換カーネル (デバイス配列テーブル使用)
     - 列レベルでスケール統一
     - 基数1e9による高速累積
     - 定数テーブル活用
@@ -301,11 +295,24 @@ def pass2_scatter_decimal128_optimized(
     val_hi = uint64(0)
     val_lo = uint64(0)
     
-    # 基数10000での累積 (改良版)
-    base_10000 = uint64(10000)
-    for i in range(nd):
-        val_hi, val_lo = mul128_u64_fast(val_hi, val_lo, base_10000)
-        val_hi, val_lo = add128_fast(val_hi, val_lo, uint64(0), uint64(digits[i]))
+    # --- 基数1e8最適化実装 ---
+    i = 0
+    while i < nd:
+        if i + 1 < nd: # digitsが2つ以上残っている場合
+            # digits[i] と digits[i+1] を結合して1e8の1桁として扱う
+            # combined_digit = digits[i] * 10000 + digits[i+1]
+            # (digits[i]が上位、digits[i+1]が下位)
+            combined_digit = uint64(digits[i]) * uint64(10000) + uint64(digits[i+1])
+            
+            # val = val * 1e8 + combined_digit
+            val_hi, val_lo = mul128_u64_fast(val_hi, val_lo, uint64(100000000))  # 1e8
+            val_hi, val_lo = add128_fast(val_hi, val_lo, uint64(0), combined_digit)
+            i += 2
+        else: # digitsが1つだけ残っている場合
+            # val = val * 10000 + digits[i]
+            val_hi, val_lo = mul128_u64_fast(val_hi, val_lo, uint64(10000))
+            val_hi, val_lo = add128_fast(val_hi, val_lo, uint64(0), uint64(digits[i]))
+            i += 1
 
     # --- Weight処理削除 ---
     # PostgreSQL NUMERIC基数10000値をそのまま使用
@@ -317,7 +324,7 @@ def pass2_scatter_decimal128_optimized(
 
     # --- スケール統一 (列レベル) ---
     pg_scale = int(dscale) # PostgreSQL側のスケールをそのまま使用
-    val_hi, val_lo = apply_scale_fast(val_hi, val_lo, pg_scale, target_scale)
+    val_hi, val_lo = apply_scale_fast(val_hi, val_lo, pg_scale, target_scale, d_pow10_table_lo, d_pow10_table_hi)
 
     # --- 符号適用 ---
     if sign == 0x4000:  # 負数
@@ -337,10 +344,12 @@ def pass2_scatter_decimal64_optimized(
     field_lengths,      # const int32_t* __restrict__ (size=rows)
     dst_buf,           # uint8_t* (output buffer, 8-byte per value)
     stride,            # int (must be 8)
-    target_scale       # int (列統一スケール)
+    target_scale,      # int (列統一スケール)
+    d_pow10_table_lo,  # device array
+    d_pow10_table_hi   # device array (64bit版では主にLOのみ使用)
 ):
     """
-    Decimal64最適化カーネル (precision≤18の場合)
+    Decimal64最適化カーネル (precision≤18の場合, デバイス配列テーブル使用)
     128ビット演算を64ビットに置き換えて高速化
     """
     row = cuda.grid(1)
@@ -397,17 +406,18 @@ def pass2_scatter_decimal64_optimized(
 
     # スケール調整 (64ビット版)
     scale_diff = target_scale - pg_scale
-    if scale_diff > 0 and scale_diff < 20:
-        pow10_scale = uint64(1)
-        for _ in range(scale_diff):
-            pow10_scale *= uint64(10)
-        val *= pow10_scale
-    elif scale_diff < 0 and (-scale_diff) < 20:
-        abs_diff = -scale_diff
-        pow10_scale = uint64(1)
-        for _ in range(abs_diff):
-            pow10_scale *= uint64(10)
-        val //= pow10_scale
+    if scale_diff != 0: # 0の場合は何もしない
+        # Decimal64なので、get_pow10_64を使用
+        pow_val_scale = get_pow10_64(abs(scale_diff), d_pow10_table_lo, d_pow10_table_hi)
+        if pow_val_scale > 0: # 有効なべき乗値か確認
+            if scale_diff > 0:
+                val *= pow_val_scale
+            else: # scale_diff < 0
+                if pow_val_scale == 0: # 0除算回避
+                    val = uint64(0) # 結果を0にする (アンダーフロー)
+                else:
+                    val //= pow_val_scale
+        # else: pow_val_scaleが0の場合（範囲外など）、valは変更されない。
 
     # --- 符号適用 ---
     if sign == 0x4000:  # 負数

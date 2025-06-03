@@ -58,6 +58,14 @@ def run_benchmark():
         columns = fetch_column_meta(conn, f"SELECT * FROM {tbl}")
         meta_time = time.time() - start_meta_time
         print(f"メタデータ取得完了 ({meta_time:.4f}秒)")
+
+        # --- Add debug print for column metadata ---
+        print("\n--- Column Metadata ---")
+        for col in columns:
+            print(f"Name: {col.name}, OID: {col.pg_oid}, Typmod: {col.pg_typmod}, Arrow ID: {col.arrow_id}, Elem Size: {col.elem_size}, Arrow Param: {col.arrow_param}")
+        print("-----------------------\n")
+        # --- End debug print ---
+        
         ncols = len(columns)
 
         # -------------------------------

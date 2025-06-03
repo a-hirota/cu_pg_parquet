@@ -26,7 +26,10 @@ from .gpu_memory_manager_v2 import GPUMemoryManagerV2
 from .cuda_kernels.arrow_gpu_pass1 import pass1_len_null # Use Pass 1 GPU Kernel
 from .cuda_kernels.arrow_gpu_pass2 import pass2_scatter_varlen
 from .cuda_kernels.arrow_gpu_pass2_fixed import pass2_scatter_fixed
-from .cuda_kernels.arrow_gpu_pass2_decimal128 import pass2_scatter_decimal128, pass2_scatter_decimal128_optimized, pass2_scatter_decimal64_optimized
+from .cuda_kernels.arrow_gpu_pass2_decimal128 import (
+    pass2_scatter_decimal128, pass2_scatter_decimal128_optimized, pass2_scatter_decimal64_optimized,
+    POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST # ホスト側のテーブル定義をインポート
+)
 from .cuda_kernels.numeric_utils import int64_to_decimal_ascii  # noqa: F401  (import for Numba registration)
 
 def build_validity_bitmap(valid_bool: np.ndarray) -> pa.Buffer:
@@ -68,6 +71,10 @@ def decode_chunk(
     rows, ncols = field_lengths_dev.shape
     if rows == 0:
         raise ValueError("rows == 0")
+
+    # --- 10のべき乗テーブルをGPUに転送 ---
+    d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
+    d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
 
     # ----------------------------------
     # 1. GPU バッファ確保 (Arrow出力用) - 初期確保
@@ -294,7 +301,9 @@ def decode_chunk(
                         field_lengths_dev[:, cidx],
                         d_vals,
                         stride,
-                        target_scale
+                        target_scale,
+                        d_pow10_table_lo,
+                        d_pow10_table_hi
                     )
                 else:
                     # Use Decimal128 optimized kernel
@@ -305,7 +314,9 @@ def decode_chunk(
                         field_lengths_dev[:, cidx],
                         d_vals,
                         stride,
-                        target_scale
+                        target_scale,
+                        d_pow10_table_lo,
+                        d_pow10_table_hi
                     )
             else:
                 # Use original kernel for comparison
