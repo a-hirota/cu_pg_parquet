@@ -20,6 +20,10 @@ from .arrow_utils import (
     build_gpu_meta_arrays,
 )
 
+import rmm
+import cupy as cp
+from rmm.allocators.cupy import rmm_cupy_allocator
+
 
 # ----------------------------------------------------------------------
 #  GPU メモリマネージャ
@@ -29,8 +33,12 @@ class GPUMemoryManagerV2:
     Arrow ColumnMeta をもとに GPU バッファを確保する軽量クラス
     """
 
-    def __init__(self):
+    def __init__(self, initial_rmm_pool_size=2<<30):
         try:
+            # RMMを初期化
+            rmm.reinitialize(pool_allocator=True, initial_pool_size=initial_rmm_pool_size)  # 2GB
+            cp.cuda.set_allocator(rmm_cupy_allocator)
+
             # 既存コンテキストがあれば流用
             try:
                 cuda.current_context()

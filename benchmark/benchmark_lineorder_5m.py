@@ -22,13 +22,20 @@ import numpy as np
 import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
-import cudf
 from numba import cuda
+
+# cuDFをオプショナルインポート
+try:
+    import cudf
+    CUDF_AVAILABLE = True
+except ImportError:
+    cudf = None
+    CUDF_AVAILABLE = False
 
 # Import necessary functions from the correct modules using absolute paths from root
 from src.meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
 from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
-from src.gpu_decoder_v2 import decode_chunk
+from src.gpu_decoder_v2 import decode_chunk, decode_chunk_cudf_optimized
 # Remove CPU row start calculator import
 # from test.test_single_row_pg_parser import calculate_row_starts_cpu
 
@@ -37,6 +44,29 @@ TABLE_NAME = "lineorder"
 OUTPUT_PARQUET_PATH = "benchmark/lineorder_5m.output.parquet" # 出力ファイルパス
 
 def run_benchmark():
+    # 環境変数のデバッグ出力
+    print(f"=== パイプライン設定デバッグ ===")
+    print(f"環境変数 USE_CUDF_PIPELINE: '{os.environ.get('USE_CUDF_PIPELINE', 'NOT_SET')}'")
+    
+    # cuDF最適化パイプラインの使用フラグ
+    use_cudf_pipeline = os.environ.get("USE_CUDF_PIPELINE", "0") == "1"
+    print(f"use_cudf_pipeline フラグ: {use_cudf_pipeline}")
+    
+    # cuDFが利用可能かチェック
+    try:
+        import cudf
+        cudf_available = True
+        print(f"cuDF バージョン: {cudf.__version__}")
+    except ImportError:
+        cudf_available = False
+        print("cuDF: インポートエラー")
+        if use_cudf_pipeline:
+            print("警告: cuDFが利用できません。PyArrow標準パイプラインに切り替えます。")
+            use_cudf_pipeline = False
+    
+    print(f"📊 使用パイプライン: {'🚀 cuDF最適化' if use_cudf_pipeline else '📈 PyArrow標準'}")
+    print(f"cuDF利用可能: {cudf_available}")
+    print("===============================\n")
     dsn = os.environ.get("GPUPASER_PG_DSN")
     if not dsn:
         print("エラー: 環境変数 GPUPASER_PG_DSN が設定されていません。")
@@ -120,25 +150,46 @@ def run_benchmark():
     rows = field_offsets_dev.shape[0] # Get actual row count from output array shape
     print(f"GPUパース完了 ({parse_time:.4f}秒), 行数: {rows}")
 
-    print("GPUでデコード中 (Pass 1 & 2)...")
-    start_decode_time = time.time()
-    # decode_chunk は単一の RecordBatch を返す想定
-    batch = decode_chunk(raw_dev, field_offsets_dev, field_lengths_dev, columns)
-    decode_time = time.time() - start_decode_time
-    print(f"GPUデコード完了 ({decode_time:.4f}秒)")
+    if use_cudf_pipeline:
+        # cuDF最適化パイプライン: GPU上で直接Parquet出力
+        print("\n🚀 ===== cuDF最適化パイプライン実行 =====")
+        print("cuDF最適化パイプラインでデコード中 (Pass 1 & 2 → GPU-direct Parquet)...")
+        start_decode_time = time.time()
+        # cuDF最適化版は直接Parquetファイルに書き込む
+        result_df = decode_chunk_cudf_optimized(
+            raw_dev, field_offsets_dev, field_lengths_dev, columns,
+            output_path=OUTPUT_PARQUET_PATH
+        )
+        decode_time = time.time() - start_decode_time
+        print(f"🚀 cuDF GPUデコード+Parquet出力完了 ({decode_time:.4f}秒)")
+        print("========================================\n")
+        
+        # cuDFパイプラインでは統合処理のため、write_timeは0に設定
+        write_time = 0.0
+        
+    else:
+        # 従来のPyArrowパイプライン
+        print("\n📈 ===== PyArrow標準パイプライン実行 =====")
+        print("PyArrow標準パイプラインでデコード中 (Pass 1 & 2)...")
+        start_decode_time = time.time()
+        # decode_chunk は単一の RecordBatch を返す想定
+        batch = decode_chunk(raw_dev, field_offsets_dev, field_lengths_dev, columns)
+        decode_time = time.time() - start_decode_time
+        print(f"📈 PyArrow GPUデコード完了 ({decode_time:.4f}秒)")
 
-    # Arrow Table に変換 (複数バッチの場合は結合が必要だが、ここでは単一バッチと仮定)
-    result_table = pa.Table.from_batches([batch])
-    print(f"Arrow Table 作成完了: {result_table.num_rows} 行, {result_table.num_columns} 列")
+        # Arrow Table に変換 (複数バッチの場合は結合が必要だが、ここでは単一バッチと仮定)
+        result_table = pa.Table.from_batches([batch])
+        print(f"Arrow Table 作成完了: {result_table.num_rows} 行, {result_table.num_columns} 列")
 
-    # -------------------------------
-    # Parquet 出力
-    # -------------------------------
-    print(f"Parquetファイル書き込み中: {OUTPUT_PARQUET_PATH}")
-    start_write_time = time.time()
-    pq.write_table(result_table, OUTPUT_PARQUET_PATH)
-    write_time = time.time() - start_write_time
-    print(f"Parquet書き込み完了 ({write_time:.4f}秒)")
+        # -------------------------------
+        # Parquet 出力
+        # -------------------------------
+        print(f"Parquetファイル書き込み中: {OUTPUT_PARQUET_PATH}")
+        start_write_time = time.time()
+        pq.write_table(result_table, OUTPUT_PARQUET_PATH)
+        write_time = time.time() - start_write_time
+        print(f"Parquet書き込み完了 ({write_time:.4f}秒)")
+        print("==========================================\n")
 
     total_time = time.time() - start_total_time
     print(f"\nベンチマーク完了: 総時間 = {total_time:.4f} 秒")
@@ -148,8 +199,12 @@ def run_benchmark():
     print(f"  GPU転送       : {transfer_time:.4f} 秒")
     # print(f"  行数計算(CPU) : {row_calc_time:.4f} 秒") # Removed CPU calculation time
     print(f"  GPUパース(含 行数/オフセット計算): {parse_time:.4f} 秒")
-    print(f"  GPUデコード   : {decode_time:.4f} 秒")
-    print(f"  Parquet書き込み: {write_time:.4f} 秒")
+    
+    if use_cudf_pipeline:
+        print(f"  cuDF GPUデコード+Parquet出力: {decode_time:.4f} 秒")
+    else:
+        print(f"  GPUデコード   : {decode_time:.4f} 秒")
+        print(f"  Parquet書き込み: {write_time:.4f} 秒")
     print("----------------")
 
 

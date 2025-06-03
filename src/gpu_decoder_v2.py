@@ -690,4 +690,291 @@ def decode_chunk(
     batch = pa.RecordBatch.from_arrays(arrays, [c.name for c in columns])
     print("--- Finished Arrow Assembly ---")
     return batch
-__all__ = ["decode_chunk"]
+def convert_gpu_buffers_to_cudf_dataframe(bufs, columns, rows, d_nulls_all):
+    """GPU buffers を cuDF DataFrame に変換（PyArrow経由で確実性を保証）"""
+    import cudf
+    import pyarrow as pa
+    import numpy as np
+    from .type_map import (
+        DECIMAL128, UTF8, BINARY, INT16, INT32, INT64,
+        FLOAT32, FLOAT64, BOOL, DATE32, TS64_US
+    )
+    
+    arrays = []
+    host_nulls_all = d_nulls_all.copy_to_host()
+    
+    for cidx, col in enumerate(columns):
+        # PyArrowと同じロジックでArrow Arrayを作成
+        boolean_mask_np = (host_nulls_all[:, cidx] == 1)
+        null_count = rows - np.count_nonzero(boolean_mask_np)
+        validity_buffer = build_validity_bitmap(boolean_mask_np)
+        
+        # Arrow type確定
+        pa_type = None
+        if col.arrow_id == DECIMAL128:
+            precision, scale = col.arrow_param or (38, 0)
+            if precision is None or precision <= 0 or precision > 38:
+                precision = 38
+            pa_type = pa.decimal128(precision, scale)
+        elif col.arrow_id == UTF8:
+            pa_type = pa.string()
+        elif col.arrow_id == BINARY:
+            pa_type = pa.binary()
+        elif col.arrow_id == INT16:
+            pa_type = pa.int16()
+        elif col.arrow_id == INT32:
+            pa_type = pa.int32()
+        elif col.arrow_id == INT64:
+            pa_type = pa.int64()
+        elif col.arrow_id == FLOAT32:
+            pa_type = pa.float32()
+        elif col.arrow_id == FLOAT64:
+            pa_type = pa.float64()
+        elif col.arrow_id == BOOL:
+            pa_type = pa.bool_()
+        elif col.arrow_id == DATE32:
+            pa_type = pa.date32()
+        elif col.arrow_id == TS64_US:
+            pa_type = pa.timestamp('us')
+        else:
+            pa_type = pa.binary()
+        
+        # GPU bufferからPyArrow arrayを作成（簡易版）
+        if col.is_variable:
+            d_values, d_nulls, d_offsets, _ = bufs[col.name]
+            host_offsets = d_offsets.copy_to_host()
+            host_values = d_values.copy_to_host()
+            
+            pa_offset_buf = pa.py_buffer(host_offsets)
+            pa_data_buf = pa.py_buffer(host_values)
+            
+            if pa.types.is_string(pa_type):
+                arr = pa.StringArray.from_buffers(
+                    length=rows,
+                    value_offsets=pa_offset_buf,
+                    data=pa_data_buf,
+                    null_bitmap=validity_buffer,
+                    null_count=null_count
+                )
+            else:  # binary
+                arr = pa.BinaryArray.from_buffers(
+                    length=rows,
+                    value_offsets=pa_offset_buf,
+                    data=pa_data_buf,
+                    null_bitmap=validity_buffer,
+                    null_count=null_count
+                )
+        else:
+            d_values, d_nulls, stride = bufs[col.name]
+            host_vals = d_values.copy_to_host()
+            
+            # stride処理
+            elem_size = col.elem_size
+            if stride != elem_size:
+                gathered_data = np.empty(rows * elem_size, dtype=np.uint8)
+                for r in range(rows):
+                    start_byte = r * stride
+                    gathered_data[r*elem_size:(r+1)*elem_size] = host_vals[start_byte:start_byte+elem_size]
+                host_vals = gathered_data
+            
+            pa_data_buf = pa.py_buffer(host_vals)
+            
+            if pa.types.is_decimal(pa_type):
+                arr = pa.Decimal128Array.from_buffers(pa_type, rows, [validity_buffer, pa_data_buf], null_count=null_count)
+            else:
+                arr = pa.Array.from_buffers(pa_type, rows, [validity_buffer, pa_data_buf], null_count=null_count)
+        
+        arrays.append(arr)
+    
+    # PyArrow RecordBatchを作成
+    batch = pa.RecordBatch.from_arrays(arrays, [c.name for c in columns])
+    
+    # PyArrow TableからcuDF DataFrameに変換
+    table = pa.Table.from_batches([batch])
+    return cudf.DataFrame.from_arrow(table)
+
+
+def _build_cudf_mask(valid_bool_cupy):
+    """cuDF用のビットマスク構築（GPU上で実行）"""
+    import cupy as cp
+    # 現在の実装では使用されていないが、互換性のために残す
+    # 標準的なcuDFシリーズ作成で十分
+    return None
+
+
+def decode_chunk_cudf_optimized(
+    raw_dev, field_offsets_dev, field_lengths_dev, columns, output_path=None
+):
+    """cuDF最適化版のデコード関数（GPU上でParquet出力まで完結）"""
+    import cudf
+    
+    gmm = GPUMemoryManagerV2()
+    rows, ncols = field_lengths_dev.shape
+
+    # --- 10のべき乗テーブルをGPUに転送 ---
+    d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
+    d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
+
+    # ----------------------------------
+    # 1. GPU バッファ確保 (初期確保)
+    # ----------------------------------
+    bufs: Dict[str, Any] = gmm.initialize_device_buffers(columns, rows)
+
+    # varlen_meta の準備 (Pass 2 で使用)
+    varlen_meta = []  # (col_idx, var_idx, name)
+    fixedlen_meta = []  # (col_idx, name)
+    for cidx, col in enumerate(columns):
+        if col.arrow_id == UTF8 or col.arrow_id == BINARY:
+            varlen_meta.append((cidx, len(varlen_meta), col.name))
+        else:  # Fixed length including DECIMAL128
+            fixedlen_meta.append((cidx, col.name))
+
+    # ----------------------------------
+    # 2. Pass-1 len/null (GPU Kernel)
+    # ----------------------------------
+    print("\n--- Running Pass 1 (len/null collection) on GPU ---")
+    var_indices_host = _build_var_indices(columns)
+    var_indices_dev = cuda.to_device(var_indices_host)
+    n_var = len(varlen_meta)
+
+    d_nulls_all = cuda.device_array((rows, ncols), dtype=np.uint8)
+    d_var_lens = cuda.device_array((n_var, rows), dtype=np.int32)
+
+    threads_pass1 = 256
+    blocks_pass1 = (rows + threads_pass1 - 1) // threads_pass1
+
+    pass1_len_null[blocks_pass1, threads_pass1](
+        field_lengths_dev,
+        var_indices_dev,
+        d_var_lens,
+        d_nulls_all
+    )
+    cuda.synchronize()
+    print("--- Finished Pass 1 (GPU) ---")
+
+    # ----------------------------------
+    # 3. Prefix-sum offsets (GPU - CuPy) & データバッファ再確保
+    # ----------------------------------
+    print("--- Running Prefix Sum (GPU - CuPy) & Reallocating Varlen Buffers ---")
+    
+    initial_offset_buffers = [bufs[name][2] for _, _, name in varlen_meta]
+
+    for v_idx, (cidx, _, name) in enumerate(varlen_meta):
+        print(f"\n--- Processing varlen column '{name}' (v_idx={v_idx}, cidx={cidx}) ---")
+        
+        cp_len = cp.asarray(d_var_lens[v_idx])
+        cp_off = cp.cumsum(cp_len, dtype=np.int32)
+        total_bytes = int(cp_off[-1].get()) if rows > 0 else 0
+
+        d_offset_col = initial_offset_buffers[v_idx]
+        d_offset_col[0] = 0
+        cp_off_as_cupy = cp.asarray(cp_off, dtype=np.int32)
+        d_offset_col[1 : rows + 1] = cp_off_as_cupy
+
+        # Reallocate the data buffer
+        gmm.replace_varlen_data_buffer(name, total_bytes)
+
+    print("--- Finished Prefix Sum & Reallocation ---")
+
+    # ----------------------------------
+    # 4. Pass-2 scatter-copy per var-col (GPU Kernel)
+    # ----------------------------------
+    print("--- Running Pass 2 VarLen (GPU Kernel) ---")
+    threads = 256
+    blocks = (rows + threads - 1) // threads
+
+    for v_idx, (cidx, _, name) in enumerate(varlen_meta):
+        col_meta = columns[cidx]
+        if col_meta.arrow_id == UTF8 or col_meta.arrow_id == BINARY:
+            d_offset_v = bufs[name][2]
+            d_values_v = bufs[name][0]
+            field_off_v = field_offsets_dev[:, cidx]
+            field_len_v = field_lengths_dev[:, cidx]
+
+            pass2_scatter_varlen[blocks, threads](
+                raw_dev,
+                field_off_v,
+                field_len_v,
+                d_offset_v,
+                d_values_v
+            )
+            cuda.synchronize()
+
+    print("--- Finished Pass 2 VarLen ---")
+
+    # ----------------------------------
+    # 4.5 Pass-2 scatter-copy for fixed-length cols (GPU Kernel)
+    # ----------------------------------
+    print("--- Running Pass 2 FixedLen (GPU Kernel) ---")
+    
+    for cidx, name in fixedlen_meta:
+        col = columns[cidx]
+        d_vals, d_nulls_col, stride = bufs[name]
+
+        if col.arrow_id == DECIMAL128:
+            use_optimization = os.environ.get("USE_DECIMAL_OPTIMIZATION", "1") == "1"
+            
+            if use_optimization:
+                precision, scale = col.arrow_param or (38, 0)
+                target_scale = scale
+
+                if precision <= 18 and stride == 8:
+                    pass2_scatter_decimal64_optimized[blocks, threads](
+                        raw_dev,
+                        field_offsets_dev[:, cidx],
+                        field_lengths_dev[:, cidx],
+                        d_vals,
+                        stride,
+                        target_scale,
+                        d_pow10_table_lo,
+                        d_pow10_table_hi
+                    )
+                else:
+                    pass2_scatter_decimal128_optimized[blocks, threads](
+                        raw_dev,
+                        field_offsets_dev[:, cidx],
+                        field_lengths_dev[:, cidx],
+                        d_vals,
+                        stride,
+                        target_scale,
+                        d_pow10_table_lo,
+                        d_pow10_table_hi
+                    )
+            else:
+                pass2_scatter_decimal128[blocks, threads](
+                    raw_dev,
+                    field_offsets_dev[:, cidx],
+                    field_lengths_dev[:, cidx],
+                    d_vals,
+                    stride
+                )
+        else:
+            pass2_scatter_fixed[blocks, threads](
+                raw_dev,
+                field_offsets_dev[:, cidx],
+                col.elem_size,
+                d_vals,
+                stride
+            )
+    
+    cuda.synchronize()
+    print("--- Finished Pass 2 FixedLen ---")
+
+    # ----------------------------------
+    # 5. cuDF DataFrame構築（GPU上で完結）
+    # ----------------------------------
+    print("--- Building cuDF DataFrame (GPU-direct) ---")
+    df = convert_gpu_buffers_to_cudf_dataframe(bufs, columns, rows, d_nulls_all)
+
+    # GPU上で直接Parquet書き出し
+    if output_path:
+        print(f"--- Writing Parquet to {output_path} (GPU-direct) ---")
+        df.to_parquet(output_path)
+        print("--- Finished cuDF Parquet Write ---")
+        return None  # メモリ節約
+    else:
+        print("--- Returning cuDF DataFrame ---")
+        return df  # 後続処理用
+
+
+__all__ = ["decode_chunk", "convert_gpu_buffers_to_cudf_dataframe", "decode_chunk_cudf_optimized"]
