@@ -31,6 +31,7 @@ from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
 from src.gpu_decoder_v2 import decode_chunk
 from src.gpu_decoder_v2_decimal_optimized import decode_chunk_decimal_optimized
 from src.gpu_decoder_v2_decimal_column_wise import decode_chunk_decimal_column_wise
+from src.gpu_decoder_v3_fully_integrated import decode_chunk_fully_integrated
 # Remove CPU row start calculator import
 # from test.test_single_row_pg_parser import calculate_row_starts_cpu
 
@@ -51,6 +52,7 @@ def run_benchmark():
     optimization_mode = os.environ.get("DECIMAL_OPTIMIZATION_MODE", "column_wise")
     
     mode_names = {
+        "fully_integrated": "Pass1完全統合版",
         "column_wise": "Column-wise最適化版",
         "integrated": "Integrated最適化版", 
         "traditional": "従来版"
@@ -60,7 +62,9 @@ def run_benchmark():
     print(f"ベンチマーク開始 ({mode_name}): テーブル={tbl}")
     print(f"* Decimal最適化モード: {optimization_mode}")
     
-    if optimization_mode == "column_wise":
+    if optimization_mode == "fully_integrated":
+        print("* Pass1完全統合: 1回のカーネル起動で全固定長列処理")
+    elif optimization_mode == "column_wise":
         print("* Pass1段階でDecimal処理統合 (列ごと処理)")
     elif optimization_mode == "integrated":
         print("* Pass1段階でDecimal処理統合 (全列統合)")
@@ -140,9 +144,15 @@ def run_benchmark():
     print(f"GPUパース完了 ({parse_time:.4f}秒), 行数: {rows}")
 
     # 環境変数でDecimal最適化を制御
-    optimization_mode = os.environ.get("DECIMAL_OPTIMIZATION_MODE", "column_wise")
+    optimization_mode = os.environ.get("DECIMAL_OPTIMIZATION_MODE", "fully_integrated")
     
-    if optimization_mode == "column_wise":
+    if optimization_mode == "fully_integrated":
+        print("GPUでデコード中 (Pass 1完全統合版)...")
+        start_decode_time = time.time()
+        batch = decode_chunk_fully_integrated(raw_dev, field_offsets_dev, field_lengths_dev, columns)
+        decode_time = time.time() - start_decode_time
+        print(f"GPUデコード完了 (Pass1完全統合版) ({decode_time:.4f}秒)")
+    elif optimization_mode == "column_wise":
         print("GPUでデコード中 (Pass 1 & 2 - Column-wise Decimal最適化版)...")
         start_decode_time = time.time()
         batch = decode_chunk_decimal_column_wise(raw_dev, field_offsets_dev, field_lengths_dev, columns, use_pass1_integration=True)
