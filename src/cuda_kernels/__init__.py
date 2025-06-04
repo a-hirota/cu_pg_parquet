@@ -14,6 +14,6 @@ from .data_parsers import (
     parse_int16_from_raw, parse_int64_from_raw
 )
 from .column_processor import (
-    pass1_v7_column_wise_integrated, build_var_offsets_from_lengths
+    pass1_column_wise_integrated, build_var_offsets_from_lengths
 )
 from .decimal_tables import POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST

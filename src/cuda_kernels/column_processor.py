@@ -51,7 +51,7 @@ def copy_string_data_safe(raw_data, src_offset, length, dest_buffer, dest_offset
     return max_copy_len
 
 @cuda.jit
-def pass1_v7_column_wise_integrated(
+def pass1_column_wise_integrated(
     raw,                      # const uint8_t* (入力rawデータ)
     field_offsets,            # const int32_t[:, :] (rows, cols)
     field_lengths,            # const int32_t[:, :] (rows, cols)
@@ -254,4 +254,4 @@ def build_var_offsets_from_lengths(var_offset_arrays, var_length_arrays, rows):
                 else:
                     var_offset_arrays[var_idx, row] = prev_offset
 
-__all__ = ["pass1_v7_column_wise_integrated", "build_var_offsets_from_lengths"]
+__all__ = ["pass1_column_wise_integrated", "build_var_offsets_from_lengths"]

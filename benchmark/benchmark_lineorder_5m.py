@@ -15,9 +15,10 @@ import pyarrow.parquet as pq
 import cudf
 from numba import cuda
 
-from src.meta_fetch import fetch_column_meta, ColumnMeta
-from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
-from src.gpu_decoder_v7_column_wise_integrated import decode_chunk_v7_column_wise_integrated
+from src.metadata import fetch_column_meta
+from src.types import ColumnMeta
+from src.binary_parser import parse_binary_chunk_gpu, detect_pg_header_size
+from src.column_processor import decode_chunk_integrated
 
 TABLE_NAME = "lineorder"
 OUTPUT_PARQUET_PATH = "benchmark/lineorder_5m.output.parquet"
@@ -84,7 +85,7 @@ def run_benchmark():
 
     print("GPUでデコード中...")
     start_decode_time = time.time()
-    batch = decode_chunk_v7_column_wise_integrated(raw_dev, field_offsets_dev, field_lengths_dev, columns)
+    batch = decode_chunk_integrated(raw_dev, field_offsets_dev, field_lengths_dev, columns)
     decode_time = time.time() - start_decode_time
     print(f"GPUデコード完了 ({decode_time:.4f}秒)")
 
@@ -128,7 +129,27 @@ def run_benchmark():
         print("--- cuDF DataFrame Info ---")
         gdf.info()
         print("\n--- cuDF DataFrame Head ---")
-        print(gdf.head())
+        # 全カラムを表示するための設定
+        try:
+            # cuDF 24.x以降の設定を試行
+            with cudf.option_context('display.max_columns', None, 'display.width', None):
+                print(gdf.head())
+        except Exception:
+            try:
+                # pandas互換の設定を試行
+                import pandas as pd
+                with pd.option_context('display.max_columns', None, 'display.width', None):
+                    print(gdf.head())
+            except Exception:
+                # フォールバック: 列を分割して表示
+                n_cols = len(gdf.columns)
+                if n_cols > 10:
+                    print("前半列:")
+                    print(gdf.iloc[:, :10].head())
+                    print("後半列:")
+                    print(gdf.iloc[:, 10:].head())
+                else:
+                    print(gdf.head())
         print("-------------------------")
         print("cuDF検証: 成功")
             
