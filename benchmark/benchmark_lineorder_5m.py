@@ -1,5 +1,5 @@
 """
-Benchmark: PostgreSQL → COPY BINARY → GPU 2‑pass → Arrow RecordBatch → Parquet
+Benchmark: PostgreSQL → COPY BINARY → GPU Pass1統合 → Arrow RecordBatch → Parquet
 
 環境変数
 --------
@@ -10,7 +10,7 @@ PG_TABLE_PREFIX  : lineorder テーブルがスキーマ名付きの場合に指
 ----------
 lineorder テーブル (約500万行を想定) を
 1. COPY BINARY で取得
-2. GPU パイプライン decode_chunk で Arrow RecordBatch に変換
+2. GPU パイプライン decode_chunk_v7_column_wise_integrated で Arrow RecordBatch に変換
 3. 処理時間を計測
 4. 結果を Parquet ファイルに出力
 5. 出力された Parquet ファイルを cuDF で読み込み、基本情報を表示して検証
@@ -26,12 +26,8 @@ import cudf
 from numba import cuda
 
 # Import necessary functions from the correct modules using absolute paths from root
-from src.meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
+from src.meta_fetch import fetch_column_meta, ColumnMeta
 from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
-from src.gpu_decoder_v2 import decode_chunk
-from src.gpu_decoder_v2_decimal_optimized import decode_chunk_decimal_optimized
-from src.gpu_decoder_v2_decimal_column_wise import decode_chunk_decimal_column_wise
-from src.gpu_decoder_v3_fully_integrated import decode_chunk_fully_integrated
 from src.gpu_decoder_v7_column_wise_integrated import decode_chunk_v7_column_wise_integrated
 
 
