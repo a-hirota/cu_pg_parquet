@@ -1,0 +1,78 @@
+"""RowDescription → Arrow ColumnMeta 変換"""
+
+from __future__ import annotations
+from typing import List, Optional, Tuple, Any, Protocol
+
+# psycopg2/3 動的インポート
+try:
+    import psycopg
+    CursorBase = psycopg.Cursor
+except ImportError:
+    import psycopg2
+    from psycopg2.extensions import cursor as CursorBase
+
+from .types import (
+    ColumnMeta, PG_OID_TO_ARROW, DECIMAL128, UTF8, UNKNOWN,
+)
+
+def _decode_numeric_pg_typmod(pg_typmod: int) -> Tuple[int, int]:
+    """PostgreSQL numeric(p,s) pg_typmod 値から (precision, scale) を返す"""
+    if pg_typmod <= 0:
+        if pg_typmod == -1:
+            return (38, 0)
+        return (0, 0)
+    mod = pg_typmod - 4
+    precision = (mod >> 16) & 0xFFFF
+    scale = mod & 0xFFFF
+    return precision, scale
+
+class CursorDescription(Protocol):
+    """psycopg2/3 cursor.description[i] 互換プロトコル"""
+    @property
+    def name(self) -> str: ...
+    @property
+    def type_code(self) -> int: ...
+    @property
+    def internal_size(self) -> Optional[int]: ...
+
+def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
+    """任意の SELECT クエリに対し RowDescription のみを取得して ColumnMeta のリストを返す"""
+    cur = conn.cursor()
+    cur.execute(f"SELECT * FROM ({sql}) AS __t LIMIT 0")
+    metas: List[ColumnMeta] = []
+
+    for desc in cur.description:
+        name = desc.name
+        pg_oid: int = desc.type_code
+        pg_typmod = desc.internal_size or 0
+
+        if pg_typmod < 0:
+            pg_typmod = -pg_typmod
+
+        arrow_id, elem = PG_OID_TO_ARROW.get(pg_oid, (UNKNOWN, None))
+        elem_size = elem or 0
+
+        arrow_param: Optional[Tuple[int, int] | int] = None
+
+        if arrow_id == DECIMAL128:
+            precision, scale = _decode_numeric_pg_typmod(pg_typmod)
+            arrow_param = (precision, scale)
+        elif arrow_id == UTF8:
+            if pg_typmod > 4:
+                arrow_param = pg_typmod - 4
+
+        metas.append(
+            ColumnMeta(
+                name=name,
+                pg_oid=pg_oid,
+                pg_typmod=pg_typmod,
+                arrow_id=arrow_id,
+                elem_size=elem_size,
+                arrow_param=arrow_param,
+            )
+        )
+
+    cur.close()
+    return metas
+
+__all__ = ["fetch_column_meta"]
