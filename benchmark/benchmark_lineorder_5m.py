@@ -29,6 +29,8 @@ from numba import cuda
 from src.meta_fetch import fetch_column_meta, ColumnMeta # Import ColumnMeta as well
 from src.gpu_parse_wrapper import parse_binary_chunk_gpu, detect_pg_header_size
 from src.gpu_decoder_v2 import decode_chunk
+from src.gpu_decoder_v2_decimal_optimized import decode_chunk_decimal_optimized
+from src.gpu_decoder_v2_decimal_column_wise import decode_chunk_decimal_column_wise
 # Remove CPU row start calculator import
 # from test.test_single_row_pg_parser import calculate_row_starts_cpu
 
@@ -45,9 +47,26 @@ def run_benchmark():
     prefix = os.environ.get("PG_TABLE_PREFIX", "")
     tbl = f"{prefix}{TABLE_NAME}" if prefix else TABLE_NAME
 
-    print(f"ベンチマーク開始: テーブル={tbl}")
+    # 環境変数でDecimal最適化を制御
+    optimization_mode = os.environ.get("DECIMAL_OPTIMIZATION_MODE", "column_wise")
+    
+    mode_names = {
+        "column_wise": "Column-wise最適化版",
+        "integrated": "Integrated最適化版", 
+        "traditional": "従来版"
+    }
+    mode_name = mode_names.get(optimization_mode, "Column-wise最適化版")
+    
+    print(f"ベンチマーク開始 ({mode_name}): テーブル={tbl}")
+    print(f"* Decimal最適化モード: {optimization_mode}")
+    
+    if optimization_mode == "column_wise":
+        print("* Pass1段階でDecimal処理統合 (列ごと処理)")
+    elif optimization_mode == "integrated":
+        print("* Pass1段階でDecimal処理統合 (全列統合)")
+    else:
+        print("* 従来のPass1/Pass2分離処理")
     start_total_time = time.time()
-
     conn = psycopg.connect(dsn)
     try:
         # -------------------------------
@@ -120,12 +139,27 @@ def run_benchmark():
     rows = field_offsets_dev.shape[0] # Get actual row count from output array shape
     print(f"GPUパース完了 ({parse_time:.4f}秒), 行数: {rows}")
 
-    print("GPUでデコード中 (Pass 1 & 2)...")
-    start_decode_time = time.time()
-    # decode_chunk は単一の RecordBatch を返す想定
-    batch = decode_chunk(raw_dev, field_offsets_dev, field_lengths_dev, columns)
-    decode_time = time.time() - start_decode_time
-    print(f"GPUデコード完了 ({decode_time:.4f}秒)")
+    # 環境変数でDecimal最適化を制御
+    optimization_mode = os.environ.get("DECIMAL_OPTIMIZATION_MODE", "column_wise")
+    
+    if optimization_mode == "column_wise":
+        print("GPUでデコード中 (Pass 1 & 2 - Column-wise Decimal最適化版)...")
+        start_decode_time = time.time()
+        batch = decode_chunk_decimal_column_wise(raw_dev, field_offsets_dev, field_lengths_dev, columns, use_pass1_integration=True)
+        decode_time = time.time() - start_decode_time
+        print(f"GPUデコード完了 (Column-wise最適化版) ({decode_time:.4f}秒)")
+    elif optimization_mode == "integrated":
+        print("GPUでデコード中 (Pass 1 & 2 - Integrated Decimal最適化版)...")
+        start_decode_time = time.time()
+        batch = decode_chunk_decimal_optimized(raw_dev, field_offsets_dev, field_lengths_dev, columns, use_pass1_integration=True)
+        decode_time = time.time() - start_decode_time
+        print(f"GPUデコード完了 (Integrated最適化版) ({decode_time:.4f}秒)")
+    else:  # traditional
+        print("GPUでデコード中 (Pass 1 & 2 - 従来版)...")
+        start_decode_time = time.time()
+        batch = decode_chunk(raw_dev, field_offsets_dev, field_lengths_dev, columns)
+        decode_time = time.time() - start_decode_time
+        print(f"GPUデコード完了 (従来版) ({decode_time:.4f}秒)")
 
     # Arrow Table に変換 (複数バッチの場合は結合が必要だが、ここでは単一バッチと仮定)
     result_table = pa.Table.from_batches([batch])
@@ -141,15 +175,27 @@ def run_benchmark():
     print(f"Parquet書き込み完了 ({write_time:.4f}秒)")
 
     total_time = time.time() - start_total_time
-    print(f"\nベンチマーク完了: 総時間 = {total_time:.4f} 秒")
+    
+    # Decimal列数をカウント
+    decimal_cols = sum(1 for col in columns if col.arrow_id == 5)  # DECIMAL128 = 5
+    
+    print(f"\nベンチマーク完了 ({mode_name}): 総時間 = {total_time:.4f} 秒")
     print("--- 時間内訳 ---")
     print(f"  メタデータ取得: {meta_time:.4f} 秒")
     print(f"  COPY BINARY   : {copy_time:.4f} 秒")
     print(f"  GPU転送       : {transfer_time:.4f} 秒")
-    # print(f"  行数計算(CPU) : {row_calc_time:.4f} 秒") # Removed CPU calculation time
-    print(f"  GPUパース(含 行数/オフセット計算): {parse_time:.4f} 秒")
+    print(f"  GPUパース     : {parse_time:.4f} 秒")
     print(f"  GPUデコード   : {decode_time:.4f} 秒")
     print(f"  Parquet書き込み: {write_time:.4f} 秒")
+    print("----------------")
+    print(f"--- 統計情報 ---")
+    print(f"  処理行数      : {rows:,} 行")
+    print(f"  処理列数      : {len(columns)} 列")
+    print(f"  Decimal列数   : {decimal_cols} 列")
+    print(f"  データサイズ  : {len(raw_host) / (1024*1024):.2f} MB")
+    print(f"  最適化モード  : {mode_name}")
+    if decimal_cols > 0:
+        print(f"  理論効果      : Decimal列 {decimal_cols}個 → メモリアクセス削減期待")
     print("----------------")
 
 
