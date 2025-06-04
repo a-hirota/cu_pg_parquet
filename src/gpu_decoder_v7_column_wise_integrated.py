@@ -34,11 +34,11 @@ from .type_map import (
 )
 from .gpu_memory_manager_v7_column_wise import GPUMemoryManagerV7ColumnWise
 
-# V7カーネルのインポート（共有メモリ最適化版）
-from .cuda_kernels.arrow_gpu_pass1_v7_column_wise_integrated import (
+# V7カーネルのインポート（リファクタリング後）
+from .cuda_kernels.column_processor import (
     pass1_v7_column_wise_integrated, build_var_offsets_from_lengths
 )
-from .cuda_kernels.arrow_gpu_pass2_decimal128 import (
+from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
 
