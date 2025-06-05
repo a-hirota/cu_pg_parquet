@@ -75,4 +75,12 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
     cur.close()
     return metas
 
-__all__ = ["fetch_column_meta"]
+def get_postgresql_table_metadata(conn, table_name: str) -> List[ColumnMeta]:
+    """PostgreSQLテーブルのメタデータを取得（旧名互換）"""
+    return fetch_column_meta(conn, f"SELECT * FROM {table_name}")
+
+def get_table_metadata(conn, table_name: str) -> List[ColumnMeta]:
+    """PostgreSQLテーブルのメタデータを取得"""
+    return fetch_column_meta(conn, f"SELECT * FROM {table_name}")
+
+__all__ = ["fetch_column_meta", "get_postgresql_table_metadata", "get_table_metadata"]

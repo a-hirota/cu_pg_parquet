@@ -4,6 +4,7 @@ PostgreSQL → COPY BINARY → GPU Processing → Arrow RecordBatch → Parquet
 環境変数:
 GPUPASER_PG_DSN  : PostgreSQL接続文字列
 PG_TABLE_PREFIX  : テーブルプレフィックス (optional)
+USE_ZERO_COPY    : ZeroCopy機能を使用 (True/False, optional)
 """
 
 import os
@@ -14,16 +15,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import cudf
 from numba import cuda
+import argparse
 
 from src.metadata import fetch_column_meta
 from src.types import ColumnMeta
 from src.binary_parser import parse_binary_chunk_gpu, detect_pg_header_size
 from src.column_processor import decode_chunk_integrated
+from src.ultimate_zero_copy_processor import ultimate_postgresql_to_cudf_parquet
 
 TABLE_NAME = "lineorder"
 OUTPUT_PARQUET_PATH = "benchmark/lineorder_5m.output.parquet"
 
-def run_benchmark():
+def run_benchmark(use_zero_copy=False, limit_rows=1000000):
     dsn = os.environ.get("GPUPASER_PG_DSN")
     if not dsn:
         print("エラー: 環境変数 GPUPASER_PG_DSN が設定されていません。")
@@ -32,7 +35,12 @@ def run_benchmark():
     prefix = os.environ.get("PG_TABLE_PREFIX", "")
     tbl = f"{prefix}{TABLE_NAME}" if prefix else TABLE_NAME
 
-    print(f"ベンチマーク開始: テーブル={tbl}")
+    # 環境変数でZeroCopy機能の制御も可能
+    if os.environ.get("USE_ZERO_COPY", "").lower() in ("true", "1", "yes"):
+        use_zero_copy = True
+
+    processing_method = "ZeroCopy統合" if use_zero_copy else "従来"
+    print(f"ベンチマーク開始: テーブル={tbl}, 処理方式={processing_method}")
     start_total_time = time.time()
     conn = psycopg.connect(dsn)
     try:
@@ -46,7 +54,6 @@ def run_benchmark():
 
         print("COPY BINARY を実行中...")
         start_copy_time = time.time()
-        limit_rows = 1000000
         copy_sql = f"COPY (SELECT * FROM {tbl} LIMIT {limit_rows}) TO STDOUT (FORMAT binary)"
         buf = bytearray()
         with conn.cursor().copy(copy_sql) as cpy:
@@ -72,31 +79,70 @@ def run_benchmark():
     header_size = detect_pg_header_size(header_sample)
     print(f"ヘッダーサイズ: {header_size} バイト")
 
-    print("GPUでパース中...")
-    start_parse_time = time.time()
-    field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu(
-        raw_dev,
-        ncols=ncols,
-        header_size=header_size
-    )
-    parse_time = time.time() - start_parse_time
-    rows = field_offsets_dev.shape[0]
-    print(f"GPUパース完了 ({parse_time:.4f}秒), 行数: {rows}")
+    if use_zero_copy:
+        # ZeroCopy統合処理を使用
+        print("ZeroCopy統合処理中...")
+        start_processing_time = time.time()
+        
+        try:
+            cudf_df, detailed_timing = ultimate_postgresql_to_cudf_parquet(
+                raw_dev=raw_dev,
+                columns=columns,
+                ncols=ncols,
+                header_size=header_size,
+                output_path=OUTPUT_PARQUET_PATH,
+                compression='snappy',
+                use_rmm=True,
+                optimize_gpu=True
+            )
+            
+            processing_time = time.time() - start_processing_time
+            rows = len(cudf_df)
+            parse_time = detailed_timing.get('gpu_parsing', 0)
+            decode_time = detailed_timing.get('cudf_creation', 0)
+            write_time = detailed_timing.get('parquet_export', 0)
+            
+            print(f"ZeroCopy統合処理完了 ({processing_time:.4f}秒), 行数: {rows}")
+            
+        except Exception as e:
+            print(f"ZeroCopy処理でエラー: {e}")
+            print("従来処理にフォールバック...")
+            use_zero_copy = False
+    
+    if not use_zero_copy:
+        # 従来の処理を使用
+        print("GPUでパース中...")
+        start_parse_time = time.time()
+        field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu(
+            raw_dev,
+            ncols=ncols,
+            header_size=header_size
+        )
+        parse_time = time.time() - start_parse_time
+        rows = field_offsets_dev.shape[0]
+        print(f"GPUパース完了 ({parse_time:.4f}秒), 行数: {rows}")
 
-    print("GPUでデコード中...")
-    start_decode_time = time.time()
-    batch = decode_chunk_integrated(raw_dev, field_offsets_dev, field_lengths_dev, columns)
-    decode_time = time.time() - start_decode_time
-    print(f"GPUデコード完了 ({decode_time:.4f}秒)")
+        print("GPUでデコード中...")
+        start_decode_time = time.time()
+        batch = decode_chunk_integrated(raw_dev, field_offsets_dev, field_lengths_dev, columns)
+        decode_time = time.time() - start_decode_time
+        print(f"GPUデコード完了 ({decode_time:.4f}秒)")
 
-    result_table = pa.Table.from_batches([batch])
-    print(f"Arrow Table作成完了: {result_table.num_rows} 行, {result_table.num_columns} 列")
+        result_table = pa.Table.from_batches([batch])
+        print(f"Arrow Table作成完了: {result_table.num_rows} 行, {result_table.num_columns} 列")
+        
+        # Arrow → cuDF変換
+        print("Arrow → cuDF変換中...")
+        start_cudf_convert_time = time.time()
+        cudf_df = cudf.DataFrame.from_arrow(result_table)
+        cudf_convert_time = time.time() - start_cudf_convert_time
+        print(f"cuDF変換完了 ({cudf_convert_time:.4f}秒)")
 
-    print(f"Parquetファイル書き込み中: {OUTPUT_PARQUET_PATH}")
-    start_write_time = time.time()
-    pq.write_table(result_table, OUTPUT_PARQUET_PATH)
-    write_time = time.time() - start_write_time
-    print(f"Parquet書き込み完了 ({write_time:.4f}秒)")
+        print(f"cuDFでParquetファイル書き込み中: {OUTPUT_PARQUET_PATH}")
+        start_write_time = time.time()
+        cudf_df.to_parquet(OUTPUT_PARQUET_PATH, compression='snappy')
+        write_time = time.time() - start_write_time
+        print(f"cuDF Parquet書き込み完了 ({write_time:.4f}秒)")
 
     total_time = time.time() - start_total_time
     decimal_cols = sum(1 for col in columns if col.arrow_id == 5)
@@ -123,44 +169,88 @@ def run_benchmark():
     print(f"\ncuDFでParquetファイルを読み込み中: {OUTPUT_PARQUET_PATH}")
     try:
         start_cudf_read_time = time.time()
-        gdf = cudf.read_parquet(OUTPUT_PARQUET_PATH)
+        verification_df = cudf.read_parquet(OUTPUT_PARQUET_PATH)
         cudf_read_time = time.time() - start_cudf_read_time
         print(f"cuDF読み込み完了 ({cudf_read_time:.4f}秒)")
+        
         print("--- cuDF DataFrame Info ---")
-        gdf.info()
+        verification_df.info()
+        
+        print(f"読み込み結果: {len(verification_df):,} 行 × {len(verification_df.columns)} 列")
+        
+        # データ型確認
+        print("データ型:")
+        for col_name, dtype in verification_df.dtypes.items():
+            print(f"  {col_name}: {dtype}")
+        
         print("\n--- cuDF DataFrame Head ---")
         # 全カラムを表示するための設定
         try:
             # cuDF 24.x以降の設定を試行
             with cudf.option_context('display.max_columns', None, 'display.width', None):
-                print(gdf.head())
+                print(verification_df.head())
         except Exception:
             try:
                 # pandas互換の設定を試行
                 import pandas as pd
                 with pd.option_context('display.max_columns', None, 'display.width', None):
-                    print(gdf.head())
+                    print(verification_df.head())
             except Exception:
                 # フォールバック: 列を分割して表示
-                n_cols = len(gdf.columns)
+                n_cols = len(verification_df.columns)
                 if n_cols > 10:
                     print("前半列:")
-                    print(gdf.iloc[:, :10].head())
+                    print(verification_df.iloc[:, :10].head())
                     print("後半列:")
-                    print(gdf.iloc[:, 10:].head())
+                    print(verification_df.iloc[:, 10:].head())
                 else:
-                    print(gdf.head())
+                    print(verification_df.head())
+        
+        # 基本統計情報
+        print("\n基本統計:")
+        try:
+            numeric_cols = verification_df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                for col in numeric_cols[:5]:  # 最初の5つの数値列のみ
+                    col_data = verification_df[col]
+                    if len(col_data) > 0:
+                        print(f"  {col}: 平均={float(col_data.mean()):.2f}, 最小={float(col_data.min()):.2f}, 最大={float(col_data.max()):.2f}")
+        except Exception as e:
+            print(f"  統計情報エラー: {e}")
+            
         print("-------------------------")
         print("cuDF検証: 成功")
             
     except Exception as e:
         print(f"cuDF検証: 失敗 - {e}")
 
-if __name__ == "__main__":
+def main():
+    """メイン関数 - コマンドライン引数対応"""
+    parser = argparse.ArgumentParser(description='PostgreSQL → cuDF → Parquet ベンチマーク')
+    parser.add_argument('--rows', type=int, default=1000000, help='処理行数制限')
+    parser.add_argument('--zero-copy', action='store_true', help='ZeroCopy機能を使用')
+    parser.add_argument('--no-zero-copy', action='store_true', help='従来処理を強制使用')
+    
+    args = parser.parse_args()
+    
+    # ZeroCopy使用判定
+    use_zero_copy = False
+    if args.zero_copy:
+        use_zero_copy = True
+    elif args.no_zero_copy:
+        use_zero_copy = False
+    else:
+        # 環境変数で判定
+        use_zero_copy = os.environ.get("USE_ZERO_COPY", "").lower() in ("true", "1", "yes")
+    
     try:
         cuda.current_context()
         print("CUDA context OK")
     except Exception as e:
         print(f"CUDA context initialization failed: {e}")
         exit(1)
-    run_benchmark()
+    
+    run_benchmark(use_zero_copy=use_zero_copy, limit_rows=args.rows)
+
+if __name__ == "__main__":
+    main()
