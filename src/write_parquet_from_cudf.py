@@ -63,7 +63,7 @@ def write_cudf_to_parquet(
     return timing_info
 
 
-def write_cudf_to_parquet_optimized(
+def write_cudf_to_parquet_with_options(
     cudf_df: cudf.DataFrame,
     output_path: str,
     compression: str = 'snappy',
@@ -72,13 +72,13 @@ def write_cudf_to_parquet_optimized(
     **parquet_kwargs
 ) -> Dict[str, float]:
     """
-    最適化されたcuDF → Parquet書き込み
+    オプション付きcuDF → Parquet書き込み
     
     Args:
         cudf_df: 書き込み対象のcuDF DataFrame
         output_path: 出力Parquetファイルパス
         compression: 圧縮方式
-        optimize_for_spark: Spark読み込み最適化
+        optimize_for_spark: Spark読み込み用設定
         row_group_size: 行グループサイズ（None=自動）
         **parquet_kwargs: 追加のParquetオプション
     
@@ -90,39 +90,39 @@ def write_cudf_to_parquet_optimized(
     timing_info = {}
     start_time = time.time()
     
-    # 最適化オプションの設定
-    optimized_kwargs = parquet_kwargs.copy()
+    # オプションの設定
+    enhanced_kwargs = parquet_kwargs.copy()
     
     if optimize_for_spark:
-        # Spark読み込み最適化
-        optimized_kwargs.update({
+        # Spark読み込み用設定
+        enhanced_kwargs.update({
             'write_statistics': True,
             'use_dictionary': True
         })
     
     if row_group_size is not None:
-        optimized_kwargs['row_group_size'] = row_group_size
+        enhanced_kwargs['row_group_size'] = row_group_size
     
-    # GPU最適化書き込み実行
+    # GPU書き込み実行
     try:
         cudf_df.to_parquet(
             output_path,
             compression=compression,
             engine='cudf',
-            **optimized_kwargs
+            **enhanced_kwargs
         )
         
-        timing_info['method'] = 'cudf_optimized'
+        timing_info['method'] = 'cudf_enhanced'
         
     except Exception as e:
-        warnings.warn(f"最適化書き込み失敗, 標準方式にフォールバック: {e}")
+        warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
         
         # 標準方式でリトライ
         fallback_result = write_cudf_to_parquet(
             cudf_df, output_path, compression, **parquet_kwargs
         )
         timing_info.update(fallback_result)
-        timing_info['optimization_failed'] = True
+        timing_info['enhancement_failed'] = True
     
     timing_info['total'] = time.time() - start_time
     
@@ -131,5 +131,5 @@ def write_cudf_to_parquet_optimized(
 
 __all__ = [
     "write_cudf_to_parquet",
-    "write_cudf_to_parquet_optimized"
+    "write_cudf_to_parquet_with_options"
 ]

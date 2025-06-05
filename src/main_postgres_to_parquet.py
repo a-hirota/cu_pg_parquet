@@ -1,9 +1,9 @@
 """
-究極のcuDF ZeroCopy統合プロセッサー
+cuDF ZeroCopy統合プロセッサー
 
-以下の最適化を全て統合した究極版:
+以下の最適化を統合:
 1. 並列化された行検出・フィールド抽出
-2. cuDFによるゼロコピーArrow変換  
+2. cuDFによるゼロコピーArrow変換
 3. GPU直接Parquet書き出し
 4. メモリコアレッシング最適化
 5. RMM統合メモリ管理
@@ -42,8 +42,8 @@ from .build_buf_from_postgres import detect_pg_header_size
 from .write_parquet_from_cudf import write_cudf_to_parquet_optimized
 
 
-class UltimateZeroCopyProcessor:
-    """究極のゼロコピープロセッサー"""
+class ZeroCopyProcessor:
+    """ゼロコピープロセッサー"""
     
     def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True):
         """
@@ -94,7 +94,7 @@ class UltimateZeroCopyProcessor:
                 'WARP_SIZE': 32
             }
     
-    def create_optimized_string_buffers(
+    def create_string_buffers(
         self,
         columns: List[ColumnMeta],
         rows: int,
@@ -103,9 +103,9 @@ class UltimateZeroCopyProcessor:
         field_lengths_dev
     ) -> Dict[str, Any]:
         """
-        最適化された文字列バッファ作成
+        文字列バッファ作成
         
-        メモリコアレッシングとワープ効率を考慮した高速版
+        メモリコアレッシングとワープ効率を考慮
         """
         
         string_buffers = {}
@@ -129,7 +129,7 @@ class UltimateZeroCopyProcessor:
                 # === 1. 長さ配列の並列抽出 ===
                 d_lengths = cuda.device_array(rows, dtype=np.int32)
                 
-                # 最適化されたグリッドサイズ
+                # グリッドサイズの計算
                 blocks, threads = optimize_grid_size(0, rows, self.device_props)
                 
                 @cuda.jit
@@ -148,7 +148,7 @@ class UltimateZeroCopyProcessor:
                 # 文字列長配列をCuPyに変換
                 lengths_cupy = cp.asarray(d_lengths)
                 
-                # CuPyの高速cumsum使用（GPU最適化済み）
+                # CuPyのcumsum使用（GPU実行）
                 offsets_cumsum = cp.cumsum(lengths_cupy, dtype=cp.int32)
                 
                 # オフセット配列を作成（0を先頭に追加）
@@ -195,10 +195,10 @@ class UltimateZeroCopyProcessor:
                 
                 @cuda.jit
                 def copy_string_data_coalesced(
-                    raw_data, field_offsets, field_lengths, 
+                    raw_data, field_offsets, field_lengths,
                     col_idx, data_out, offsets, num_rows
                 ):
-                    """メモリコアレッシング最適化された文字列データコピー"""
+                    """メモリコアレッシングを考慮した文字列データコピー"""
                     row = cuda.grid(1)
                     if row >= num_rows:
                         return
@@ -238,7 +238,7 @@ class UltimateZeroCopyProcessor:
         
         return string_buffers
     
-    def decode_and_export_ultimate(
+    def decode_and_export(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         field_offsets_dev,
@@ -249,7 +249,7 @@ class UltimateZeroCopyProcessor:
         **parquet_kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
-        究極の統合デコード + エクスポート処理
+        統合デコード + エクスポート処理
         
         Returns:
             (cudf_dataframe, timing_info)
@@ -269,8 +269,8 @@ class UltimateZeroCopyProcessor:
         d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
         d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
 
-        # 最適化された文字列バッファ作成
-        string_buffers = self.create_optimized_string_buffers(
+        # 文字列バッファ作成
+        string_buffers = self.create_string_buffers(
             columns, rows, raw_dev, field_offsets_dev, field_lengths_dev
         )
 
@@ -285,7 +285,7 @@ class UltimateZeroCopyProcessor:
         # === 2. 統合カーネル実行 ===
         kernel_start = time.time()
         
-        # 最適化されたGrid/Blockサイズ
+        # Grid/Blockサイズの計算
         blocks, threads = optimize_grid_size(0, rows, self.device_props)
         
         print(f"統合カーネル実行: {blocks} blocks × {threads} threads")
@@ -337,7 +337,7 @@ class UltimateZeroCopyProcessor:
         
         timing_info['cudf_creation'] = time.time() - cudf_start
 
-        # === 4. 最適化Parquet書き出し ===
+        # === 4. Parquet書き出し ===
         export_start = time.time()
         
         parquet_timing = write_cudf_to_parquet_optimized(
@@ -354,7 +354,7 @@ class UltimateZeroCopyProcessor:
         
         return cudf_df, timing_info
     
-    def process_postgresql_to_parquet_ultimate(
+    def process_postgresql_to_parquet(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         columns: List[ColumnMeta],
@@ -365,15 +365,15 @@ class UltimateZeroCopyProcessor:
         **kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
-        PostgreSQL → cuDF → GPU Parquet の究極統合処理
+        PostgreSQL → cuDF → GPU Parquet の統合処理
         
-        全ての最適化を適用した最高性能版
+        最適化を適用した高性能版
         """
         
         total_timing = {}
         overall_start = time.time()
         
-        # === 1. 最適化されたGPUパース ===
+        # === 1. GPUパース ===
         parse_start = time.time()
         
         print("=== GPU並列パース開始 ===")
@@ -388,13 +388,13 @@ class UltimateZeroCopyProcessor:
         
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
-        print(f"最適化パース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
+        print(f"GPUパース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
         
-        # === 2. 究極統合デコード + エクスポート ===
+        # === 2. 統合デコード + エクスポート ===
         decode_start = time.time()
         
-        print("=== 究極統合デコード開始 ===")
-        cudf_df, decode_timing = self.decode_and_export_ultimate(
+        print("=== 統合デコード開始 ===")
+        cudf_df, decode_timing = self.decode_and_export(
             raw_dev, field_offsets_dev, field_lengths_dev,
             columns, output_path, compression, **kwargs
         )
@@ -417,7 +417,7 @@ class UltimateZeroCopyProcessor:
     ):
         """パフォーマンス統計の表示"""
         
-        print(f"\n=== 究極パフォーマンス統計 ===")
+        print(f"\n=== パフォーマンス統計 ===")
         print(f"処理データ: {rows:,} 行 × {cols} 列")
         print(f"データサイズ: {data_size / (1024**2):.2f} MB")
         
@@ -455,7 +455,7 @@ class UltimateZeroCopyProcessor:
         print("=" * 30)
 
 
-def ultimate_postgresql_to_cudf_parquet(
+def postgresql_to_cudf_parquet(
     raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
     columns: List[ColumnMeta],
     ncols: int,
@@ -467,9 +467,9 @@ def ultimate_postgresql_to_cudf_parquet(
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
-    究極のPostgreSQL → cuDF → GPU Parquet 統合処理関数
+    PostgreSQL → cuDF → GPU Parquet 統合処理関数
     
-    全ての最適化技術を統合した最高性能バージョン：
+    最適化技術を統合した高性能バージョン：
     - 並列化GPU行検出・フィールド抽出
     - メモリコアレッシング最適化
     - cuDFゼロコピーArrow変換
@@ -491,18 +491,18 @@ def ultimate_postgresql_to_cudf_parquet(
         (cudf_dataframe, timing_information)
     """
     
-    processor = UltimateZeroCopyProcessor(
+    processor = ZeroCopyProcessor(
         use_rmm=use_rmm, 
         optimize_gpu=optimize_gpu
     )
     
-    return processor.process_postgresql_to_parquet_ultimate(
+    return processor.process_postgresql_to_parquet(
         raw_dev, columns, ncols, header_size, output_path, 
         compression, **parquet_kwargs
     )
 
 
 __all__ = [
-    "UltimateZeroCopyProcessor",
-    "ultimate_postgresql_to_cudf_parquet"
+    "ZeroCopyProcessor",
+    "postgresql_to_cudf_parquet"
 ]

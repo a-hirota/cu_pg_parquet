@@ -21,7 +21,7 @@ from src.metadata import fetch_column_meta
 from src.types import ColumnMeta
 from src.build_buf_from_postgres import parse_binary_chunk_gpu, detect_pg_header_size
 # 従来処理は削除済み（ZeroCopyのみ使用）
-from src.main_postgres_to_parquet import ultimate_postgresql_to_cudf_parquet
+from src.main_postgres_to_parquet import postgresql_to_cudf_parquet
 
 TABLE_NAME = "lineorder"
 OUTPUT_PARQUET_PATH = "benchmark/lineorder_5m.output.parquet"
@@ -80,7 +80,7 @@ def run_benchmark(limit_rows=1000000):
     start_processing_time = time.time()
     
     try:
-        cudf_df, detailed_timing = ultimate_postgresql_to_cudf_parquet(
+        cudf_df, detailed_timing = postgresql_to_cudf_parquet(
             raw_dev=raw_dev,
             columns=columns,
             ncols=ncols,
