@@ -1,11 +1,11 @@
 """
-最適化されたGPUパーサー: 並列化とメモリコアレッシング対応
+GPUパーサー: 並列化とメモリコアレッシング対応
 
-GPUの並列処理能力を最大限活用するため、以下の最適化を実装：
+GPUの並列処理能力を活用するため、以下を実装：
 1. 行オフセット検出の完全並列化
-2. メモリコアレッシング最適化
+2. メモリコアレッシング対応
 3. 共有メモリ活用
-4. Grid/Blockサイズの動的最適化
+4. Grid/Blockサイズの動的計算
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def find_row_start_offsets_parallel_optimized(
     stride_size=1024
 ):
     """
-    並列化された行開始オフセット検出カーネル（最適化版）
+    並列化された行開始オフセット検出カーネル
     
     各スレッドが一定間隔で0xFFFFマーカーを並列検索し、
     行開始位置をatomic操作で収集します。
@@ -77,9 +77,9 @@ def find_row_start_offsets_parallel_optimized(
 @cuda.jit
 def count_rows_parallel_optimized(raw_data, row_counter, data_size, stride_size=1024):
     """
-    並列化された行数カウントカーネル（最適化版）
+    並列化された行数カウントカーネル
     
-    メモリコアレッシングを考慮した効率的な行数カウント
+    メモリコアレッシングを考慮した行数カウント
     """
     thread_id = cuda.grid(1)
     
@@ -130,7 +130,7 @@ def extract_fields_coalesced_optimized(
     num_cols
 ):
     """
-    メモリコアレッシング最適化されたフィールド抽出カーネル
+    メモリコアレッシング対応フィールド抽出カーネル
     
     ワープ内のスレッドが連続するメモリアクセスを行うよう最適化
     """
@@ -211,7 +211,7 @@ def unified_decode_with_coalescing(
     num_cols
 ):
     """
-    メモリコアレッシング最適化された統合デコードカーネル
+    メモリコアレッシング対応統合デコードカーネル
     
     列指向のメモリレイアウトでワープ内の連続アクセスを実現
     """
@@ -266,7 +266,7 @@ def unified_decode_with_coalescing(
 
 def optimize_grid_size(data_size: int, num_rows: int, device_props: dict) -> tuple:
     """
-    GPU特性に基づいた最適なGrid/Blockサイズを計算
+    GPU特性に基づいたGrid/Blockサイズを計算
     
     Args:
         data_size: 処理データサイズ
@@ -282,14 +282,14 @@ def optimize_grid_size(data_size: int, num_rows: int, device_props: dict) -> tup
     multiprocessor_count = device_props.get('MULTIPROCESSOR_COUNT', 16)
     max_blocks_per_grid = device_props.get('MAX_GRID_DIM_X', 65535)
     
-    # 最適スレッド数の計算
+    # スレッド数の計算
     # - 1ワープ = 32スレッド を基本単位とする
     # - SMあたり複数ブロックを配置してオキュパンシーを最大化
-    optimal_threads = 256  # 256 = 8ワープ, 良好なオキュパンシー
+    threads = 256  # 256 = 8ワープ, 良好なオキュパンシー
     
     # 行数ベースのブロック数計算
     if num_rows > 0:
-        blocks_for_rows = (num_rows + optimal_threads - 1) // optimal_threads
+        blocks_for_rows = (num_rows + threads - 1) // threads
     else:
         blocks_for_rows = 1
     
@@ -304,19 +304,19 @@ def optimize_grid_size(data_size: int, num_rows: int, device_props: dict) -> tup
     final_blocks = max(min_blocks, blocks_for_rows, blocks_for_data // 4)
     final_blocks = min(final_blocks, max_blocks_per_grid)
     
-    return final_blocks, optimal_threads
+    return final_blocks, threads
 
 
-def parse_binary_chunk_gpu_optimized(
+def parse_binary_chunk_gpu_enhanced(
     raw_dev,
     ncols: int,
     threads_per_block: int = 256,
     header_size: int = None
 ) -> tuple:
     """
-    最適化されたGPUバイナリチャンクパース
+    GPU拡張バイナリチャンクパース
     
-    並列化とメモリコアレッシングを最大限活用した高性能版
+    並列化とメモリコアレッシングを活用した高性能版
     既存の parse_binary_chunk_gpu と同じシグネチャで互換性を保持
     """
     
@@ -344,7 +344,7 @@ def parse_binary_chunk_gpu_optimized(
     row_counter = cuda.device_array(1, dtype=np.int32)
     row_counter[0] = 0
     
-    # 最適化されたGrid/Blockサイズ
+    # Grid/Blockサイズの計算
     count_blocks, count_threads = optimize_grid_size(data_size, 0, device_props)
     
     count_rows_parallel_optimized[count_blocks, count_threads](
@@ -361,7 +361,7 @@ def parse_binary_chunk_gpu_optimized(
     rows_found_counter = cuda.device_array(1, dtype=np.int32)
     rows_found_counter[0] = 0
     
-    # 最適化されたGrid/Blockサイズ
+    # Grid/Blockサイズの計算
     offset_blocks, offset_threads = optimize_grid_size(data_size, total_rows, device_props)
     
     find_row_start_offsets_parallel_optimized[offset_blocks, offset_threads](
@@ -377,7 +377,7 @@ def parse_binary_chunk_gpu_optimized(
     field_offsets_dev = cuda.device_array((actual_rows_found, ncols), dtype=np.int32)
     field_lengths_dev = cuda.device_array((actual_rows_found, ncols), dtype=np.int32)
     
-    # 2Dブロック構成でメモリコアレッシング最適化
+    # 2Dブロック構成でメモリコアレッシング対応
     threads_x = 16  # 行方向
     threads_y = 16  # 列方向
     blocks_x = (actual_rows_found + threads_x - 1) // threads_x
@@ -402,5 +402,5 @@ __all__ = [
     "extract_fields_coalesced_optimized",
     "unified_decode_with_coalescing",
     "optimize_grid_size",
-    "parse_binary_chunk_gpu_optimized"
+    "parse_binary_chunk_gpu_enhanced"
 ]

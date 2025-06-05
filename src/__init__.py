@@ -16,7 +16,7 @@ from .build_cudf_from_buf import CuDFZeroCopyProcessor
 from .build_buf_from_postgres import parse_binary_chunk_gpu, detect_pg_header_size
 from .write_parquet_from_cudf import (
     write_cudf_to_parquet,
-    write_cudf_to_parquet_optimized
+    write_cudf_to_parquet_with_options
 )
 
 # 基盤コンポーネント
@@ -36,7 +36,7 @@ __all__ = [
     "parse_binary_chunk_gpu",
     "detect_pg_header_size",
     "write_cudf_to_parquet",
-    "write_cudf_to_parquet_optimized",
+    "write_cudf_to_parquet_with_options",
     
     # 基盤
     "fetch_column_meta",

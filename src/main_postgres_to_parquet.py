@@ -28,7 +28,7 @@ from .types import (
 )
 from .memory_manager import GPUMemoryManager, BufferInfo
 from .cuda_kernels.optimized_parsers import (
-    parse_binary_chunk_gpu_optimized,
+    parse_binary_chunk_gpu_enhanced,
     optimize_grid_size
 )
 from .cuda_kernels.column_processor import (
@@ -39,7 +39,7 @@ from .cuda_kernels.decimal_tables import (
 )
 from .build_cudf_from_buf import CuDFZeroCopyProcessor
 from .build_buf_from_postgres import detect_pg_header_size
-from .write_parquet_from_cudf import write_cudf_to_parquet_optimized
+from .write_parquet_from_cudf import write_cudf_to_parquet_with_options
 
 
 class ZeroCopyProcessor:
@@ -340,7 +340,7 @@ class ZeroCopyProcessor:
         # === 4. Parquet書き出し ===
         export_start = time.time()
         
-        parquet_timing = write_cudf_to_parquet_optimized(
+        parquet_timing = write_cudf_to_parquet_with_options(
             cudf_df,
             output_path,
             compression=compression,

@@ -439,7 +439,7 @@ class CuDFZeroCopyProcessor:
         
         @cuda.jit
         def extract_column_optimized(unified_buf, row_stride, col_offset, col_size, output_buf, num_rows):
-            """最適化された列抽出カーネル（コアレッシング対応）"""
+            """列抽出カーネル（コアレッシング対応）"""
             idx = cuda.grid(1)
             if idx >= num_rows * col_size:
                 return
@@ -451,7 +451,7 @@ class CuDFZeroCopyProcessor:
             if src_idx < unified_buf.size:
                 output_buf[idx] = unified_buf[src_idx]
         
-        # グリッドサイズ最適化
+        # グリッドサイズ計算
         total_elements = rows * col_size
         threads = 256
         blocks = max(64, (total_elements + threads - 1) // threads)
