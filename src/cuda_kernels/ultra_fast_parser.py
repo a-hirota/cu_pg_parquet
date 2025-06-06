@@ -226,9 +226,10 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     """★境界条件修正版: 行開始位置で判定 + 正確なestimated_row_size"""
     tid = cuda.grid(1)
     
-    # 各スレッドの担当範囲計算
-    start_pos = header_size + tid * thread_stride
-    end_pos = start_pos + thread_stride
+    # 各スレッドの担当範囲計算（1B被りオーバーラップ）
+    overlap = 1 if tid > 0 else 0
+    start_pos = header_size + tid * thread_stride - overlap
+    end_pos = header_size + (tid + 1) * thread_stride
     
     # オーバーラップ領域（正確なestimated_row_sizeを使用）
     overlap_size = max(estimated_row_size * 2, 1024)  # 最低1KB
@@ -265,8 +266,8 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
                     pos = row_end
                     continue
         
-        # 16Bステップで高速進行
-        pos += 16
+        # 15Bステップで1B被りオーバーラップ
+        pos += 15
     
     # グローバル配列にアトミック記録
     if local_count > 0:
