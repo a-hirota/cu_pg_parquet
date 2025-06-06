@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import math
+import time
 import cupy as cp
 import numpy as np
 from numba import cuda
@@ -101,10 +102,14 @@ def parse_binary_chunk_gpu(
         dbg_idx_count = cuda.device_array(1, np.int32)
         dbg_idx_count[0] = 0
         
+    # Step 1: 行数カウント
+    step1_start = time.time()
     count_rows_gpu[blocks, threads](raw_dev, header_size, row_cnt_dev, dbg_arr_count, dbg_idx_count)
     cuda.synchronize()
-
+    step1_time = time.time() - step1_start
+    
     rows = int(row_cnt_dev.copy_to_host()[0])
+    print(f"  Step 1 (行数カウント): {step1_time:.4f}秒 - 検出行数: {rows}")
     if rows <= 0:
         return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
 
@@ -122,12 +127,16 @@ def parse_binary_chunk_gpu(
         dbg_idx_find = cuda.device_array(1, np.int32)
         dbg_idx_find[0] = 0
 
+    # Step 2: 行開始位置検出
+    step2_start = time.time()
     find_row_start_offsets_gpu[blocks, threads](
         raw_dev, header_size, row_starts_tmp, row_count_actual_dev, dbg_arr_find, dbg_idx_find
     )
     cuda.synchronize()
-
+    step2_time = time.time() - step2_start
+    
     actual_rows = int(row_count_actual_dev.copy_to_host()[0])
+    print(f"  Step 2 (行開始位置検出): {step2_time:.4f}秒 - 実際の行数: {actual_rows}")
     if actual_rows == 0:
         return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
     
@@ -139,18 +148,35 @@ def parse_binary_chunk_gpu(
     row_lengths_dev = cuda.device_array(rows, np.int32)
     null_flags_dev = cuda.device_array((rows, ncols), np.int8)
     blocks_len = math.ceil(rows / threads_per_block)
+    # Step 3: 行長・NULL判定
+    step3_start = time.time()
     calculate_row_lengths_and_null_flags_gpu[blocks_len, threads_per_block](
         raw_dev, rows, ncols, row_starts_dev, row_lengths_dev, null_flags_dev
     )
     cuda.synchronize()
+    step3_time = time.time() - step3_start
+    print(f"  Step 3 (行長・NULL判定): {step3_time:.4f}秒")
 
     # Field parse
     field_offsets_dev = cuda.device_array((rows, ncols), np.int32)
     field_lengths_dev = cuda.device_array((rows, ncols), np.int32)
+    # Step 4: フィールドパース
+    step4_start = time.time()
     parse_fields_from_offsets_gpu[blocks_len, threads_per_block](
         raw_dev, ncols, rows, row_starts_dev, field_offsets_dev, field_lengths_dev
     )
     cuda.synchronize()
+    step4_time = time.time() - step4_start
+    print(f"  Step 4 (フィールドパース): {step4_time:.4f}秒")
+    
+    # 総時間とステップ別内訳の表示
+    total_steps_time = step1_time + step2_time + step3_time + step4_time
+    print(f"  === パーサーステップ別内訳 ===")
+    print(f"    Step 1: {step1_time:.4f}秒 ({step1_time/total_steps_time*100:.1f}%)")
+    print(f"    Step 2: {step2_time:.4f}秒 ({step2_time/total_steps_time*100:.1f}%)")
+    print(f"    Step 3: {step3_time:.4f}秒 ({step3_time/total_steps_time*100:.1f}%)")
+    print(f"    Step 4: {step4_time:.4f}秒 ({step4_time/total_steps_time*100:.1f}%)")
+    print(f"    合計: {total_steps_time:.4f}秒")
 
     return field_offsets_dev, field_lengths_dev
 

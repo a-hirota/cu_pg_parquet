@@ -8,7 +8,7 @@ ZeroCopy実装をデフォルトとして使用
 # メインAPIの公開 (ZeroCopy版)
 from .main_postgres_to_parquet import (
     ZeroCopyProcessor,
-    postgresql_to_cudf_parquet
+    ultimate_postgresql_to_cudf_parquet
 )
 
 # 詳細制御用API
@@ -29,7 +29,7 @@ __version__ = "0.2.0"  # ZeroCopy版
 __all__ = [
     # メイン処理
     "ZeroCopyProcessor",
-    "postgresql_to_cudf_parquet",
+    "ultimate_postgresql_to_cudf_parquet",
     
     # 詳細制御
     "CuDFZeroCopyProcessor",

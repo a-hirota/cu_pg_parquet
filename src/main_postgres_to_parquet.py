@@ -377,18 +377,34 @@ class ZeroCopyProcessor:
         parse_start = time.time()
         
         print("=== GPU並列パース開始 ===")
-        # 安定性重視: 従来版パーサーを使用
-        from .build_buf_from_postgres import parse_binary_chunk_gpu
-        field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu(
-            raw_dev, ncols, threads_per_block=256, header_size=header_size
-        )
         
-        if self.optimize_gpu:
-            print("✅ 従来版パーサー使用（並列化は将来実装予定）")
+        # Ultra Fast版の利用を試行
+        use_ultra_fast = self.optimize_gpu and kwargs.get('use_ultra_fast', True)
+        
+        if use_ultra_fast:
+            try:
+                from .cuda_kernels.ultra_fast_parser import parse_binary_chunk_gpu_ultra_fast
+                print("🚀 Ultra Fast Parser 使用")
+                field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast(
+                    raw_dev, ncols, header_size=header_size
+                )
+                parser_used = "Ultra Fast"
+            except Exception as e:
+                print(f"⚠️ Ultra Fast Parser エラー: {e}")
+                print("🔄 従来版パーサーにフォールバック")
+                use_ultra_fast = False
+        
+        if not use_ultra_fast:
+            # 従来版パーサーを使用
+            from .build_buf_from_postgres import parse_binary_chunk_gpu
+            field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu(
+                raw_dev, ncols, threads_per_block=256, header_size=header_size
+            )
+            parser_used = "従来版"
         
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
-        print(f"GPUパース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
+        print(f"✅ {parser_used}パース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
         
         # === 2. 統合デコード + エクスポート ===
         decode_start = time.time()
@@ -455,7 +471,7 @@ class ZeroCopyProcessor:
         print("=" * 30)
 
 
-def postgresql_to_cudf_parquet(
+def ultimate_postgresql_to_cudf_parquet(
     raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
     columns: List[ColumnMeta],
     ncols: int,
@@ -504,5 +520,5 @@ def postgresql_to_cudf_parquet(
 
 __all__ = [
     "ZeroCopyProcessor",
-    "postgresql_to_cudf_parquet"
+    "ultimate_postgresql_to_cudf_parquet"
 ]
