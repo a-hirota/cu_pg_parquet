@@ -182,20 +182,29 @@ def validate_complete_row_fast(raw_data, row_start, expected_cols):
             pos += flen
         elif flen == 0xFFFFFFFF:
             continue
-        elif flen < 0 and flen != 0xFFFFFFFF:  # 0xFFFFFFFF以外の負値は不正
+        elif flen < 0:  # 0xFFFFFFFF以外の負値は不正
             return False, -1
+    
+    # 次行ヘッダー検証（偽ヘッダー排除）
+    if pos + 2 <= raw_data.size:
+        next_header = (raw_data[pos] << 8) | raw_data[pos + 1]
+        if next_header != expected_cols and next_header != 0xFFFF:
+            return False, -1  # 次行ヘッダーが不正
     
     return True, pos  # (検証成功, 行終端位置)
 
 @cuda.jit
 def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_size, ncols,
                           row_positions, row_count, max_rows, debug_array=None):
-    """★境界条件修正版: 行開始位置で判定 + 正確なestimated_row_size + デバッグ機能"""
-    tid = cuda.grid(1)
+    """★大規模並列版: 2次元グリッド + 完全カバレッジ + デバッグ機能"""
+    # 2次元グリッド対応でスレッド数制限を突破
+    tid = cuda.blockIdx.x * cuda.gridDim.y * cuda.blockDim.x + \
+          cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
     
     # 各スレッドの担当範囲計算（1B被りオーバーラップ）
-    overlap = 1 if tid > 0 else 0
-    start_pos = header_size + tid * thread_stride - overlap
+    # overlap = 1 if tid > 0 else 0
+    # start_pos = header_size + tid * thread_stride - overlap
+    start_pos = header_size + tid * thread_stride
     end_pos = header_size + (tid + 1) * thread_stride
     
     # オーバーラップ領域（正確なestimated_row_sizeを使用）
@@ -210,60 +219,28 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     local_count = 0
     
     # 16Bずつ高速スキャン
+    # local_count:改行検知：各スレッド256行で強制停止してGPUクラッシュ回避
     while pos < search_end and local_count < 256:
         # 16B読み込みで行ヘッダ"17"探索
         candidate_pos = read_uint16_simd16(raw_data, pos, ncols)
         
         # デバッグログ記録（特定の見逃し位置のみ）
-        if debug_array is not None:
-            # 位置 2948855 のチェック
-            if pos <= 2948855 < pos + 16:
-                if candidate_pos == 2948855:
-                    debug_array[0] = 2948855  # 対象位置
-                    debug_array[1] = tid      # スレッドID
-                    debug_array[2] = 1        # ステップ: 候補発見
-                elif candidate_pos >= 0:
-                    debug_array[2] = 2        # ステップ: 別候補発見
-                    debug_array[3] = candidate_pos
-                else:
-                    debug_array[2] = 0        # ステップ: 候補なし
-        
         if candidate_pos >= 0:
+            if candidate_pos >= end_pos:
+                break # 担当領域外の候補は無視
+
             # 完全行検証
             is_valid, row_end = validate_complete_row_fast(raw_data, candidate_pos, ncols)
             
-            # デバッグログ: 検証結果記録（位置 2948855 のみ）
-            if debug_array is not None and candidate_pos == 2948855:
-                debug_array[4] = 1 if is_valid else 0  # 検証結果
-            
             if is_valid:
-                # ★境界条件修正: 行開始位置で判定
-                if candidate_pos < end_pos:
-                    # 行開始が担当領域内 → カウント
-                    local_positions[local_count] = candidate_pos
-                    local_count += 1
-                    
-                    # デバッグログ: カウント成功（位置 2948855 のみ）
-                    if debug_array is not None and candidate_pos == 2948855:
-                        debug_array[2] = 3  # ステップ: カウント成功
-                    
-                    # 次の行開始位置へジャンプ（高速化）
-                    pos = row_end
-                    continue
-                elif candidate_pos < search_end:
-                    # オーバーラップ領域 → 確認のみ、カウントしない
-                    
-                    # デバッグログ: オーバーラップ領域（位置 2948855 のみ）
-                    if debug_array is not None and candidate_pos == 2948855:
-                        debug_array[2] = 4  # ステップ: オーバーラップ
-                    
-                    # 次の行開始位置へジャンプ（高速化）
-                    pos = row_end
-                    continue
-                else:
-                    # デバッグログ: 範囲外（位置 2948855 のみ）
-                    if debug_array is not None and candidate_pos == 2948855:
-                        debug_array[2] = 5  # ステップ: 範囲外
+                # 行開始が担当領域内 → カウント
+                local_positions[local_count] = candidate_pos
+                local_count += 1
+                
+                # 次の行開始位置へジャンプ（高速化）
+                pos = row_end
+                continue
+
             else:
                 # 検証失敗：候補位置+1から再開（16B内の他の候補を見逃さない）
                 pos = candidate_pos + 1
@@ -291,39 +268,45 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     # データサイズ
     data_size = raw_dev.size - header_size
     
-    # 方針B: GPU制限内で最大密度（元の設計に戻す）
-    max_gpu_threads = 65536
+    # 方針C: 2次元グリッドで大規模並列処理
+    max_gpu_threads = 1048576  # 2^20 = 1Mスレッド（16倍増加）
     threads_per_block = 256
-    max_blocks = max_gpu_threads // threads_per_block
+    max_total_blocks = max_gpu_threads // threads_per_block  # 4096ブロック
     
-    # 元の設計: スレッド間距離 = データサイズ ÷ 最大スレッド数
-    thread_stride = data_size // max_gpu_threads
+    # 完全カバレッジ: 切り上げ除算で端数領域も含める
+    thread_stride = (data_size + max_gpu_threads - 1) // max_gpu_threads
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size  # 最小でも推定行サイズ
     
-    # 実際のスレッド数
-    num_threads = (data_size + thread_stride - 1) // thread_stride
-    num_threads = min(num_threads, max_gpu_threads)
-    num_blocks = min((num_threads + threads_per_block - 1) // threads_per_block, max_blocks)
+    # 実際のスレッド数とブロック配置
+    num_threads = min((data_size + thread_stride - 1) // thread_stride, max_gpu_threads)
+    total_blocks = min((num_threads + threads_per_block - 1) // threads_per_block, max_total_blocks)
     
-    # ★詳細デバッグ: Grid起動問題とカバレッジ特定
+    # 2次元グリッド配置（CUDAの1次元制限を回避）
+    max_blocks_per_dim = 65535
+    blocks_x = min(total_blocks, max_blocks_per_dim)
+    blocks_y = (total_blocks + blocks_x - 1) // blocks_x
+    
+    # ★詳細デバッグ: 2次元グリッド + 完全カバレッジ分析
     if debug:
-        print(f"[DEBUG] ★Ultra Fast v2 (方針B): ncols={ncols}, estimated_row_size={estimated_row_size}")
+        print(f"[DEBUG] ★Ultra Fast v3 (方針C: 2次元グリッド): ncols={ncols}, estimated_row_size={estimated_row_size}")
         print(f"[DEBUG] ★data_size={data_size//1024//1024}MB ({data_size}B)")
-        print(f"[DEBUG] ★設計値: threads={num_threads}, blocks={num_blocks}")
-        print(f"[DEBUG] ★thread_stride={thread_stride}B")
+        print(f"[DEBUG] ★設計値: threads={num_threads}, total_blocks={total_blocks}")
+        print(f"[DEBUG] ★2次元グリッド: ({blocks_x}, {blocks_y}) × {threads_per_block}threads")
+        print(f"[DEBUG] ★thread_stride={thread_stride}B (密度: {data_size//num_threads}B/thread)")
         
-        # カバレッジ計算
-        coverage_bytes = num_threads * thread_stride
+        # カバレッジ計算（実際のカバー範囲を正確に表示）
+        coverage_bytes = min(num_threads * thread_stride, data_size)
+        coverage_gap = max(0, data_size - coverage_bytes)
         coverage_ratio = coverage_bytes / data_size
         print(f"[DEBUG] ★期待カバー範囲: {coverage_bytes//1024//1024}MB ({coverage_bytes}B)")
-        print(f"[DEBUG] ★カバレッジ: {coverage_ratio*100:.1f}%")
+        print(f"[DEBUG] ★カバレッジ: {coverage_ratio*100:.3f}% (不足: {coverage_gap}B)")
         
         # GPU制限チェック
         if num_threads == max_gpu_threads:
             print(f"[DEBUG] ★GPU制限に到達: {max_gpu_threads}スレッド")
-        if num_blocks == max_blocks:
-            print(f"[DEBUG] ★ブロック制限に到達: {max_blocks}ブロック")
+        if total_blocks == max_total_blocks:
+            print(f"[DEBUG] ★ブロック制限に到達: {max_total_blocks}ブロック")
     
     # デバイス配列準備
     max_rows = min(2_000_000, (data_size // estimated_row_size) * 2)
@@ -338,15 +321,16 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     debug_info[2] = 0
     
     if debug:
-        print(f"[DEBUG] ★カーネル起動: detect_rows_optimized[{num_blocks}, {threads_per_block}]")
+        print(f"[DEBUG] ★カーネル起動: detect_rows_optimized[({blocks_x}, {blocks_y}), {threads_per_block}]")
     
     # デバッグ配列準備（見逃し位置1個 × 5項目）
     debug_info_size = 5  # [位置, スレッドID, ステップ, 候補位置, 検証結果]
     debug_array = cuda.device_array(debug_info_size, np.int32)
     debug_array[:] = -1  # 初期化
     
-    # ★全要件統合実行（estimated_row_sizeを引数追加）
-    detect_rows_optimized[num_blocks, threads_per_block](
+    # ★2次元グリッド起動で大規模並列実行
+    grid_2d = (blocks_x, blocks_y)
+    detect_rows_optimized[grid_2d, threads_per_block](
         raw_dev, header_size, thread_stride, estimated_row_size, ncols,
         row_positions, row_count, max_rows, debug_array
     )
@@ -355,7 +339,7 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     # デバッグ結果解析
     if debug:
         debug_results = debug_array.copy_to_host()
-        target_position = 2948855  # 最初の見逃し位置をデバッグ
+        target_position = 70277  # 新しい見逃し位置をデバッグ
         
         print(f"[DEBUG] ★見逃し原因詳細分析 (位置 {target_position}):")
         
@@ -411,14 +395,27 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
         print("[DEBUG] No rows detected")
         return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
     
-    # 要件4: 累積和処理（ソート形式で高速実装）
-    positions_host = row_positions[:nrow].copy_to_host()
-    positions_sorted = np.sort(positions_host)  # CPU側ソート = 累積和の効率的実装
-    row_offsets = cuda.to_device(positions_sorted)
+    # 要件4: GPU並列ソート（CPU転送を回避）
+    if nrow <= 1:
+        row_offsets = row_positions[:nrow]  # 1行以下はソート不要
+    else:
+        try:
+            # CuPyを使用してGPU上で直接ソート
+            import cupy as cp
+            positions_cupy = cp.asarray(row_positions[:nrow])
+            positions_sorted_cupy = cp.sort(positions_cupy)
+            row_offsets = cuda.as_cuda_array(positions_sorted_cupy)
+        except ImportError:
+            # CuPyが利用できない場合は従来のCPU方式
+            positions_host = row_positions[:nrow].copy_to_host()
+            positions_sorted = np.sort(positions_host)
+            row_offsets = cuda.to_device(positions_sorted)
     
     # 詳細デバッグ情報
     if debug and nrow > 1:
-        gaps = np.diff(positions_sorted)
+        # GPU配列からCPU配列に変換してデバッグ
+        row_offsets_host = row_offsets.copy_to_host()
+        gaps = np.diff(row_offsets_host)
         print(f"[DEBUG] ★rows {nrow} min {gaps.min()} max {gaps.max()} avg {float(gaps.mean()):.2f}")
         small = (gaps < 8).sum()
         print(f"[DEBUG] ★small_rows: {small} (目標: 0)")
@@ -431,16 +428,16 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
         print(f"[DEBUG] ★不足: {missing_rows}行 ({missing_rows/expected_rows*100:.1f}%)")
         
         # データ分布分析
-        data_start = positions_sorted[0]
-        data_end = positions_sorted[-1]
+        data_start = row_offsets_host[0]
+        data_end = row_offsets_host[-1]
         data_span = data_end - data_start
         print(f"[DEBUG] ★データ分布: {data_start}-{data_end} (範囲: {data_span//1024//1024}MB)")
     
-    # フィールド抽出
+    # フィールド抽出（従来の1次元グリッドで十分）
     field_offsets = cuda.device_array((nrow, ncols), np.int32)
     field_lengths = cuda.device_array((nrow, ncols), np.int32)
     
-    extract_blocks = (nrow + threads_per_block - 1) // threads_per_block
+    extract_blocks = min((nrow + threads_per_block - 1) // threads_per_block, max_blocks_per_dim)
     extract_fields[extract_blocks, threads_per_block](
         raw_dev, row_offsets, field_offsets, field_lengths, nrow, ncols
     )
