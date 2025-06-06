@@ -31,42 +31,6 @@ def read_uint16_simd8(buf, off, expected_cols):
     return 0xFFFF, -1
 
 @cuda.jit(device=True, inline=True)
-def validate_first_field(raw_data, pos, first_col_size):
-    """
-    最初のフィールド長をチェックして妥当性を検証
-    
-    Args:
-        raw_data: 生バイナリデータ
-        pos: 最初のフィールド長の位置
-        first_col_size: 期待される最初のカラムのサイズ（固定長の場合）
-    
-    Returns:
-        bool: 妥当なフィールド長かどうか
-    """
-    if pos + 4 > raw_data.size:
-        return False
-    
-    field_len = (
-        int32(raw_data[pos  ]) << 24 | int32(raw_data[pos+1]) << 16 |
-        int32(raw_data[pos+2]) << 8  | int32(raw_data[pos+3])
-    )
-    
-    # NULL値の場合
-    if field_len == -1:
-        return True
-    
-    # DECIMAL128の場合、可変長として扱われることが多い
-    # 実際のデータを見て妥当な範囲を設定
-    
-    # 一般的な数値型のサイズをチェック
-    if field_len in (1, 2, 4, 8, 16):  # 固定長数値型
-        return True
-    
-    # NUMERIC/DECIMAL型は可変長で様々なサイズを取る
-    # Lineorderの lo_orderkey は通常 4-8 バイト程度
-    return 0 <= field_len <= 32  # より現実的な上限
-
-@cuda.jit(device=True, inline=True)
 def load16(raw_data, gpos, shmem, sh_off):
     if sh_off + ALIGN_BYTES >= shmem.size or gpos + 15 >= raw_data.size:
         return False
@@ -117,7 +81,7 @@ def detect_rows(raw_data, header, row_off, row_cnt, ncols, first_col_size):
                         int32(raw_data[tmp  ]) << 24 | int32(raw_data[tmp+1]) << 16 |
                         int32(raw_data[tmp+2]) << 8  | int32(raw_data[tmp+3])
                     )
-                    if flen == -1:
+                    if flen == 0xFFFFFFFF:
                         tmp += 4
                     elif 0 <= flen <= MAX_FIELD_LEN:
                         tmp += 4 + flen
@@ -148,7 +112,7 @@ def extract_fields(raw, roff, foff, flen, nrow, ncol):
             int32(raw[pos])<<24 | int32(raw[pos+1])<<16 |
             int32(raw[pos+2])<<8 | int32(raw[pos+3])
         )
-        if ln == -1:
+        if ln == 0xFFFFFFFF:
             flen[rid,c] = -1; foff[rid,c]=0; pos += 4
         else:
             foff[rid,c] = pos+4; flen[rid,c] = ln; pos += 4+ln
@@ -190,6 +154,7 @@ def read_uint16_simd16(raw_data, pos, ncols):
 
 @cuda.jit(device=True, inline=True)
 def validate_complete_row_fast(raw_data, row_start, expected_cols):
+    # raw_dataには、PostgreSQLのCOPY BINARYデータ全体が入ります。
     """要件2: 完全な行検証 + 越境処理対応"""
     if row_start + 2 > raw_data.size:
         return False, -1
@@ -215,15 +180,17 @@ def validate_complete_row_fast(raw_data, row_start, expected_cols):
             if pos + flen >= raw_data.size:
                 return False, -1
             pos += flen
-        elif flen < -1:  # -1はNULL、それ以下は不正
+        elif flen == 0xFFFFFFFF:
+            continue
+        elif flen < 0 and flen != 0xFFFFFFFF:  # 0xFFFFFFFF以外の負値は不正
             return False, -1
     
     return True, pos  # (検証成功, 行終端位置)
 
 @cuda.jit
 def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_size, ncols,
-                         row_positions, row_count, max_rows):
-    """★境界条件修正版: 行開始位置で判定 + 正確なestimated_row_size"""
+                          row_positions, row_count, max_rows, debug_array=None):
+    """★境界条件修正版: 行開始位置で判定 + 正確なestimated_row_size + デバッグ機能"""
     tid = cuda.grid(1)
     
     # 各スレッドの担当範囲計算（1B被りオーバーラップ）
@@ -247,9 +214,27 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
         # 16B読み込みで行ヘッダ"17"探索
         candidate_pos = read_uint16_simd16(raw_data, pos, ncols)
         
+        # デバッグログ記録（特定の見逃し位置のみ）
+        if debug_array is not None:
+            # 位置 2948855 のチェック
+            if pos <= 2948855 < pos + 16:
+                if candidate_pos == 2948855:
+                    debug_array[0] = 2948855  # 対象位置
+                    debug_array[1] = tid      # スレッドID
+                    debug_array[2] = 1        # ステップ: 候補発見
+                elif candidate_pos >= 0:
+                    debug_array[2] = 2        # ステップ: 別候補発見
+                    debug_array[3] = candidate_pos
+                else:
+                    debug_array[2] = 0        # ステップ: 候補なし
+        
         if candidate_pos >= 0:
             # 完全行検証
             is_valid, row_end = validate_complete_row_fast(raw_data, candidate_pos, ncols)
+            
+            # デバッグログ: 検証結果記録（位置 2948855 のみ）
+            if debug_array is not None and candidate_pos == 2948855:
+                debug_array[4] = 1 if is_valid else 0  # 検証結果
             
             if is_valid:
                 # ★境界条件修正: 行開始位置で判定
@@ -257,16 +242,34 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
                     # 行開始が担当領域内 → カウント
                     local_positions[local_count] = candidate_pos
                     local_count += 1
+                    
+                    # デバッグログ: カウント成功（位置 2948855 のみ）
+                    if debug_array is not None and candidate_pos == 2948855:
+                        debug_array[2] = 3  # ステップ: カウント成功
+                    
                     # 次の行開始位置へジャンプ（高速化）
                     pos = row_end
                     continue
                 elif candidate_pos < search_end:
                     # オーバーラップ領域 → 確認のみ、カウントしない
+                    
+                    # デバッグログ: オーバーラップ領域（位置 2948855 のみ）
+                    if debug_array is not None and candidate_pos == 2948855:
+                        debug_array[2] = 4  # ステップ: オーバーラップ
+                    
                     # 次の行開始位置へジャンプ（高速化）
                     pos = row_end
                     continue
+                else:
+                    # デバッグログ: 範囲外（位置 2948855 のみ）
+                    if debug_array is not None and candidate_pos == 2948855:
+                        debug_array[2] = 5  # ステップ: 範囲外
+            else:
+                # 検証失敗：候補位置+1から再開（16B内の他の候補を見逃さない）
+                pos = candidate_pos + 1
+                continue
         
-        # 15Bステップで1B被りオーバーラップ
+        # 候補が見つからない場合のみ15Bステップで1B被りオーバーラップ
         pos += 15
     
     # グローバル配列にアトミック記録
@@ -337,12 +340,69 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     if debug:
         print(f"[DEBUG] ★カーネル起動: detect_rows_optimized[{num_blocks}, {threads_per_block}]")
     
+    # デバッグ配列準備（見逃し位置1個 × 5項目）
+    debug_info_size = 5  # [位置, スレッドID, ステップ, 候補位置, 検証結果]
+    debug_array = cuda.device_array(debug_info_size, np.int32)
+    debug_array[:] = -1  # 初期化
+    
     # ★全要件統合実行（estimated_row_sizeを引数追加）
     detect_rows_optimized[num_blocks, threads_per_block](
         raw_dev, header_size, thread_stride, estimated_row_size, ncols,
-        row_positions, row_count, max_rows
+        row_positions, row_count, max_rows, debug_array
     )
     cuda.synchronize()
+    
+    # デバッグ結果解析
+    if debug:
+        debug_results = debug_array.copy_to_host()
+        target_position = 2948855  # 最初の見逃し位置をデバッグ
+        
+        print(f"[DEBUG] ★見逃し原因詳細分析 (位置 {target_position}):")
+        
+        position = debug_results[0]
+        thread_id = debug_results[1]
+        step = debug_results[2]
+        candidate = debug_results[3]
+        validation = debug_results[4]
+        
+        if position == target_position:  # この位置がデバッグ対象として処理された
+            step_names = {
+                -1: "未処理",
+                0: "16B検索で候補なし",
+                1: "16B検索で対象位置発見",
+                2: "16B検索で別候補発見",
+                3: "検証成功・カウント完了",
+                4: "検証成功・オーバーラップ領域",
+                5: "検証成功・範囲外"
+            }
+            
+            validation_names = {
+                -1: "未実行",
+                0: "検証失敗",
+                1: "検証成功"
+            }
+            
+            print(f"  位置 {target_position}:")
+            print(f"    担当スレッド: {thread_id}")
+            print(f"    処理結果: {step_names.get(step, f'不明({step})')}")
+            if candidate >= 0:
+                print(f"    検出候補: {candidate}")
+            print(f"    検証結果: {validation_names.get(validation, f'不明({validation})')}")
+            
+            # 見逃し原因の推定
+            if step == 0:
+                print(f"    → 見逃し原因: 16B検索で'00 11'パターンが検出されなかった")
+            elif step == 2:
+                print(f"    → 見逃し原因: 別の候補位置{candidate}が先に検出された")
+            elif step == 1 and validation == 0:
+                print(f"    → 見逃し原因: 候補は発見されたが検証で失敗")
+            elif step >= 3:
+                print(f"    → 見逃し原因: 正常処理されているはず（他の問題の可能性）")
+            else:
+                print(f"    → 見逃し原因: 不明（詳細調査が必要）")
+        else:
+            print(f"  位置 {target_position}: デバッグ情報なし（この位置を担当するスレッドで処理されなかった可能性）")
+            print(f"    実際に記録された位置: {position}")
     
     nrow = int(row_count.copy_to_host()[0])
     print(f"[DEBUG] ★Ultra Fast v2 detected {nrow} rows")

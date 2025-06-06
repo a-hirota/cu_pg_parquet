@@ -281,6 +281,165 @@ def run_gpu_parse_benchmark(limit_rows=1000000, use_ultra_fast=True, debug=False
                             print(f"  フィールド数読み取り境界越え（pos={pos}, size={len(raw_host_data)}）")
                     except Exception as e:
                         print(f"  検証エラー: {e}")
+            
+            # ★余分検出位置の詳細分析
+            if extra_positions:
+                extra_list = sorted(list(extra_positions))
+                print(f"\n[DEBUG] ★余分検出詳細分析開始...")
+                print(f"[DEBUG] ★余分検出位置（最初の10個）: {extra_list[:10]}")
+                
+                # 余分検出位置の分布分析
+                data_size = len(raw_host)
+                ranges = [(i*data_size//10, (i+1)*data_size//10) for i in range(10)]
+                extra_by_range = [0] * 10
+                
+                for pos in extra_positions:
+                    for i, (start, end) in enumerate(ranges):
+                        if start <= pos < end:
+                            extra_by_range[i] += 1
+                            break
+                
+                print(f"[DEBUG] ★余分検出分布（10分割）: {extra_by_range}")
+                print(f"[DEBUG] ★余分検出率: {len(extra_positions)/len(ultra_positions)*100:.2f}%")
+                
+                # ★余分検出位置の詳細分析（データダンプ）
+                print("\n[DEBUG] ★余分検出位置詳細分析...")
+                raw_host_data = raw_dev.copy_to_host()
+                header_size = 19
+                thread_stride = 3502
+                
+                for i, pos in enumerate(sorted(extra_positions)[:5]):  # 最初の5個
+                    print(f"\n余分検出位置 {i+1}: {pos}")
+                    
+                    # 前後32Bをダンプ
+                    start = max(0, pos - 16)
+                    end = min(len(raw_host_data), pos + 16)
+                    data_chunk = raw_host_data[start:end]
+                    
+                    # 16進ダンプ
+                    hex_dump = ' '.join(f'{b:02x}' for b in data_chunk)
+                    print(f"  バイナリ: {hex_dump}")
+                    
+                    # ASCII表示（可能な部分）
+                    ascii_dump = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in data_chunk)
+                    print(f"  ASCII:   {ascii_dump}")
+                    
+                    # 行ヘッダ"17"チェック
+                    if pos + 1 < len(raw_host_data):
+                        header = (raw_host_data[pos] << 8) | raw_host_data[pos + 1]
+                        print(f"  ヘッダ値: {header} ({'17フィールド' if header == 17 else '偽ヘッダー'})")
+                    
+                    # スレッド担当範囲分析
+                    thread_id = (pos - header_size) // thread_stride
+                    thread_start = header_size + thread_id * thread_stride
+                    thread_end = thread_start + thread_stride
+                    overlap_end = thread_end + 1024  # オーバーラップ領域
+                    
+                    print(f"  Thread {thread_id}: 担当 {thread_start}-{thread_end}, オーバーラップ {thread_end}-{overlap_end}")
+                    
+                    if thread_start <= pos < thread_end:
+                        print(f"  範囲判定: 担当領域内 → 通常検出")
+                    elif thread_end <= pos < overlap_end:
+                        print(f"  範囲判定: オーバーラップ領域 → 重複検出の可能性")
+                    else:
+                        print(f"  範囲判定: 範囲外 → 異常検出")
+                    
+                    # 16Bステップでの検出状況
+                    step_start = (pos - thread_start) // 16 * 16 + thread_start
+                    step_end = step_start + 16
+                    print(f"  16Bステップ: {step_start}-{step_end} (pos={pos})")
+                    if step_start <= pos < step_end:
+                        print(f"  16Bステップ判定: 正常検出範囲")
+                    else:
+                        print(f"  16Bステップ判定: 異常検出")
+                
+                # Ultra Fast版で余分検出位置を検証
+                print("\n[DEBUG] ★余分検出位置の検証テスト...")
+                
+                for i, pos in enumerate(sorted(extra_positions)[:3]):
+                    print(f"\n余分検出検証 {i+1}: 位置 {pos}")
+                    try:
+                        # 配列境界チェック
+                        if pos + 2 <= len(raw_host_data):
+                            num_fields = (raw_host_data[pos] << 8) | raw_host_data[pos + 1]
+                            print(f"  フィールド数: {num_fields}")
+                            
+                            if num_fields == 17:
+                                field_pos = pos + 2
+                                valid_fields = 0
+                                invalid_reason = ""
+                                
+                                for field_idx in range(17):
+                                    # カラム長の4Bが読み取り可能かチェック
+                                    if field_pos + 4 <= len(raw_host_data):
+                                        field_len = int((raw_host_data[field_pos] << 24) | \
+                                                       (raw_host_data[field_pos + 1] << 16) | \
+                                                       (raw_host_data[field_pos + 2] << 8) | \
+                                                       raw_host_data[field_pos + 3])
+                                        field_pos += 4
+                                        
+                                        if field_len == 0xFFFFFFFF:  # NULL
+                                            valid_fields += 1
+                                            print(f"    フィールド{field_idx}: NULL")
+                                        elif 0 <= field_len <= 1000:  # 妥当な長さ
+                                            # カラムデータが読み取り可能かチェック
+                                            if field_pos + field_len <= len(raw_host_data):
+                                                field_pos += field_len
+                                                valid_fields += 1
+                                                print(f"    フィールド{field_idx}: 長さ{field_len}B, 有効")
+                                            else:
+                                                invalid_reason = f"フィールド{field_idx}データ境界越え"
+                                                print(f"    フィールド{field_idx}: データ長{field_len}Bで境界越え（pos={field_pos}, size={len(raw_host_data)}）")
+                                                break
+                                        else:
+                                            invalid_reason = f"フィールド{field_idx}異常長({field_len})"
+                                            print(f"    フィールド{field_idx}: 異常な長さ {field_len}")
+                                            break
+                                    else:
+                                        invalid_reason = f"フィールド{field_idx}長さ読み取り境界越え"
+                                        print(f"    フィールド{field_idx}: カラム長読み取りで境界越え（pos={field_pos}, size={len(raw_host_data)}）")
+                                        break
+                                
+                                print(f"  有効フィールド数: {valid_fields}/17")
+                                print(f"  行終了位置: {field_pos}")
+                                print(f"  データサイズ: {len(raw_host_data)}")
+                                if valid_fields == 17:
+                                    print(f"  検証結果: 有効（従来版が見逃した可能性）")
+                                else:
+                                    print(f"  検証結果: 無効（偽陽性）- 理由: {invalid_reason}")
+                            else:
+                                print(f"  検証結果: 偽ヘッダー ({num_fields} != 17)")
+                        else:
+                            print(f"  フィールド数読み取り境界越え（pos={pos}, size={len(raw_host_data)}）")
+                    except Exception as e:
+                        print(f"  検証エラー: {e}")
+                
+                # パターン分析
+                print(f"\n[DEBUG] ★余分検出パターン分析...")
+                false_positive_count = 0
+                boundary_issue_count = 0
+                valid_miss_count = 0
+                
+                for pos in sorted(extra_positions)[:10]:  # 最初の10個で分析
+                    if pos + 2 <= len(raw_host_data):
+                        header = (raw_host_data[pos] << 8) | raw_host_data[pos + 1]
+                        if header != 17:
+                            false_positive_count += 1
+                        else:
+                            # 詳細検証が必要
+                            thread_id = (pos - header_size) // thread_stride
+                            thread_start = header_size + thread_id * thread_stride
+                            thread_end = thread_start + thread_stride
+                            
+                            if pos >= thread_end:
+                                boundary_issue_count += 1
+                            else:
+                                valid_miss_count += 1
+                
+                print(f"[DEBUG] ★パターン分析結果（サンプル10件）:")
+                print(f"[DEBUG]   偽ヘッダー: {false_positive_count}件")
+                print(f"[DEBUG]   境界問題: {boundary_issue_count}件")
+                print(f"[DEBUG]   従来版見逃し: {valid_miss_count}件")
         
         # 性能比較
         speedup = standard_time / ultra_time if ultra_time > 0 else 0
