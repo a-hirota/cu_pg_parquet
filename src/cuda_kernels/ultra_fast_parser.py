@@ -132,7 +132,7 @@ def estimate_row_size_from_columns(columns):
             if col.arrow_id == UTF8:
                 size += 20  # 文字列平均20B
             elif col.arrow_id == DECIMAL128:
-                size += 8   # NUMERIC平均8B
+                size += 16   # NUMERIC平均16B
             else:
                 size += 4   # その他4B
     
