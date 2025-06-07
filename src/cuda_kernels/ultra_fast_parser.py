@@ -237,9 +237,10 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
             debug_array[3] = end_pos
     
     # オーバーラップ領域（正確なestimated_row_sizeを使用）
-    overlap_size = max(estimated_row_size * 2, 1024)  # 最低1KB
-    search_end = min(end_pos + overlap_size, raw_data.size - 1)  # 最後の1バイト手前まで探索
-    end_pos = min(end_pos, raw_data.size)
+    # overlap_size = max(estimated_row_size * 2, 1024)  # 最低1KB
+    # search_end = min(end_pos + overlap_size, raw_data.size - 1)  # 最後の1バイト手前まで探索
+    search_end = min(end_pos, raw_data.size - 1)  # 最後の1バイト手前まで探索
+    # end_pos = min(end_pos, raw_data.size)
     
     if start_pos >= raw_data.size:
         return
@@ -253,6 +254,7 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     # while pos < search_end and local_count < 256:
     while pos < search_end and local_count < 256:
         # 16B読み込みで行ヘッダ"17"探索
+        # candidate_pos: pos + iで計算された絶対位置です。移動距離ではありません。
         candidate_pos = read_uint16_simd16(raw_data, pos, ncols)
         
         # 0xFFFF終端マーカー検出時の処理
@@ -261,7 +263,7 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
         
         # デバッグログ記録（特定の見逃し位置のみ）
         if candidate_pos >= 0:
-            if candidate_pos >= end_pos:
+            if candidate_pos >= search_end:
                 break # 担当領域外の候補は無視
 
             # 完全行検証（ColumnMetaベース固定長検証付き）
@@ -300,19 +302,22 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
 
             if not is_valid:
                 # 検証失敗：候補位置+1から再開（16B内の他の候補を見逃さない）
-                pos = candidate_pos + 1
-                continue
+                if candidate_pos + 1 < search_end:
+                    pos = candidate_pos + 1
+                    continue
+                else:
+                    break
             
             # 検証成功 → カウント
             local_positions[local_count] = candidate_pos
             local_count += 1
             
             # 次の行開始位置へジャンプ（高速化）
-            if row_end < end_pos:
+            if row_end < search_end:
                 pos = row_end
                 continue
-
-
+            else:
+                break # 行終了位置が担当領域外なら終了
         
         # 候補が見つからない場合のみ15Bステップで1B被りオーバーラップ
         pos += 15

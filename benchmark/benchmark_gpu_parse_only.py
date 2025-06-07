@@ -146,17 +146,49 @@ def run_gpu_parse_benchmark(limit_rows=1000000, use_ultra_fast=True, debug=False
                     ultra_positions.append(row_start)
             ultra_positions = sorted(ultra_positions)
             
+            # ★重複分析を追加
+            ultra_positions_raw_count = len(ultra_positions)
+            ultra_positions_unique = list(set(ultra_positions))
+            ultra_positions_unique_count = len(ultra_positions_unique)
+            duplicate_count = ultra_positions_raw_count - ultra_positions_unique_count
+            
             # 差分分析
             conv_set = set(conventional_positions)
-            ultra_set = set(ultra_positions)
+            ultra_set = set(ultra_positions_unique)  # 重複除去後の集合を使用
             
             missing_positions = conv_set - ultra_set  # 従来版にあってUltra Fastにない
             extra_positions = ultra_set - conv_set    # Ultra Fastにあって従来版にない
             
             print(f"[DEBUG] ★従来版位置数: {len(conventional_positions)}")
-            print(f"[DEBUG] ★Ultra Fast位置数: {len(ultra_positions)}")
+            print(f"[DEBUG] ★Ultra Fast位置数（重複含む）: {ultra_positions_raw_count}")
+            print(f"[DEBUG] ★Ultra Fast位置数（重複除去後）: {ultra_positions_unique_count}")
+            print(f"[DEBUG] ★重複検出数: {duplicate_count}")
+            
+            # ★重複位置の詳細分析
+            if duplicate_count > 0:
+                from collections import Counter
+                position_counts = Counter(ultra_positions)
+                duplicates = {pos: count for pos, count in position_counts.items() if count > 1}
+                print(f"[DEBUG] ★重複位置数: {len(duplicates)}")
+                print(f"[DEBUG] ★重複位置例（最初の10個）: {list(sorted(duplicates.keys())[:10])}")
+                print(f"[DEBUG] ★重複回数例: {[duplicates[pos] for pos in sorted(duplicates.keys())[:10]]}")
+                
+                # 重複位置の分布分析
+                data_size = len(raw_host)
+                ranges = [(i*data_size//10, (i+1)*data_size//10) for i in range(10)]
+                duplicate_by_range = [0] * 10
+                
+                for pos in duplicates.keys():
+                    for i, (start, end) in enumerate(ranges):
+                        if start <= pos < end:
+                            duplicate_by_range[i] += 1
+                            break
+                
+                print(f"[DEBUG] ★重複分布（10分割）: {duplicate_by_range}")
+            
             print(f"[DEBUG] ★見逃し行数: {len(missing_positions)}")
             print(f"[DEBUG] ★余分検出数: {len(extra_positions)}")
+            print(f"[DEBUG] ★数値検証: {ultra_positions_unique_count} - {len(conventional_positions)} = {len(extra_positions)} - {len(missing_positions)} = {len(extra_positions) - len(missing_positions)}")
             
             if missing_positions:
                 missing_list = sorted(list(missing_positions))
