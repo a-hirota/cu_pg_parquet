@@ -141,13 +141,23 @@ def estimate_row_size_from_columns(columns):
 
 @cuda.jit(device=True, inline=True)
 def read_uint16_simd16(raw_data, pos, ncols):
-    """要件1: 16B読み込みで行ヘッダ探索（★高速化）"""
-    if pos + 16  > raw_data.size: # 2B単位の探索のため、16+1Bまで検索が必要 
-        return -1
+    """要件1: 16B読み込みで行ヘッダ探索（★高速化 + 0xFFFF終端検出）"""
+    if pos + 1 >= raw_data.size:  # 最低2B必要
+        return -2
+    
+    # 実際に読み込み可能な範囲を計算（0-start）
+    max_offset = min(15, raw_data.size - pos)
     
     # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
-    for i in range(0, 15):  # (pos+i+1 ≤ pos+15)
+    for i in range(0, max_offset + 1):  # 安全な範囲内でスキャン
+        if pos + i + 1 >= raw_data.size: # 最低2B必要
+            return -2
         num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]
+        
+        # 0xFFFF終端マーカー検出
+        if num_fields == 0xFFFF:
+            return -2  # 終端マーカー検出
+        
         if num_fields == ncols:
             return pos + i
     return -1
@@ -209,7 +219,7 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     
     # オーバーラップ領域（正確なestimated_row_sizeを使用）
     overlap_size = max(estimated_row_size * 2, 1024)  # 最低1KB
-    search_end = min(end_pos + overlap_size, raw_data.size - 16)
+    search_end = min(end_pos + overlap_size, raw_data.size - 1)  # 最後の1バイト手前まで探索
     
     if start_pos >= raw_data.size:
         return
@@ -223,6 +233,10 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     while pos < search_end and local_count < 256:
         # 16B読み込みで行ヘッダ"17"探索
         candidate_pos = read_uint16_simd16(raw_data, pos, ncols)
+        
+        # 0xFFFF終端マーカー検出時の処理
+        if candidate_pos == -2:
+            break  # データ終端に到達、探索終了
         
         # デバッグログ記録（特定の見逃し位置のみ）
         if candidate_pos >= 0:
