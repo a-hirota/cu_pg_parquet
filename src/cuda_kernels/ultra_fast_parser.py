@@ -121,7 +121,10 @@ def extract_fields(raw, roff, foff, flen, nrow, ncol):
 
 def estimate_row_size_from_columns(columns):
     """要件0: ColumnMetaから行サイズ推定（★実装）"""
-    from ..types import UTF8, DECIMAL128
+    try:
+        from ..types import UTF8, DECIMAL128
+    except ImportError:
+        from src.types import UTF8, DECIMAL128
     
     size = 2  # フィールド数(2B)
     for col in columns:
@@ -329,15 +332,65 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
             if base_idx + i < max_rows:
                 row_positions[base_idx + i] = local_positions[i]
 
+def get_device_properties():
+    """GPU デバイス特性を取得"""
+    device = cuda.get_current_device()
+    return {
+        'MULTIPROCESSOR_COUNT': device.MULTIPROCESSOR_COUNT,
+        'MAX_THREADS_PER_BLOCK': device.MAX_THREADS_PER_BLOCK,
+        'MAX_GRID_DIM_X': device.MAX_GRID_DIM_X,
+        'MAX_GRID_DIM_Y': device.MAX_GRID_DIM_Y,
+    }
+
+def calculate_optimal_grid_sm_aware(data_size, estimated_row_size, threads_per_block=256):
+    """SMコア数を考慮した最適なグリッドサイズ計算 - メモリバウンドタスク最適化"""
+    props = get_device_properties()
+    
+    sm_count = props.get('MULTIPROCESSOR_COUNT', 108)  # デバイス固有のSM数
+    max_blocks_x = props.get('MAX_GRID_DIM_X', 65535)
+    max_blocks_y = props.get('MAX_GRID_DIM_Y', 65535)
+    
+    # データサイズベースの基本必要ブロック数
+    num_threads = (data_size + estimated_row_size - 1) // estimated_row_size
+    base_blocks = (num_threads + threads_per_block - 1) // threads_per_block
+    
+    data_mb = data_size / (1024 * 1024)
+    
+    # ★データサイズ閾値: 50MB未満は従来方式、50MB以上でSM最適化適用
+    if data_mb < 50:
+        # 小〜中データ: 従来のデータベース計算（精度重視）
+        target_blocks = min(base_blocks, sm_count * 2)  # 適度なSM活用
+    else:
+        # ★大データのみSM最適化適用（メモリバウンドタスク向け）
+        # キャッシュ効率とメモリ帯域を重視した適応的ブロック配置
+        if data_mb < 200:
+            # 中〜大データ: メモリバウンド最適範囲（4-6ブロック/SM）
+            target_blocks = max(sm_count * 4, min(base_blocks, sm_count * 6))
+        else:
+            # 超大データ: データ並列性とメモリ帯域のバランス（6-12ブロック/SM）
+            target_blocks = max(sm_count * 6, min(base_blocks, sm_count * 12))
+    
+    # 最低限のSM活用保証（全SM使用）
+    target_blocks = max(target_blocks, sm_count)  # 最低1ブロック/SM
+    
+    # 2次元グリッド配置
+    blocks_x = min(target_blocks, max_blocks_x)
+    blocks_y = min((target_blocks + blocks_x - 1) // blocks_x, max_blocks_y)
+    
+    return blocks_x, blocks_y
+
 def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = None, *, debug: bool=False):
-    """★完全実装版: 方針B + 詳細デバッグで原因特定 + 動的固定長検証"""
+    """★完全実装版: 方針B + 詳細デバッグで原因特定 + 動的固定長検証 + SM対応最適化"""
     if header_size is None:
         header_size = 19
     
     ncols = len(columns)
     
     # ★ColumnMetaから固定長フィールド情報を動的抽出（PostgreSQLバイナリサイズ使用）
-    from ..types import PG_OID_TO_BINARY_SIZE
+    try:
+        from ..types import PG_OID_TO_BINARY_SIZE
+    except ImportError:
+        from src.types import PG_OID_TO_BINARY_SIZE
     
     fixed_field_lengths = np.full(ncols, -1, dtype=np.int32)  # -1は可変長
     for i, column in enumerate(columns):
@@ -355,34 +408,40 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     # データサイズ
     data_size = raw_dev.size - header_size
     
-    # 方針C: 2次元グリッドで大規模並列処理
-    max_gpu_threads = 1048576  # 2^20 = 1Mスレッド（16倍増加）
+    # ★SM対応グリッド配置（デバイス特性を考慮した最適化）
     threads_per_block = 256
-    max_total_blocks = max_gpu_threads // threads_per_block  # 4096ブロック
+    blocks_x, blocks_y = calculate_optimal_grid_sm_aware(
+        data_size, estimated_row_size, threads_per_block
+    )
     
-    # 完全カバレッジ: 切り上げ除算で端数領域も含める
-    thread_stride = (data_size + max_gpu_threads - 1) // max_gpu_threads
+    # ★実際に起動するスレッド数でthread_strideを計算（100%カバレッジ保証）
+    actual_threads = blocks_x * blocks_y * threads_per_block
+    thread_stride = (data_size + actual_threads - 1) // actual_threads
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size  # 最小でも推定行サイズ
     
-    # 実際のスレッド数とブロック配置
-    num_threads = min((data_size + thread_stride - 1) // thread_stride, max_gpu_threads)
-    total_blocks = min((num_threads + threads_per_block - 1) // threads_per_block, max_total_blocks)
+    # SM対応最適化後の実際の値
+    num_threads = actual_threads
+    total_blocks = blocks_x * blocks_y
     
-    # 2次元グリッド配置（CUDAの1次元制限を回避）
-    max_blocks_per_dim = 65535
-    blocks_x = min(total_blocks, max_blocks_per_dim)
-    blocks_y = (total_blocks + blocks_x - 1) // blocks_x
+    # GPU特性情報の取得（debugモードに関係なく必要）
+    props = get_device_properties()
+    sm_count = props.get('MULTIPROCESSOR_COUNT', 'Unknown')
+    max_threads = props.get('MAX_THREADS_PER_BLOCK', 'Unknown')
+    max_blocks_per_dim = props.get('MAX_GRID_DIM_X', 65535)
     
-    # ★詳細デバッグ: 2次元グリッド + 完全カバレッジ分析 + 固定長フィールド情報
+    # ★詳細デバッグ: SM対応グリッド + 完全カバレッジ分析 + 固定長フィールド情報
     if debug:
-        print(f"[DEBUG] ★Ultra Fast v3 (方針C: 2次元グリッド): ncols={ncols}, estimated_row_size={estimated_row_size}")
+        
+        print(f"[DEBUG] ★Ultra Fast v4 (SM対応): ncols={ncols}, estimated_row_size={estimated_row_size}")
+        print(f"[DEBUG] ★GPU特性: SM数={sm_count}, 最大スレッド/ブロック={max_threads}")
         print(f"[DEBUG] ★data_size={data_size//1024//1024}MB ({data_size}B)")
         fixed_count = sum(1 for x in fixed_field_lengths if x > 0)
         fixed_info = [f'{i}:{x}B' for i, x in enumerate(fixed_field_lengths) if x > 0]
         print(f"[DEBUG] ★固定長フィールド検証: {fixed_count}/{ncols}個 ({fixed_info})")
         print(f"[DEBUG] ★設計値: threads={num_threads}, total_blocks={total_blocks}")
-        print(f"[DEBUG] ★2次元グリッド: ({blocks_x}, {blocks_y}) × {threads_per_block}threads")
+        print(f"[DEBUG] ★SM対応グリッド: ({blocks_x}, {blocks_y}) × {threads_per_block}threads")
+        print(f"[DEBUG] ★実際のブロック数: {blocks_x * blocks_y} (SM効率: {(blocks_x * blocks_y) / sm_count:.1f}ブロック/SM)")
         print(f"[DEBUG] ★thread_stride={thread_stride}B (密度: {data_size//num_threads}B/thread)")
         
         # カバレッジ計算（実際のカバー範囲を正確に表示）
@@ -392,11 +451,12 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
         print(f"[DEBUG] ★期待カバー範囲: {coverage_bytes//1024//1024}MB ({coverage_bytes}B)")
         print(f"[DEBUG] ★カバレッジ: {coverage_ratio*100:.3f}% (不足: {coverage_gap}B)")
         
-        # GPU制限チェック
-        if num_threads == max_gpu_threads:
-            print(f"[DEBUG] ★GPU制限に到達: {max_gpu_threads}スレッド")
-        if total_blocks == max_total_blocks:
-            print(f"[DEBUG] ★ブロック制限に到達: {max_total_blocks}ブロック")
+        # GPU制限チェック（SM対応最適化後は基本的に制限なし）
+        max_possible_threads = max_blocks_per_dim * max_blocks_per_dim * threads_per_block
+        if num_threads >= max_possible_threads:
+            print(f"[DEBUG] ★GPU制限に到達: {num_threads}スレッド")
+        if total_blocks >= max_blocks_per_dim:
+            print(f"[DEBUG] ★ブロック制限に到達: {total_blocks}ブロック")
     
     # デバイス配列準備
     max_rows = min(2_000_000, (data_size // estimated_row_size) * 2)
@@ -574,10 +634,20 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
 def parse_binary_chunk_gpu_ultra_fast(raw_dev, ncols: int, header_size: int = None, first_col_size: int = None, *, debug: bool=False):
     """下位互換ラッパー（従来インターフェース対応）"""
     # 簡易的なcolumns作成
-    from ..types import ColumnMeta, INT32
+    try:
+        from ..types import ColumnMeta, INT32
+    except ImportError:
+        from src.types import ColumnMeta, INT32
+    
     columns = [ColumnMeta(name=f"col_{i}", pg_oid=23, pg_typmod=0,
                          arrow_id=INT32, elem_size=4) for i in range(ncols)]
     
     return parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size, debug=debug)
 
-__all__ = ["parse_binary_chunk_gpu_ultra_fast", "parse_binary_chunk_gpu_ultra_fast_v2", "estimate_row_size_from_columns"]
+__all__ = [
+    "parse_binary_chunk_gpu_ultra_fast",
+    "parse_binary_chunk_gpu_ultra_fast_v2",
+    "estimate_row_size_from_columns",
+    "get_device_properties",
+    "calculate_optimal_grid_sm_aware"
+]
