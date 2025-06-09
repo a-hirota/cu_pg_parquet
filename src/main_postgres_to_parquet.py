@@ -411,8 +411,37 @@ class ZeroCopyProcessor:
         print("\n--- 詳細タイミング ---")
         for key, value in timing.items():
             if isinstance(value, (int, float)):
-                print(f"  {key:20}: {value:.4f} 秒")
+                # decode_and_exportの内訳を階層表示
+                if key == 'decode_and_export':
+                    print(f"  {key:20}: {value:.4f} 秒")
+                    # 内訳項目を表示
+                    preparation_time = timing.get('preparation', 0)
+                    kernel_time = timing.get('kernel_execution', 0)
+                    cudf_time = timing.get('cudf_creation', 0)
+                    if preparation_time > 0:
+                        print(f"    ├─ preparation   : {preparation_time:.4f} 秒")
+                    if kernel_time > 0:
+                        print(f"    ├─ gpu_decode      : {kernel_time:.4f} 秒")
+                    if cudf_time > 0:
+                        print(f"    └─ cudf_creation : {cudf_time:.4f} 秒")
+                # parquet_exportの内訳を階層表示
+                elif key == 'parquet_export':
+                    print(f"  {key:20}: {value:.4f} 秒")
+                    # parquet_detailsから詳細を取得
+                    parquet_details = timing.get('parquet_details', {})
+                    if isinstance(parquet_details, dict):
+                        cudf_direct_time = parquet_details.get('cudf_direct', 0)
+                        if cudf_direct_time > 0:
+                            print(f"    └─ cudf_direct   : {cudf_direct_time:.4f} 秒")
+                # 内訳項目は個別表示をスキップ
+                elif key in ['preparation', 'kernel_execution', 'cudf_creation']:
+                    continue
+                else:
+                    print(f"  {key:20}: {value:.4f} 秒")
             elif isinstance(value, dict):
+                # parquet_detailsは階層表示済みなのでスキップ
+                if key == 'parquet_details':
+                    continue
                 print(f"  {key:20}: (詳細は省略)")
                 for sub_key, sub_value in value.items():
                     if isinstance(sub_value, (int, float)):
