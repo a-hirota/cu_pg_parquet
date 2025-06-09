@@ -143,28 +143,29 @@ def run_benchmark(limit_rows=1000000):
         for col_name, dtype in verification_df.dtypes.items():
             print(f"  {col_name}: {dtype}")
         
-        print("\n--- cuDF DataFrame Head ---")
-        # 全カラムを表示するための設定
+        print("\n--- cuDF DataFrame Head (全列表示) ---")
+        # pandas設定を使用して全列を強制表示
+        import pandas as pd
+        
+        # DataFrameを文字列として表示し、全列を確実に表示
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.max_colwidth', 20)
+        
         try:
-            # cuDF 24.x以降の設定を試行
-            with cudf.option_context('display.max_columns', None, 'display.width', None):
-                print(verification_df.head())
+            # cuDFをpandasに変換して全列表示
+            pandas_df = verification_df.to_pandas()
+            print(pandas_df.head())
         except Exception:
-            try:
-                # pandas互換の設定を試行
-                import pandas as pd
-                with pd.option_context('display.max_columns', None, 'display.width', None):
-                    print(verification_df.head())
-            except Exception:
-                # フォールバック: 列を分割して表示
-                n_cols = len(verification_df.columns)
-                if n_cols > 10:
-                    print("前半列:")
-                    print(verification_df.iloc[:, :10].head())
-                    print("後半列:")
-                    print(verification_df.iloc[:, 10:].head())
-                else:
-                    print(verification_df.head())
+            # フォールバック: 列を一つずつ表示
+            print("cuDF Head (列別表示):")
+            for i, col_name in enumerate(verification_df.columns):
+                print(f"  列{i+1:2d} {col_name:20s}: {verification_df[col_name].iloc[:3].to_pandas().tolist()}")
+        
+        # 設定をリセット
+        pd.reset_option('display.max_columns')
+        pd.reset_option('display.width')
+        pd.reset_option('display.max_colwidth')
         
         # 基本統計情報
         print("\n基本統計:")
