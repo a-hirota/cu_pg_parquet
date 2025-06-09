@@ -142,28 +142,21 @@ def estimate_row_size_from_columns(columns):
     # ★メモリバンクコンフリクト回避: 32B境界整列
     return ((size + 31) // 32) * 32
 
-@cuda.jit(device=True, inline=True)
-def read_uint16_simd16(raw_data, pos, end_pos,ncols):
-    """要件1: 16B読み込みで行ヘッダ探索（★高速化 + 0xFFFF終端検出）"""
-    if pos + 1 > raw_data.size:  # 最低2B必要
-        return -2
+# @cuda.jit(device=True, inline=True)
+# def read_uint16_simd16(raw_data, pos, end_pos,ncols):
+#     """要件1: 16B読み込みで行ヘッダ探索（★高速化 + 0xFFFF終端検出）"""
+#     if pos + 1 > raw_data.size:  # 最低2B必要
+#         return -2
     
-    # 実際に読み込み可能な範囲を計算
-    max_offset = min(16, raw_data.size - pos + 1)
+#     # 実際に読み込み可能な範囲を計算
+#     max_offset = min(16, raw_data.size - pos + 1)
     
-    # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
-    for i in range(0, max_offset):  # 安全な範囲内でスキャン
-        if pos + i + 1 >= raw_data.size : # 最低2B必要
-            return -2
-        num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]
-        
-        # 0xFFFF終端マーカー検出
-        if num_fields == 0xFFFF:
-            return -2  # 終端マーカー検出
-        
-        if num_fields == ncols:
-            return pos + i
-    return -1
+#     # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
+#     for i in range(0, max_offset):  # 安全な範囲内でスキャン
+#         num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]
+#         if num_fields == ncols:
+#             return pos + i
+#     return -1
 
 @cuda.jit(device=True, inline=True)
 def read_uint16_simd16_in_thread(raw_data, pos, end_pos, ncols):
@@ -171,20 +164,19 @@ def read_uint16_simd16_in_thread(raw_data, pos, end_pos, ncols):
     
     # 実際に読み込み可能な範囲を計算
     # max_offset = min(16, raw_data.size - pos + 1)
-    min_end = min(end_pos, raw_data.size)
-    
-    if pos + 1 > min_end: # 最低2B必要
+
+    if pos + 1 > raw_data.size:  # 最低2B必要(終端位置)
         return -2
+
+    if pos + 1 > end_pos: # 最低2B必要(担当外)
+        return -3
     
+    min_end = min(end_pos, raw_data.size)    
     max_offset = min(16, min_end - pos + 1)
     
     # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
     for i in range(0, max_offset):  # 安全な範囲内でスキャン
         num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]        
-        # 0xFFFF終端マーカー検出
-        if num_fields == 0xFFFF:
-            return -3  # 終端マーカー検出
-        
         if num_fields == ncols:
             return pos + i
     return -1
@@ -242,7 +234,7 @@ def validate_complete_row_fast(raw_data, row_start, expected_cols, fixed_field_l
 @cuda.jit
 def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_size, ncols,
                            row_positions, row_count, max_rows, fixed_field_lengths, debug_array=None):
-    """★初期化徹底版: 未初期化メモリ問題を完全解決"""
+    """★初期化徹底版: 未初期化メモリ問題を完全解決 + whileループ終了原因トラッキング"""
     
     # ★共有メモリ拡張版（GPU制限: 48KB/ブロック）
     # lineorder worst-case: 512スレッド × 平均231B = 180KB範囲で最大1000行程度
@@ -288,20 +280,48 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     # ★Numba制約対応：ローカル配列は使用時に初期化
     local_count = 0
     pos = start_pos
+    loop_iterations = 0
+    exit_reason = 0  # 0:未設定, 1:正常終了(pos>=end_pos), 2:終端マーカー, 3:候補位置が担当外, 4:検証失敗で担当外, 5:row_end >= end_pos
     
-    # ★高速行検出ループ（元の実装を維持）
-    while pos < end_pos:# and local_count < 256:
+    # ★高速行検出ループ（詳細動作トラッキング付き）
+    # 見逃し担当スレッドの詳細ログ用配列（特定スレッドのみ）
+    target_thread_82496 = (tid == 82496)
+    target_thread_529584 = (tid == 529584)
+    is_target_thread = target_thread_82496 or target_thread_529584
+    
+    while pos < end_pos:
+        loop_iterations += 1
+        old_pos = pos  # ★ループ開始時の位置を記録
+        
         candidate_pos = read_uint16_simd16_in_thread(raw_data, pos, end_pos,ncols)
         
         if candidate_pos <= -2: # 終端マーカー検出
+            exit_reason = 2
             break  # データ終端
 
         if candidate_pos == -1: # 行ヘッダ候補なし
             pos += 15  # 15Bステップ（元の設計に戻す）
+            # ★特定スレッドの詳細ログ：15Bステップ
+            if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                step_log_base = 1000 + loop_iterations * 4
+                if step_log_base + 3 < len(debug_array):
+                    debug_array[step_log_base] = old_pos         # ステップ前位置
+                    debug_array[step_log_base + 1] = pos         # ステップ後位置
+                    debug_array[step_log_base + 2] = -1          # candidate_pos = -1
+                    debug_array[step_log_base + 3] = 15          # 15Bステップ実行
             continue
         
         if candidate_pos >= 0: # 有効な行ヘッダ候補あり
             if candidate_pos >= end_pos: # 最近傍が担当外のためloop終了
+                exit_reason = 3
+                # ★特定スレッドの詳細ログ：候補位置が担当外
+                if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                    exit_log_base = 1000 + loop_iterations * 4
+                    if exit_log_base + 3 < len(debug_array):
+                        debug_array[exit_log_base] = old_pos         # 終了時位置
+                        debug_array[exit_log_base + 1] = candidate_pos  # 担当外候補位置
+                        debug_array[exit_log_base + 2] = end_pos        # end_pos
+                        debug_array[exit_log_base + 3] = 3              # exit_reason = 3
                 break
             
             # 完全行検証
@@ -309,21 +329,110 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
             if not is_valid:
                 if candidate_pos + 1 < end_pos:
                     pos = candidate_pos + 1
+                    # ★特定スレッドの詳細ログ：検証失敗、+1で継続
+                    if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                        fail_log_base = 1000 + loop_iterations * 4
+                        if fail_log_base + 3 < len(debug_array):
+                            debug_array[fail_log_base] = candidate_pos      # 検証失敗位置
+                            debug_array[fail_log_base + 1] = pos            # +1後位置
+                            debug_array[fail_log_base + 2] = row_end        # row_end値
+                            debug_array[fail_log_base + 3] = -99            # 検証失敗マーカー
                     continue
                 else: # 最近傍+1も担当外のためloop終了
+                    exit_reason = 4
+                    # ★特定スレッドの詳細ログ：検証失敗で担当外
+                    if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                        exit_log_base = 1000 + loop_iterations * 4
+                        if exit_log_base + 3 < len(debug_array):
+                            debug_array[exit_log_base] = candidate_pos      # 検証失敗位置
+                            debug_array[exit_log_base + 1] = candidate_pos + 1  # +1予定位置
+                            debug_array[exit_log_base + 2] = end_pos            # end_pos
+                            debug_array[exit_log_base + 3] = 4                  # exit_reason = 4
                     break
             
             # 検証成功 → ローカル保存（安全性チェック付き）
-            # if local_count < 256 and candidate_pos >= 0:  # 配列境界と有効性チェック
             local_positions[local_count] = candidate_pos
             local_count += 1
+            
+            # ★最後のrow_end値を記録
+            last_row_end = row_end
             
             # 次の行開始位置へジャンプ（境界条件改善）
             if row_end > 0 and row_end < end_pos:
                 pos = row_end
+                # ★特定スレッドの詳細ログ：検証成功、row_endジャンプ
+                if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                    success_log_base = 1000 + loop_iterations * 4
+                    if success_log_base + 3 < len(debug_array):
+                        debug_array[success_log_base] = candidate_pos       # 検証成功位置
+                        debug_array[success_log_base + 1] = row_end         # ジャンプ先
+                        debug_array[success_log_base + 2] = local_count     # 検出カウント
+                        debug_array[success_log_base + 3] = 99              # 検証成功マーカー
                 continue
             else: # row_endより手前は行ヘッダなし。row_end以降は担当外のため
-               break
+                exit_reason = 5
+                # ★特定スレッドの詳細ログ：row_end >= end_pos
+                if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+                    exit_log_base = 1000 + loop_iterations * 4
+                    if exit_log_base + 3 < len(debug_array):
+                        debug_array[exit_log_base] = candidate_pos          # 検証成功位置
+                        debug_array[exit_log_base + 1] = row_end            # row_end値
+                        debug_array[exit_log_base + 2] = end_pos            # end_pos値
+                        debug_array[exit_log_base + 3] = 5                  # exit_reason = 5
+                break
+    
+    # 正常終了の場合
+    if pos >= end_pos and exit_reason == 0:
+        exit_reason = 1
+        # ★特定スレッドの詳細ログ：正常終了
+        if is_target_thread and debug_array is not None and len(debug_array) > 1000:
+            exit_log_base = 1000 + loop_iterations * 4
+            if exit_log_base + 3 < len(debug_array):
+                debug_array[exit_log_base] = pos                # 終了位置
+                debug_array[exit_log_base + 1] = end_pos        # end_pos値
+                debug_array[exit_log_base + 2] = loop_iterations # ループ回数
+                debug_array[exit_log_base + 3] = 1              # exit_reason = 1
+    
+    # ★最後の行検証時のrow_end値を記録（見逃し分析用）
+    last_row_end = -1
+    
+    # ★デバッグ記録: ループ終了原因とスレッド情報（グローバルメモリ直接書き込み方式）
+    if debug_array is not None:
+        # グローバルメモリに全スレッド情報を直接書き込み（確実な全スレッド対応）
+        # debug_array構造: 各スレッドが20要素ずつ使用 [tid*20:tid*20+19]（row_end追加）
+        thread_base = tid * 20
+        
+        if thread_base + 19 < len(debug_array):
+            debug_array[thread_base] = tid
+            debug_array[thread_base + 1] = exit_reason
+            debug_array[thread_base + 2] = pos  # 終了時のpos
+            debug_array[thread_base + 3] = local_count
+            # ★拡張デバッグ情報
+            debug_array[thread_base + 4] = start_pos
+            debug_array[thread_base + 5] = end_pos
+            debug_array[thread_base + 6] = search_end
+            debug_array[thread_base + 7] = thread_stride
+            # ★row_end情報
+            debug_array[thread_base + 8] = last_row_end  # 最後の行検証時のrow_end
+            debug_array[thread_base + 9] = loop_iterations  # ループ回数
+            debug_array[thread_base + 10] = 0  # 予約
+            debug_array[thread_base + 11] = 0  # 予約
+            
+            # ★バイトダンプ記録: 全スレッドのpos周辺32バイトを記録
+            if pos >= 32 and pos + 32 < raw_data.size:
+                # pos-16からpos+15までの32バイトを8つの4バイト整数として記録
+                dump_start = pos - 16
+                for i in range(8):
+                    byte_group = 0
+                    for j in range(4):
+                        if dump_start + i * 4 + j < raw_data.size:
+                            byte_value = raw_data[dump_start + i * 4 + j]
+                            byte_group |= (byte_value << (j * 8))
+                    debug_array[thread_base + 12 + i] = byte_group
+            else:
+                # バイトダンプ不可能な場合は0で初期化
+                for i in range(8):
+                    debug_array[thread_base + 12 + i] = 0
         
 
     
@@ -419,8 +528,8 @@ def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
     
     return blocks_x, blocks_y, threads_per_block
 
-def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = None, *, debug: bool=False):
-    """★完全実装版: 初期化徹底 + 単一パス高精度検出"""
+def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = None, traditional_positions=None, *, debug: bool=False):
+    """★完全実装版: 初期化徹底 + 単一パス高精度検出 + 動的見逃し位置検出"""
     if header_size is None:
         header_size = 19
     
@@ -500,20 +609,25 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     # ★積和方式リトライ：デバイス配列準備
     max_rows = min(2_000_000, (data_size // estimated_row_size) * 2)
     target_rows = 1_000_000  # 目標行数
-    max_attempts = 10  # 最大試行回数
+    max_attempts = 2  # デバッグ用: 2回実行（1回目で見逃し特定、2回目で詳細取得）
     
     if debug:
-        print(f"[DEBUG] ★積和方式リトライ: 目標{target_rows}行達成まで最大{max_attempts}回実行")
+        print(f"[DEBUG] ★2回ループデバッグ: 1回目で見逃し特定、2回目で詳細取得")
     
     # 累積結果保存用（CPU側）
     all_positions = set()  # 重複除去のためのセット
+    first_attempt_missing_positions = []  # 1回目で検出した見逃し位置
     
-    # デバッグ配列サイズを事前定義（複数検証失敗記録対応）
-    debug_info_size = 100  # 40 → 100に拡張（10件×6要素+基本領域40）
+    # デバッグ配列サイズを事前定義（row_end追加対応）
+    # 全スレッド基本情報: 658432 × 20 = 13,168,640要素（row_end等4要素追加）
+    debug_info_size = num_threads * 20  # 全スレッド分（row_end、ループ回数等込み）
     
     for attempt in range(max_attempts):
         if debug:
-            print(f"[DEBUG] ★試行 {attempt + 1}/{max_attempts} 開始...")
+            if attempt == 0:
+                print(f"[DEBUG] ★試行 {attempt + 1}/{max_attempts} 開始... (見逃し位置特定)")
+            else:
+                print(f"[DEBUG] ★試行 {attempt + 1}/{max_attempts} 開始... (特定スレッド詳細取得)")
         
         # ★試行毎に非決定論的要素を導入：未初期化GPUメモリを活用
         if attempt == 0:
@@ -555,8 +669,19 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
             all_positions.update(valid_positions)
             new_positions_count = len(all_positions) - before_count
         
-        if debug:
-            init_method = "完全初期化" if attempt == 0 else "未初期化活用"
+        # 1回目終了時: 見逃し位置を動的検出
+        if attempt == 0 and traditional_positions is not None and debug:
+            traditional_positions_set = set(traditional_positions)
+            ultra_fast_positions_set = set(valid_positions)
+            missing_positions_set = traditional_positions_set - ultra_fast_positions_set
+            first_attempt_missing_positions = sorted(list(missing_positions_set))[:10]
+            
+            init_method = "見逃し特定"
+            print(f"[DEBUG] ★試行 {attempt + 1}({init_method}): {nrow}行検出, 見逃し: {len(missing_positions_set)}行")
+            if first_attempt_missing_positions:
+                print(f"[DEBUG] ★1回目で特定した見逃し位置: {first_attempt_missing_positions[:5]}")
+        elif debug:
+            init_method = "詳細取得" if attempt > 0 else "見逃し特定"
             print(f"[DEBUG] ★試行 {attempt + 1}({init_method}): {nrow}行検出, 新規追加: {new_positions_count}行, 累積ユニーク: {len(all_positions)}行")
         
         # 目標達成チェック
@@ -695,6 +820,221 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
                     print(f"  ★検証失敗原因: 不正な次ヘッダ値({next_header})")
                 else:
                     print(f"  ★検証失敗原因: フィールド検証で失敗（次ヘッダ値は正常）")
+        
+        # ★新機能: whileループ終了原因の分析（全スレッド対応 - グローバルメモリ直接読み取り）
+        print(f"[DEBUG] ★Whileループ終了原因分析（全スレッド対応 - グローバルメモリ直接方式）:")
+        
+        # グローバルメモリから全スレッド情報を収集
+        exit_reason_stats = {}
+        thread_info = {}  # 辞書形式（スレッドID -> 情報）
+        missing_threads = []  # 見逃し担当スレッドの詳細情報
+        
+        # 全スレッドを解析（20要素構造対応）
+        valid_records = 0
+        for tid in range(num_threads):
+            thread_base = tid * 20
+            if thread_base + 19 < len(debug_results):
+                thread_id = debug_results[thread_base]
+                exit_reason = debug_results[thread_base + 1]
+                final_pos = debug_results[thread_base + 2]
+                detected_rows = debug_results[thread_base + 3]
+                # ★拡張デバッグ情報
+                start_pos_debug = debug_results[thread_base + 4]
+                end_pos_debug = debug_results[thread_base + 5]
+                search_end_debug = debug_results[thread_base + 6]
+                thread_stride_debug = debug_results[thread_base + 7]
+                # ★row_end情報
+                last_row_end_debug = debug_results[thread_base + 8]
+                loop_iterations_debug = debug_results[thread_base + 9]
+                # ★バイトダンプ情報
+                byte_dump = []
+                for i in range(8):
+                    byte_dump.append(debug_results[thread_base + 12 + i])
+                
+                # 有効なスレッド情報かチェック（thread_idが自分自身と一致）
+                if thread_id == tid:
+                    valid_records += 1
+                    if exit_reason not in exit_reason_stats:
+                        exit_reason_stats[exit_reason] = 0
+                    exit_reason_stats[exit_reason] += 1
+                    
+                    thread_info[thread_id] = {
+                        'tid': thread_id,
+                        'reason': exit_reason,
+                        'final_pos': final_pos,
+                        'detected_rows': detected_rows,
+                        # ★拡張デバッグ情報
+                        'start_pos': start_pos_debug,
+                        'end_pos': end_pos_debug,
+                        'search_end': search_end_debug,
+                        'thread_stride': thread_stride_debug,
+                        # ★row_end情報
+                        'last_row_end': last_row_end_debug,
+                        'loop_iterations': loop_iterations_debug,
+                        # ★バイトダンプ情報
+                        'byte_dump': byte_dump
+                    }
+        
+        print(f"  有効な記録数: {valid_records}/{num_threads}")
+        
+        # 終了原因の説明
+        reason_names = {
+            0: "未設定（異常）",
+            1: "正常終了(pos>=end_pos)",
+            2: "終端マーカー検出",
+            3: "候補位置が担当外",
+            4: "検証失敗で担当外",
+            5: "row_end >= end_pos"
+        }
+        
+        print(f"  終了原因統計:")
+        for reason, count in sorted(exit_reason_stats.items()):
+            reason_name = reason_names.get(reason, f"未知({reason})")
+            print(f"    {reason_name}: {count}スレッド")
+        
+        # ★見逃し担当スレッドの特定と詳細分析
+        # 1回目で特定した見逃し位置を活用
+        if first_attempt_missing_positions:
+            known_missing_positions = first_attempt_missing_positions
+            if debug:
+                print(f"[DEBUG] ★1回目で特定した見逃し位置を活用: {known_missing_positions}")
+        elif traditional_positions is not None:
+            # 最終結果での見逃し位置検出
+            traditional_positions_set = set(traditional_positions)
+            final_ultra_fast_positions = list(all_positions)
+            ultra_fast_positions_set = set(final_ultra_fast_positions)
+            missing_positions_set = traditional_positions_set - ultra_fast_positions_set
+            known_missing_positions = sorted(list(missing_positions_set))[:10]
+            if debug:
+                print(f"[DEBUG] ★最終結果から見逃し位置を検出: {len(missing_positions_set)}行見逃し")
+        else:
+            # フォールバック: 従来版位置なしの場合
+            known_missing_positions = []
+            if debug:
+                print(f"[DEBUG] ★従来版位置が提供されていません")
+        
+        print(f"\n  ★見逃し担当スレッドの詳細分析:")
+        for missing_pos in known_missing_positions:
+            # 担当スレッドID計算
+            responsible_tid = (missing_pos - header_size) // thread_stride
+            
+            print(f"\n    見逃し位置 {missing_pos}:")
+            print(f"      計算された担当Thread: {responsible_tid}")
+            
+            # グローバルメモリから該当スレッドの情報を取得
+            if responsible_tid in thread_info:
+                info = thread_info[responsible_tid]
+                reason_name = reason_names.get(info['reason'], f"未知({info['reason']})")
+                
+                print(f"      ★Thread {responsible_tid}の終了原因: {reason_name}")
+                print(f"      ★実際の値検証:")
+                print(f"        start_pos (計算値): {header_size + responsible_tid * thread_stride}")
+                print(f"        start_pos (実測値): {info['start_pos']}")
+                print(f"        end_pos   (計算値): {header_size + (responsible_tid + 1) * thread_stride}")
+                print(f"        end_pos   (実測値): {info['end_pos']}")
+                print(f"        search_end        : {info['search_end']}")
+                print(f"        thread_stride     : {info['thread_stride']}")
+                print(f"        終了位置 (final_pos): {info['final_pos']}")
+                print(f"        最後のrow_end     : {info['last_row_end']}")
+                print(f"        ループ回数        : {info['loop_iterations']}")
+                print(f"        検出行数          : {info['detected_rows']}")
+                
+                # 実測値での範囲判定
+                actual_start = info['start_pos']
+                actual_end = info['end_pos']
+                actual_search_end = info['search_end']
+                
+                print(f"      ★実測範囲: {actual_start}-{actual_end} (search_end={actual_search_end})")
+                
+                # ★バイトダンプ解析（見逃し担当スレッドのみ）
+                if responsible_tid in [82496, 529584]:
+                    print(f"      ★バイトダンプ解析 (pos={info['final_pos']}周辺32バイト):")
+                    byte_dump = info['byte_dump']
+                    hex_bytes = []
+                    ascii_chars = []
+                    
+                    for i, int_value in enumerate(byte_dump):
+                        if int_value != 0:  # 有効なデータがある場合
+                            for j in range(4):
+                                byte_val = (int_value >> (j * 8)) & 0xFF
+                                hex_bytes.append(f"{byte_val:02x}")
+                                ascii_chars.append(chr(byte_val) if 32 <= byte_val <= 126 else '.')
+                    
+                    if hex_bytes:
+                        # 16バイトずつ2行で表示
+                        print(f"        HEX: {' '.join(hex_bytes[:16])}")
+                        print(f"             {' '.join(hex_bytes[16:32])}")
+                        print(f"        ASCII: {''.join(ascii_chars[:16])}")
+                        print(f"               {''.join(ascii_chars[16:32])}")
+                        
+                        # 見逃し位置と終了位置の関係分析
+                        dump_start = info['final_pos'] - 16
+                        missing_offset = missing_pos - dump_start
+                        print(f"        見逃し位置オフセット: {missing_offset} (dump_start={dump_start})")
+                        if 0 <= missing_offset < 32:
+                            print(f"        ★見逃し位置がダンプ範囲内！オフセット{missing_offset}番目")
+                
+                # 位置が担当範囲内かチェック（実測値使用）
+                if actual_start <= missing_pos < actual_end:
+                    print(f"      ★範囲判定: 担当範囲内（見逃し確定）")
+                    
+                    # 15Bステップでの捕捉可能性分析
+                    step_number = (missing_pos - actual_start) // 15
+                    step_pos = actual_start + step_number * 15
+                    read_end = step_pos + 15
+                    
+                    print(f"      15Bステップ進行: step#{step_number}, 読み込み範囲 {step_pos}-{read_end}")
+                    if step_pos <= missing_pos <= read_end:
+                        print(f"      ★捕捉判定: 理論上検出可能")
+                        print(f"      ★根本原因詳細分析:")
+                        print(f"        終了条件: pos < end_pos ({info['final_pos']} < {actual_end})")
+                        print(f"        終了条件: pos < search_end ({info['final_pos']} < {actual_search_end})")
+                        print(f"        row_end >= end_pos 検証: final_pos >= end_pos = {info['final_pos']} >= {actual_end} = {info['final_pos'] >= actual_end}")
+                        print(f"        last_row_end >= end_pos検証: {info['last_row_end']} >= {actual_end} = {info['last_row_end'] >= actual_end}")
+                        print(f"        ★真の問題: {reason_name}により早期終了で位置{missing_pos}に未到達")
+                    else:
+                        print(f"      ★捕捉判定: 15Bステップの隙間に位置")
+                elif actual_start <= missing_pos < actual_search_end:
+                    print(f"      ★範囲判定: search_end範囲内（オーバーラップ領域）")
+                else:
+                    print(f"      ★範囲判定: 担当範囲外（境界問題）")
+                
+                missing_threads.append(info)
+            else:
+                print(f"      ❌ Thread {responsible_tid}の情報が記録されていません")
+                print(f"         (有効記録: {valid_records}スレッド/{num_threads}スレッド)")
+        
+        # 詳細分析: 検出行数が0のスレッドの原因
+        zero_detection_threads = [info for info in thread_info.values() if info['detected_rows'] == 0]
+        if zero_detection_threads:
+            print(f"\n  検出行数0のスレッド詳細（{len(zero_detection_threads)}件）:")
+            reason_distribution = {}
+            for t in zero_detection_threads[:10]:  # 最初の10件表示
+                reason_name = reason_names.get(t['reason'], f"未知({t['reason']})")
+                if reason_name not in reason_distribution:
+                    reason_distribution[reason_name] = 0
+                reason_distribution[reason_name] += 1
+                
+                # スレッドの担当範囲計算
+                start_pos = header_size + t['tid'] * thread_stride
+                end_pos = header_size + (t['tid'] + 1) * thread_stride
+                coverage = end_pos - start_pos
+                
+                print(f"    Thread {t['tid']}: {reason_name}")
+                print(f"      担当範囲: {start_pos}-{end_pos} ({coverage}B)")
+                print(f"      終了位置: {t['final_pos']}")
+            
+            print(f"    検出失敗の主因:")
+            for reason, count in sorted(reason_distribution.items(), key=lambda x: x[1], reverse=True):
+                print(f"      {reason}: {count}スレッド")
+        
+        # ★グローバルメモリ記録の有効性確認
+        total_collected = len(thread_info)
+        expected_threads = num_threads
+        coverage_ratio = total_collected / expected_threads
+        print(f"\n  ★グローバルメモリ収集率: {total_collected}/{expected_threads} ({coverage_ratio*100:.1f}%)")
+        if coverage_ratio < 0.9:
+            print(f"  ⚠️ 収集率が低い: グローバルメモリ書き込みに問題がある可能性")
     
     print(f"[DEBUG] ★Ultra Fast v8 (初期化徹底版) detected {nrow} rows")
     

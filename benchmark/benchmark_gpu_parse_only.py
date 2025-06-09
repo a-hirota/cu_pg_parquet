@@ -126,7 +126,7 @@ def run_gpu_parse_benchmark(limit_rows=1000000, use_ultra_fast=True, debug=False
         print(f"[DEBUG] ★Using Ultra Fast Parser v2.0 - 4要件完全実装版")
         
         field_offsets_ultra, field_lengths_ultra = parse_binary_chunk_gpu_ultra_fast_v2(
-            raw_dev, columns, header_size=header_size, debug=debug
+            raw_dev, columns, header_size=header_size, traditional_positions=conventional_positions, debug=debug
         )
         ultra_time = time.time() - ultra_start
         rows_ultra = field_offsets_ultra.shape[0]
