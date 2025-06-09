@@ -12,32 +12,6 @@ Ultra Fast PostgreSQL Binary Parser – coalescing‑fix v7
 from numba import cuda, int32, types
 import numpy as np
 
-# ───── パラメータ ─────
-ROWS_PER_TILE       = 32
-ALIGN_BYTES         = 16
-WARP_STRIDE         = ROWS_PER_TILE * ALIGN_BYTES
-TILE_BYTES          = WARP_STRIDE * 32
-MAX_HITS_PER_THREAD = 512
-MAX_FIELD_LEN       = 8_388_608
-
-@cuda.jit(device=True, inline=True)
-def read_uint16_simd8(buf, off, expected_cols):
-    for i in range(8):
-        p = off + i*2
-        if p+1 < buf.size:
-            v = (buf[p] << 8) | buf[p+1]
-            if v == expected_cols:  # ピンポイント検出
-                return v, i*2
-    return 0xFFFF, -1
-
-@cuda.jit(device=True, inline=True)
-def load16(raw_data, gpos, shmem, sh_off):
-    if sh_off + ALIGN_BYTES >= shmem.size or gpos + 15 >= raw_data.size:
-        return False
-    for i in range(ALIGN_BYTES):
-        shmem[sh_off + i] = raw_data[gpos + i]
-    return True
-
 # row_cnt[0]: グローバルメモリ上の行カウント。atomic に加算し row_off[] の書き込み先を確保。
 # row_off[]: 各行の開始オフセットを保持。次段階の列抽出カーネルで参照される。
 @cuda.jit
@@ -142,40 +116,21 @@ def estimate_row_size_from_columns(columns):
     # ★メモリバンクコンフリクト回避: 32B境界整列
     return ((size + 31) // 32) * 32
 
-# @cuda.jit(device=True, inline=True)
-# def read_uint16_simd16(raw_data, pos, end_pos,ncols):
-#     """要件1: 16B読み込みで行ヘッダ探索（★高速化 + 0xFFFF終端検出）"""
-#     if pos + 1 > raw_data.size:  # 最低2B必要
-#         return -2
-    
-#     # 実際に読み込み可能な範囲を計算
-#     max_offset = min(16, raw_data.size - pos + 1)
-    
-#     # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
-#     for i in range(0, max_offset):  # 安全な範囲内でスキャン
-#         num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]
-#         if num_fields == ncols:
-#             return pos + i
-#     return -1
-
 @cuda.jit(device=True, inline=True)
-def read_uint16_simd16_in_thread(raw_data, pos, end_pos, ncols):
-    """要件1: 16B読み込みで行ヘッダ探索（★高速化 + 0xFFFF終端検出）"""
-    
-    # 実際に読み込み可能な範囲を計算
-    # max_offset = min(16, raw_data.size - pos + 1)
-
+def read_uint16_simd16(raw_data, pos, end_pos, ncols):
+   
+    # 終端位置を超えないようにする
     if pos + 1 > raw_data.size:  # 最低2B必要(終端位置)
         return -2
-
-    if pos + 1 > end_pos: # 最低2B必要(担当外)
-        return -3
-    
-    min_end = min(end_pos, raw_data.size)    
-    max_offset = min(16, min_end - pos + 1)
+   
+    max_offset = min(16, raw_data.size - pos + 1)
     
     # 16Bを一度に読み込み、全ての2B位置をチェック（0-15B全範囲）
     for i in range(0, max_offset):  # 安全な範囲内でスキャン
+        
+        # 担当範囲を超えないようにする
+        if pos + i+ 1 > end_pos: # 最低2B必要(担当外)
+            return -3    
         num_fields = (raw_data[pos + i] << 8) | raw_data[pos + i + 1]        
         if num_fields == ncols:
             return pos + i
@@ -268,7 +223,7 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
     
     # 高速行検出ループ
     while pos < end_pos:
-        candidate_pos = read_uint16_simd16_in_thread(raw_data, pos, end_pos, ncols)
+        candidate_pos = read_uint16_simd16(raw_data, pos, end_pos, ncols)
         
         if candidate_pos <= -2:  # データ終端
             break
