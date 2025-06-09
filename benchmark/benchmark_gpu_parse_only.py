@@ -214,6 +214,7 @@ def run_gpu_parse_benchmark(limit_rows=1000000, use_ultra_fast=True, debug=False
                 header_size = 19
                 thread_stride = 3502
                 
+                
                 for i, pos in enumerate(sorted(missing_positions)[:5]):  # 最初の5個
                     print(f"\n見逃し位置 {i+1}: {pos}")
                     
