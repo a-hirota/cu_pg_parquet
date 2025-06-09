@@ -168,19 +168,6 @@ class ZeroCopyProcessor:
                 )
                 cuda.synchronize()
                 
-                # デバッグ: GPU累積和の検証
-                try:
-                    offsets_host = d_offsets.copy_to_host()
-                    lengths_host = d_lengths.copy_to_host()
-                    print(f"=== GPU累積和検証 ({col.name}) ===")
-                    print(f"文字列長の最初の10要素: {lengths_host[:10]}")
-                    print(f"オフセットの最初の10要素: {offsets_host[:10]}")
-                    print(f"オフセットの最後の10要素: {offsets_host[-10:]}")
-                    print(f"文字列長統計: min={lengths_host.min()}, max={lengths_host.max()}, avg={lengths_host.mean():.2f}")
-                    print(f"総データサイズ: {offsets_host[-1]}")
-                    print("=== 検証終了 ===")
-                except Exception as e:
-                    print(f"GPU累積和検証エラー: {e}")
                 
                 # 総データサイズを取得
                 total_size_array = d_offsets[rows:rows+1].copy_to_host()
@@ -380,7 +367,7 @@ class ZeroCopyProcessor:
         # 8.94倍高速化: Ultra Fast GPU並列パーサーを使用
         from .cuda_kernels.ultra_fast_parser import parse_binary_chunk_gpu_ultra_fast_v2
         field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
-            raw_dev, columns, header_size=header_size, debug=True
+            raw_dev, columns, header_size=header_size
         )
         
         if self.optimize_gpu:

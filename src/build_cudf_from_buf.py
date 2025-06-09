@@ -78,7 +78,6 @@ class CuDFZeroCopyProcessor:
         if rows == 0:
             raise ValueError("データに行が含まれていません")
         
-        print(f"🔄 GPU統合デコード開始: {rows:,} 行 × {ncols} 列")
         
         # バッファ初期化
         buffer_info = self.gmm.initialize_buffers(columns, rows)
@@ -125,17 +124,14 @@ class CuDFZeroCopyProcessor:
         )
         
         cuda.synchronize()
-        print("✅ GPU統合デコード完了")
         
         # 文字列バッファは簡易実装（将来最適化予定）
         string_buffers = {}
         
         # cuDF DataFrame作成
-        print("🔄 cuDF ZeroCopy変換開始...")
         cudf_df = self.create_cudf_from_gpu_buffers_zero_copy(
             columns, rows, buffer_info, string_buffers
         )
-        print("✅ cuDF ZeroCopy変換完了")
         
         return cudf_df
     
@@ -201,9 +197,6 @@ class CuDFZeroCopyProcessor:
             data_buffer = buffer_info_col['data']
             offsets_buffer = buffer_info_col['offsets']
             
-            # デバッグ情報出力
-            print("offsets_buffer CAI:", offsets_buffer.__cuda_array_interface__ if hasattr(offsets_buffer, '__cuda_array_interface__') else None)
-            print("data_buffer CAI:", data_buffer.__cuda_array_interface__ if hasattr(data_buffer, '__cuda_array_interface__') else None)
             
             # CUDA Array Interface対応チェック
             if hasattr(data_buffer, '__cuda_array_interface__') and hasattr(offsets_buffer, '__cuda_array_interface__'):
@@ -230,35 +223,8 @@ class CuDFZeroCopyProcessor:
                     )
                 ))
                 
-                # オフセット配列の詳細分析（CuPy配列作成後）
-                try:
-                    offsets_host = offsets_cupy.get()
-                    print(f"=== オフセット配列分析 ({col.name}) ===")
-                    print(f"オフセット配列の最初の10要素: {offsets_host[:10]}")
-                    print(f"オフセット配列の最後の10要素: {offsets_host[-10:]}")
-                    print(f"オフセット配列サイズ: {len(offsets_host)}, 期待値: {rows + 1}")
-                    print(f"最大オフセット値: {offsets_host[-1]}, データバッファサイズ: {len(data_cupy)}")
-                    
-                    # オフセット増分の確認（文字列長）
-                    if len(offsets_host) > 1:
-                        string_lengths = offsets_host[1:] - offsets_host[:-1]
-                        print(f"文字列長の最初の10要素: {string_lengths[:10]}")
-                        print(f"文字列長の統計: min={string_lengths.min()}, max={string_lengths.max()}, avg={string_lengths.mean():.2f}")
-                        
-                        # 異常値の検出
-                        if string_lengths.min() < 0:
-                            print(f"⚠️ 負の文字列長検出！最小値: {string_lengths.min()}")
-                        if string_lengths.max() > 1000:  # 異常に長い文字列
-                            print(f"⚠️ 異常に長い文字列検出！最大値: {string_lengths.max()}")
-                            
-                    print("=== 分析終了 ===")
-                        
-                except Exception as e:
-                    print(f"オフセット分析エラー: {e}")
                 
                 # 2) RMM DeviceBufferへの変換（正しいpylibcudf方式）
-                print("=== RMM DeviceBuffer変換 ===")
-                
                 # オフセット配列をバイト配列として変換
                 offsets_host = offsets_cupy.get()
                 offsets_bytes = offsets_host.tobytes()
@@ -267,8 +233,6 @@ class CuDFZeroCopyProcessor:
                 # データ配列をバイト配列として変換
                 data_host = data_cupy.get()
                 chars_buf = rmm.DeviceBuffer.to_device(data_host.tobytes())
-                
-                print(f"✅ RMM変換完了: offsets={len(offsets_host)} elements, chars={len(data_host)} bytes")
                 
                 # 3) 子カラム作成（offsets only）
                 offsets_mv = plc.gpumemoryview(offsets_buf)
@@ -282,8 +246,6 @@ class CuDFZeroCopyProcessor:
                     []     # children
                 )
                 
-                print(f"✅ offsets_col作成完了: type={offsets_col.type()}")
-                
                 # 4) 正しいSTRING Column構築（実験で成功した方法）
                 chars_mv = plc.gpumemoryview(chars_buf)
                 parent = plc.column.Column(
@@ -296,15 +258,11 @@ class CuDFZeroCopyProcessor:
                     [offsets_col]            # offset column のみ
                 )
                 
-                print(f"✅ STRING Column作成成功: size={parent.size()}, children={parent.num_children()}")
-                
                 # 4) Python Series化（メタデータのみコピー）
                 try:
                     result_series = cudf.Series.from_pylibcudf(parent)
-                    print(f"✅ pylibcudf文字列変換成功: {col.name}")
                     return result_series
                 except Exception as series_error:
-                    print(f"⚠️ cudf.Series.from_pylibcudf失敗: {series_error}")
                     # 直接フォールバックを試行
                     raise series_error
                 
@@ -476,12 +434,6 @@ class CuDFZeroCopyProcessor:
             import pylibcudf as plc
             import cupy as cp
             
-            # デバッグ情報出力
-            print("cuDF version:", cudf.__version__)
-            print("Series has from_pylibcudf:", hasattr(cudf.Series, "from_pylibcudf"))
-            print("Series has _from_pylibcudf:", hasattr(cudf.Series, "_from_pylibcudf"))
-            print("column_buffer CAI:", column_buffer.__cuda_array_interface__)
-            
             # 1) DataType作成（DECIMAL128 + 負のスケール）
             dt = plc.types.DataType(plc.types.TypeId.DECIMAL128, -scale)
             
@@ -490,10 +442,6 @@ class CuDFZeroCopyProcessor:
             
             # 3) null mask は None で null 無しを宣言
             null_mask_mv = None
-            
-            # デバッグ情報追加
-            mask_bytes = ((rows + 31) // 32) * 4
-            print(f"mask_bytes: {mask_bytes}, rows: {rows}")
             
             # 4) Columnコンストラクタで直接GPU メモリを包む
             col_cpp = plc.column.Column(
@@ -505,8 +453,6 @@ class CuDFZeroCopyProcessor:
                 0,           # offset
                 []           # children (固定幅なので無し)
             )
-            
-            print("col_cpp:", col_cpp)
             
             # 5) Python Series化（メタデータのみコピー）
             return cudf.Series.from_pylibcudf(col_cpp)
