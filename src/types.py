@@ -46,8 +46,26 @@ PG_OID_TO_ARROW: Dict[int, Tuple[int, Optional[int]]] = {
     1184: (TS64_US, 8),   # timestamp with time zone
 }
 
+# PostgreSQL OID → PostgreSQLバイナリでの実際のサイズ マッピング表
+PG_OID_TO_BINARY_SIZE: Dict[int, Optional[int]] = {
+    20: 8,        # int8 / bigint - 固定8バイト
+    21: 2,        # int2 / smallint - 固定2バイト
+    23: 4,        # int4 / integer - 固定4バイト
+    700: 4,       # float4 / real - 固定4バイト
+    701: 8,       # float8 / double precision - 固定8バイト
+    16: 1,        # boolean - 固定1バイト
+    1082: 4,      # date - 固定4バイト
+    1114: 8,      # timestamp without time zone - 固定8バイト
+    1184: 8,      # timestamp with time zone - 固定8バイト
+    1700: None,   # numeric - 可変長
+    25: None,     # text - 可変長
+    1042: None,   # bpchar - 可変長
+    1043: None,   # varchar - 可変長
+    17: None,     # bytea - 可変長
+}
+
 __all__ = [
     "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64", "DECIMAL128",
     "UTF8", "BINARY", "DATE32", "TS64_US", "BOOL", "UNKNOWN",
-    "ColumnMeta", "PG_OID_TO_ARROW",
+    "ColumnMeta", "PG_OID_TO_ARROW", "PG_OID_TO_BINARY_SIZE",
 ]
