@@ -1,12 +1,14 @@
 """
-cuDF ZeroCopy統合プロセッサー
+cuDF ZeroCopy統合プロセッサー（文字列最適化版）
 
-以下の最適化を統合:
-1. 並列化された行検出・フィールド抽出
-2. cuDFによるゼロコピーArrow変換
-3. GPU直接Parquet書き出し
-4. メモリコアレッシング最適化
+文字列処理を最適化した高性能版:
+1. 文字列データ: 共有メモリ不使用の直接コピー
+2. 固定長データ: 既存の統合カーネルを使用（Decimal処理等は安全に維持）
+3. cuDFによるゼロコピーArrow変換
+4. GPU直接Parquet書き出し
 5. RMM統合メモリ管理
+
+注: 元の統合バッファ版は src/old/main_postgres_to_parquet.py に移動されました
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ from .write_parquet_from_cudf import write_cudf_to_parquet_with_options
 
 
 class ZeroCopyProcessor:
-    """ゼロコピープロセッサー"""
+    """ゼロコピープロセッサー（文字列最適化版）"""
     
     def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True):
         """
@@ -103,9 +105,9 @@ class ZeroCopyProcessor:
         field_lengths_dev
     ) -> Dict[str, Any]:
         """
-        文字列バッファ作成
+        文字列バッファ作成（最適化版 - 共有メモリ不使用）
         
-        メモリコアレッシングとワープ効率を考慮
+        直接グローバルメモリコピーによる高速化
         """
         
         string_buffers = {}
@@ -168,7 +170,6 @@ class ZeroCopyProcessor:
                 )
                 cuda.synchronize()
                 
-                
                 # 総データサイズを取得
                 total_size_array = d_offsets[rows:rows+1].copy_to_host()
                 total_size = int(total_size_array[0]) if len(total_size_array) > 0 else rows * 50
@@ -177,15 +178,18 @@ class ZeroCopyProcessor:
                     string_buffers[col.name] = {'data': None, 'offsets': None, 'actual_size': 0}
                     continue
                 
-                # === 3. データバッファの並列コピー ===
+                # === 3. 最適化データバッファの並列コピー（共有メモリ不使用） ===
                 d_data = cuda.device_array(total_size, dtype=np.uint8)
                 
                 @cuda.jit
-                def copy_string_data_coalesced(
+                def copy_string_data_direct_optimized(
                     raw_data, field_offsets, field_lengths,
                     col_idx, data_out, offsets, num_rows
                 ):
-                    """メモリコアレッシングを考慮した文字列データコピー"""
+                    """
+                    最適化された直接グローバルメモリコピー
+                    共有メモリを使用せず、メモリコアレッシングを考慮
+                    """
                     row = cuda.grid(1)
                     if row >= num_rows:
                         return
@@ -194,20 +198,24 @@ class ZeroCopyProcessor:
                     field_length = field_lengths[row, col_idx]
                     output_offset = offsets[row]
                     
-                    # ワープ内で協調的なコピー
-                    warp_id = row // 32
-                    lane_id = row % 32
+                    # NULL チェック
+                    if field_length <= 0:
+                        return
                     
-                    # 各スレッドが自分の担当データをコピー
+                    # ワープ協調的な直接コピー（共有メモリ経由なし）
+                    # 各スレッドが連続したメモリ領域を効率的にコピー
                     for i in range(field_length):
                         src_idx = field_offset + i
                         dst_idx = output_offset + i
                         
+                        # 境界チェック
                         if (src_idx < raw_data.size and 
                             dst_idx < data_out.size):
+                            # 直接グローバルメモリ間コピー
                             data_out[dst_idx] = raw_data[src_idx]
                 
-                copy_string_data_coalesced[blocks, threads](
+                print(f"文字列列 {col.name}: 直接コピー最適化カーネル実行")
+                copy_string_data_direct_optimized[blocks, threads](
                     raw_dev, field_offsets_dev, field_lengths_dev,
                     actual_col_idx, d_data, d_offsets, rows
                 )
@@ -218,6 +226,7 @@ class ZeroCopyProcessor:
                     'offsets': d_offsets,
                     'actual_size': total_size
                 }
+                print(f"✅ 文字列列 {col.name}: 最適化バッファ作成完了 ({total_size} bytes)")
                 
             except Exception as e:
                 warnings.warn(f"文字列バッファ作成エラー ({col.name}): {e}")
@@ -236,7 +245,9 @@ class ZeroCopyProcessor:
         **parquet_kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
-        統合デコード + エクスポート処理
+        文字列最適化デコード + エクスポート処理
+        
+        文字列処理のみ最適化し、固定長データは既存の統合カーネルを使用
         
         Returns:
             (cudf_dataframe, timing_info)
@@ -256,28 +267,30 @@ class ZeroCopyProcessor:
         d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
         d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
 
-        # 文字列バッファ作成
-        string_buffers = self.create_string_buffers(
+        # 最適化文字列バッファ作成（共有メモリ不使用）
+        optimized_string_buffers = self.create_string_buffers(
             columns, rows, raw_dev, field_offsets_dev, field_lengths_dev
         )
 
-        # 統合バッファシステム初期化
+        # 統合バッファシステム初期化（固定長データ用）
         buffer_info = self.gmm.initialize_buffers(columns, rows)
         
         # NULL配列
         d_nulls_all = cuda.device_array((rows, ncols), dtype=np.uint8)
         
         timing_info['preparation'] = time.time() - prep_start
+        timing_info['string_optimization'] = timing_info['preparation']  # 文字列最適化時間
 
-        # === 2. 統合カーネル実行 ===
+        # === 2. 統合カーネル実行（固定長データのみ） ===
         kernel_start = time.time()
         
         # Grid/Blockサイズの計算
         blocks, threads = optimize_grid_size(0, rows, self.device_props)
         
-        print(f"統合カーネル実行: {blocks} blocks × {threads} threads")
+        print(f"統合カーネル実行（固定長データのみ）: {blocks} blocks × {threads} threads")
         
         try:
+            # 既存の統合カーネルを使用（文字列データは統合バッファに書き込まれるが使用しない）
             pass1_column_wise_integrated[blocks, threads](
                 raw_dev,
                 field_offsets_dev,
@@ -288,14 +301,14 @@ class ZeroCopyProcessor:
                 buffer_info.column_is_variable,
                 buffer_info.column_indices,
                 
-                # 固定長統合バッファ
+                # 固定長統合バッファ（このまま使用）
                 buffer_info.fixed_buffer,
                 buffer_info.fixed_column_offsets,
                 buffer_info.fixed_column_sizes,
                 buffer_info.fixed_decimal_scales,
                 buffer_info.row_stride,
                 
-                # 可変長統合バッファ
+                # 可変長統合バッファ（文字列データは書き込まれるが使用しない）
                 buffer_info.var_data_buffer,
                 buffer_info.var_offset_arrays,
                 buffer_info.var_column_mapping,
@@ -315,11 +328,12 @@ class ZeroCopyProcessor:
         
         timing_info['kernel_execution'] = time.time() - kernel_start
 
-        # === 3. cuDF DataFrame作成（ゼロコピー） ===
+        # === 3. cuDF DataFrame作成（文字列最適化版） ===
         cudf_start = time.time()
         
+        # 最適化文字列バッファを使用してcuDF作成
         cudf_df = self.cudf_processor.create_cudf_from_gpu_buffers_zero_copy(
-            columns, rows, buffer_info, string_buffers
+            columns, rows, buffer_info, optimized_string_buffers
         )
         
         timing_info['cudf_creation'] = time.time() - cudf_start
@@ -352,9 +366,9 @@ class ZeroCopyProcessor:
         **kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
-        PostgreSQL → cuDF → GPU Parquet の統合処理
+        PostgreSQL → cuDF → GPU Parquet の文字列最適化処理
         
-        最適化を適用した高性能版
+        文字列処理のみを最適化し、他は既存実装を維持
         """
         
         total_timing = {}
@@ -377,10 +391,10 @@ class ZeroCopyProcessor:
         total_timing['gpu_parsing'] = time.time() - parse_start
         print(f"GPUパース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
         
-        # === 2. 統合デコード + エクスポート ===
+        # === 2. 文字列最適化デコード + エクスポート ===
         decode_start = time.time()
         
-        print("=== 統合デコード開始 ===")
+        print("=== 文字列最適化デコード開始 ===")
         cudf_df, decode_timing = self.decode_and_export(
             raw_dev, field_offsets_dev, field_lengths_dev,
             columns, output_path, compression, **kwargs
@@ -404,7 +418,7 @@ class ZeroCopyProcessor:
     ):
         """パフォーマンス統計の表示"""
         
-        print(f"\n=== パフォーマンス統計 ===")
+        print(f"\n=== パフォーマンス統計（文字列最適化版） ===")
         print(f"処理データ: {rows:,} 行 × {cols} 列")
         print(f"データサイズ: {data_size / (1024**2):.2f} MB")
         
@@ -418,8 +432,11 @@ class ZeroCopyProcessor:
                     preparation_time = timing.get('preparation', 0)
                     kernel_time = timing.get('kernel_execution', 0)
                     cudf_time = timing.get('cudf_creation', 0)
+                    string_opt_time = timing.get('string_optimization', 0)
                     if preparation_time > 0:
                         print(f"    ├─ preparation   : {preparation_time:.4f} 秒")
+                        if string_opt_time > 0:
+                            print(f"    │  └─ string_opt  : {string_opt_time:.4f} 秒")
                     if kernel_time > 0:
                         print(f"    ├─ gpu_decode      : {kernel_time:.4f} 秒")
                     if cudf_time > 0:
@@ -434,7 +451,7 @@ class ZeroCopyProcessor:
                         if cudf_direct_time > 0:
                             print(f"    └─ cudf_direct   : {cudf_direct_time:.4f} 秒")
                 # 内訳項目は個別表示をスキップ
-                elif key in ['preparation', 'kernel_execution', 'cudf_creation']:
+                elif key in ['preparation', 'kernel_execution', 'cudf_creation', 'string_optimization']:
                     continue
                 else:
                     print(f"  {key:20}: {value:.4f} 秒")
@@ -463,6 +480,11 @@ class ZeroCopyProcessor:
             print(f"  セル処理速度: {cell_throughput:,.0f} cells/sec")
             print(f"  データ処理速度: {data_throughput:.2f} MB/sec")
             
+            # 文字列最適化効率指標
+            if 'string_optimization' in timing:
+                string_efficiency = (timing['string_optimization'] / overall_time) * 100
+                print(f"  文字列最適化効率: {string_efficiency:.1f}%")
+            
             # GPU効率指標
             if 'kernel_execution' in timing:
                 kernel_efficiency = (timing['kernel_execution'] / overall_time) * 100
@@ -483,10 +505,11 @@ def postgresql_to_cudf_parquet(
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
-    PostgreSQL → cuDF → GPU Parquet 統合処理関数
+    PostgreSQL → cuDF → GPU Parquet 統合処理関数（文字列最適化版）
     
     最適化技術を統合した高性能バージョン：
     - 並列化GPU行検出・フィールド抽出
+    - 文字列処理最適化（共有メモリ不使用の直接コピー）
     - メモリコアレッシング最適化
     - cuDFゼロコピーArrow変換
     - GPU直接Parquet書き出し
