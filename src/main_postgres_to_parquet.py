@@ -29,11 +29,11 @@ from .types import (
     UTF8, BINARY, DATE32, TS64_US, BOOL, UNKNOWN
 )
 from .memory_manager import GPUMemoryManager, BufferInfo
-from .cuda_kernels.optimized_parsers import (
+from .cuda_kernels.gpu_config_utils import (
     parse_binary_chunk_gpu_enhanced,
     optimize_grid_size
 )
-from .cuda_kernels.column_processor import (
+from .cuda_kernels.data_decoder import (
     pass1_column_wise_integrated
 )
 from .cuda_kernels.decimal_tables import (
@@ -379,7 +379,7 @@ class ZeroCopyProcessor:
         
         print("=== GPU並列パース開始 ===")
         # 8.94倍高速化: Ultra Fast GPU並列パーサーを使用
-        from .cuda_kernels.ultra_fast_parser import parse_binary_chunk_gpu_ultra_fast_v2
+        from .cuda_kernels.postgresql_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
         field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
             raw_dev, columns, header_size=header_size
         )
