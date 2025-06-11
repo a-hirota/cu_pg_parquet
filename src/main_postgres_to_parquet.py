@@ -77,14 +77,29 @@ class ZeroCopyProcessor:
         """現在のGPUデバイス特性を取得"""
         try:
             device = cuda.get_current_device()
-            return {
+            props = {
                 'MAX_THREADS_PER_BLOCK': device.MAX_THREADS_PER_BLOCK,
                 'MULTIPROCESSOR_COUNT': device.MULTIPROCESSOR_COUNT,
                 'MAX_GRID_DIM_X': device.MAX_GRID_DIM_X,
-                'GLOBAL_MEMORY': device.TOTAL_MEMORY,
                 'SHARED_MEMORY_PER_BLOCK': device.MAX_SHARED_MEMORY_PER_BLOCK,
                 'WARP_SIZE': device.WARP_SIZE
             }
+            
+            # TOTAL_MEMORYは環境によって利用できない場合があるため個別処理
+            try:
+                props['GLOBAL_MEMORY'] = device.TOTAL_MEMORY
+            except AttributeError:
+                # フォールバック: CuPyからメモリ情報を取得
+                import cupy as cp
+                try:
+                    mempool = cp.get_default_memory_pool()
+                    props['GLOBAL_MEMORY'] = mempool.total_bytes()
+                except:
+                    # 最終フォールバック: デフォルト値
+                    props['GLOBAL_MEMORY'] = 8 * 1024**3  # 8GB
+                    
+            return props
+            
         except Exception as e:
             warnings.warn(f"GPU特性取得失敗: {e}")
             return {

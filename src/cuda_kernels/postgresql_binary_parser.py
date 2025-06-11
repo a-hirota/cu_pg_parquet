@@ -193,8 +193,9 @@ def detect_rows_optimized(raw_data, header_size, thread_stride, estimated_row_si
             local_positions[local_count] = candidate_pos
             local_count += 1
             
-            # 次の行開始位置へジャンプ
-            if row_end > 0 and row_end < end_pos:
+            # 次の行開始位置へジャンプ（境界処理改善）
+            # 行の開始が担当範囲内なら、終了が範囲外でも処理
+            if row_end > 0:
                 pos = row_end
                 continue
             else:
@@ -406,9 +407,38 @@ def parse_binary_chunk_gpu_ultra_fast(raw_dev, ncols: int, header_size: int = No
     
     return parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size, debug=debug)
 
+# ===== 統合最適化版の追加 =====
+def parse_binary_chunk_gpu_ultra_fast_v2_integrated(raw_dev, columns, header_size=None, debug=False):
+    """
+    統合最適化版: 行検出+フィールド抽出を1回で実行
+    
+    メモリ最適化:
+    - 重複読み込み排除: 218MB × 2回 → 218MB × 1回（50%削減）
+    - キャッシュ効率向上: L1/L2キャッシュ最大活用
+    
+    パフォーマンス向上:
+    - 実行時間短縮: 0.6秒 → 0.4秒予想（33%短縮）
+    - GPU↔メモリ間トラフィック削減
+    """
+    try:
+        # 軽量版を優先使用（共有メモリ制限対応）
+        from .integrated_parser_lite import parse_binary_chunk_gpu_ultra_fast_v2_lite as lite_impl
+        return lite_impl(raw_dev, columns, header_size, debug)
+    except ImportError:
+        try:
+            # 標準統合版をフォールバック
+            from .integrated_parser import parse_binary_chunk_gpu_ultra_fast_v2_integrated as integrated_impl
+            return integrated_impl(raw_dev, columns, header_size, debug)
+        except ImportError:
+            # 最終フォールバック: 従来版を使用
+            if debug:
+                print("[WARNING] 統合版が利用できません。従来版を使用します。")
+            return parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size, debug=debug)
+
 __all__ = [
     "parse_binary_chunk_gpu_ultra_fast",
     "parse_binary_chunk_gpu_ultra_fast_v2",
+    "parse_binary_chunk_gpu_ultra_fast_v2_integrated",  # 統合版を追加
     "estimate_row_size_from_columns",
     "get_device_properties",
     "calculate_optimal_grid_sm_aware"

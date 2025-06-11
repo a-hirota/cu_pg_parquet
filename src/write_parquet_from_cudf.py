@@ -94,10 +94,10 @@ def write_cudf_to_parquet_with_options(
     enhanced_kwargs = parquet_kwargs.copy()
     
     if optimize_for_spark:
-        # Spark読み込み用設定
+        # Spark読み込み用設定（cuDFエンジン対応）
         enhanced_kwargs.update({
-            'write_statistics': True,
             'use_dictionary': True
+            # 注: write_statisticsはcuDFエンジンでサポートされていないため除外
         })
     
     if row_group_size is not None:
