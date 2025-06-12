@@ -371,11 +371,49 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
     # 結果取得
     nrow = int(row_count.copy_to_host()[0])
     if nrow > 0:
-        row_offsets_host = row_positions[:nrow].copy_to_host()
-        row_offsets_host = row_offsets_host[row_offsets_host >= 0]  # 有効位置のみ
-        row_offsets_host = np.sort(row_offsets_host)
-        row_offsets = cuda.to_device(row_offsets_host)
-        nrow = len(row_offsets_host)
+        # 適応的ソート: 大規模データ（50,000行以上）でのみGPUソートを使用
+        GPU_SORT_THRESHOLD = 50000
+        
+        if nrow >= GPU_SORT_THRESHOLD:
+            try:
+                import cupy as cp
+                
+                # GPU上で高速ソート処理（CPU転送排除）
+                row_positions_gpu = cp.asarray(row_positions[:nrow])
+                valid_mask = row_positions_gpu >= 0
+                
+                if cp.any(valid_mask):
+                    row_offsets_valid = row_positions_gpu[valid_mask]
+                    row_offsets_sorted = cp.sort(row_offsets_valid)
+                    
+                    # CuPy配列をNumba CUDA配列に変換
+                    row_offsets = cuda.as_cuda_array(row_offsets_sorted)
+                    row_offsets_host = row_offsets_sorted.get()  # デバッグ用にCPU配列も保持
+                    nrow = len(row_offsets_host)
+                    
+                    if debug:
+                        print(f"[DEBUG] GPU高速ソート完了: {nrow}行（大規模データ最適化）")
+                else:
+                    row_offsets = cuda.device_array(0, np.int32)
+                    row_offsets_host = np.array([], dtype=np.int32)
+                    nrow = 0
+                    
+            except ImportError:
+                # CuPy未対応時はCPUソートにフォールバック
+                pass
+        
+        # 小規模データまたはGPUソート未対応時のCPUソート
+        if nrow < GPU_SORT_THRESHOLD or 'row_offsets' not in locals():
+            if debug and nrow < GPU_SORT_THRESHOLD:
+                print(f"[DEBUG] 小規模データ（{nrow}行）のためCPU最適ソートを使用")
+            elif debug:
+                print("[DEBUG] GPUソート未対応環境、CPUソートを使用")
+            
+            row_offsets_host = row_positions[:nrow].copy_to_host()
+            row_offsets_host = row_offsets_host[row_offsets_host >= 0]  # 有効位置のみ
+            row_offsets_host = np.sort(row_offsets_host)
+            row_offsets = cuda.to_device(row_offsets_host)
+            nrow = len(row_offsets_host)
     else:
         row_offsets = cuda.device_array(0, np.int32)
         row_offsets_host = np.array([], dtype=np.int32)

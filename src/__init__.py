@@ -13,7 +13,7 @@ from .main_postgres_to_parquet import (
 
 # 詳細制御用API
 from .build_cudf_from_buf import CuDFZeroCopyProcessor
-from .cuda_kernels.postgresql_binary_parser import (
+from .cuda_kernels.postgres_binary_parser import (
     parse_binary_chunk_gpu_ultra_fast_v2,
     parse_binary_chunk_gpu_ultra_fast_v2_integrated,
     detect_pg_header_size

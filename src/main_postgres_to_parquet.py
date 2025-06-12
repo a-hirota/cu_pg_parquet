@@ -40,7 +40,7 @@ from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
 from .build_cudf_from_buf import CuDFZeroCopyProcessor
-from .cuda_kernels.postgresql_binary_parser import detect_pg_header_size
+from .cuda_kernels.postgres_binary_parser import detect_pg_header_size
 from .write_parquet_from_cudf import write_cudf_to_parquet_with_options
 
 
@@ -394,7 +394,7 @@ class ZeroCopyProcessor:
         
         print("=== GPU並列パース開始 ===")
         # 8.94倍高速化: Ultra Fast GPU並列パーサーを使用
-        from .cuda_kernels.postgresql_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
+        from .cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
         field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
             raw_dev, columns, header_size=header_size
         )

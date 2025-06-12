@@ -3,7 +3,7 @@ CUDA カーネル関連の定義（統合最適化版）
 """
 
 # 現在使用中のモジュールのみをエクスポート
-from .postgresql_binary_parser import (
+from .postgres_binary_parser import (
     parse_binary_chunk_gpu_ultra_fast_v2,
     parse_binary_chunk_gpu_ultra_fast_v2_integrated,
     detect_pg_header_size

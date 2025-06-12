@@ -27,7 +27,7 @@ from .cuda_kernels.data_decoder import (
 from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
-from .cuda_kernels.postgresql_binary_parser import detect_pg_header_size
+from .cuda_kernels.postgres_binary_parser import detect_pg_header_size
 
 
 class CuDFZeroCopyProcessor:
