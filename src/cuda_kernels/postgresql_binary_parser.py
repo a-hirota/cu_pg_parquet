@@ -12,6 +12,23 @@ PostgreSQLバイナリ形式の完全パース処理
 from numba import cuda, int32, types
 import numpy as np
 
+def detect_pg_header_size(raw_data: np.ndarray) -> int:
+    """Detect COPY BINARY header size"""
+    base = 11
+    if raw_data.size < base:
+        return base
+
+    sig = b"PGCOPY\n\377\r\n\0"
+    if not np.array_equal(raw_data[:11], np.frombuffer(sig, np.uint8)):
+        return base
+
+    size = base + 4  # flags
+    if raw_data.size < size + 4:
+        return size
+    ext_len = int.from_bytes(raw_data[size : size + 4], "big")
+    size += 4 + ext_len if raw_data.size >= size + 4 + ext_len else 0
+    return size
+
 # row_cnt[0]: グローバルメモリ上の行カウント。atomic に加算し row_off[] の書き込み先を確保。
 # row_off[]: 各行の開始オフセットを保持。次段階の列抽出カーネルで参照される。
 # ───── 列パース ─────
@@ -439,6 +456,7 @@ __all__ = [
     "parse_binary_chunk_gpu_ultra_fast",
     "parse_binary_chunk_gpu_ultra_fast_v2",
     "parse_binary_chunk_gpu_ultra_fast_v2_integrated",  # 統合版を追加
+    "detect_pg_header_size",  # ヘッダーサイズ検出を追加
     "estimate_row_size_from_columns",
     "get_device_properties",
     "calculate_optimal_grid_sm_aware"

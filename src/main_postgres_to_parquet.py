@@ -40,7 +40,7 @@ from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
 from .build_cudf_from_buf import CuDFZeroCopyProcessor
-from .build_buf_from_postgres import detect_pg_header_size
+from .cuda_kernels.postgresql_binary_parser import detect_pg_header_size
 from .write_parquet_from_cudf import write_cudf_to_parquet_with_options
 
 

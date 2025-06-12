@@ -13,10 +13,10 @@ from .main_postgres_to_parquet import (
 
 # 詳細制御用API
 from .build_cudf_from_buf import CuDFZeroCopyProcessor
-from .build_buf_from_postgres import parse_binary_chunk_gpu, detect_pg_header_size
-from .cuda_kernels.ultra_fast_parser import (
-    parse_binary_chunk_gpu_ultra_fast,
-    parse_binary_chunk_gpu_ultra_fast_v2
+from .cuda_kernels.postgresql_binary_parser import (
+    parse_binary_chunk_gpu_ultra_fast_v2,
+    parse_binary_chunk_gpu_ultra_fast_v2_integrated,
+    detect_pg_header_size
 )
 from .write_parquet_from_cudf import (
     write_cudf_to_parquet,
@@ -37,9 +37,8 @@ __all__ = [
     
     # 詳細制御
     "CuDFZeroCopyProcessor",
-    "parse_binary_chunk_gpu",
-    "parse_binary_chunk_gpu_ultra_fast",
     "parse_binary_chunk_gpu_ultra_fast_v2",
+    "parse_binary_chunk_gpu_ultra_fast_v2_integrated",
     "detect_pg_header_size",
     "write_cudf_to_parquet",
     "write_cudf_to_parquet_with_options",

@@ -19,7 +19,7 @@ import argparse
 
 from src.metadata import fetch_column_meta
 from src.types import ColumnMeta
-from src.build_buf_from_postgres import parse_binary_chunk_gpu, detect_pg_header_size
+from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
 # 従来処理は削除済み（ZeroCopyのみ使用）
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet
 

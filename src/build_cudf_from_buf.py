@@ -21,13 +21,13 @@ from .types import (
     UTF8, BINARY, DATE32, TS64_US, BOOL, UNKNOWN
 )
 from .memory_manager import GPUMemoryManager, BufferInfo
-from .cuda_kernels.column_processor import (
+from .cuda_kernels.data_decoder import (
     pass1_column_wise_integrated
 )
 from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
-from .build_buf_from_postgres import detect_pg_header_size
+from .cuda_kernels.postgresql_binary_parser import detect_pg_header_size
 
 
 class CuDFZeroCopyProcessor:
@@ -757,11 +757,8 @@ def decode_chunk_integrated_zero_copy(
     d_pow10_table_lo = cuda.to_device(POW10_TABLE_LO_HOST)
     d_pow10_table_hi = cuda.to_device(POW10_TABLE_HI_HOST)
 
-    # 文字列列個別バッファ作成
-    from .column_processor import create_individual_string_buffers
-    string_buffers = create_individual_string_buffers(
-        columns, rows, raw_dev, field_offsets_dev, field_lengths_dev
-    )
+    # 文字列列は現在main_postgres_to_parquet.pyで処理されるため、空の辞書を使用
+    string_buffers = {}
 
     # 統合バッファシステム初期化
     buffer_info = processor.gmm.initialize_buffers(columns, rows)
