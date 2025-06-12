@@ -26,8 +26,8 @@ import argparse
 
 from src.metadata import fetch_column_meta
 from src.types import ColumnMeta
-from src.binary_parser import detect_pg_header_size
-from src.ultimate_zero_copy_processor import ultimate_postgresql_to_cudf_parquet
+from src.build_buf_from_postgres import detect_pg_header_size
+from src.main_postgres_to_parquet import postgresql_to_cudf_parquet
 
 TABLE_NAME = "lineorder"
 

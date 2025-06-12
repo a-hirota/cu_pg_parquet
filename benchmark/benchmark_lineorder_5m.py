@@ -1,283 +1,205 @@
-#!/usr/bin/env python3
 """
-GPUパーサー ベンチマークメイン
-=============================
+PostgreSQL → COPY BINARY → GPU Processing → Arrow RecordBatch → Parquet
 
-GPUソート最適化の性能を測定するためのベンチマークツール
-
-使用方法:
-    python benchmark_main.py --rows 5000000    # 500万行
-    python benchmark_main.py --rows 10000000   # 1000万行
-    python benchmark_main.py --test gpu_sort   # GPUソート性能テスト
+環境変数:
+GPUPASER_PG_DSN  : PostgreSQL接続文字列
+PG_TABLE_PREFIX  : テーブルプレフィックス (optional)
+USE_ZERO_COPY    : ZeroCopy機能を使用 (True/False, optional)
 """
 
-import argparse
-import sys
 import os
-import time
-import subprocess
-from pathlib import Path
-
-# プロジェクトルートをPATHに追加
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
-
-def create_test_table(rows: int):
-    """指定行数のテストテーブルを作成"""
-    
-    print(f"📊 {rows:,}行のテストテーブルを作成中...")
-    
-    # PostgreSQL接続設定
-    dsn = os.environ.get('GPUPASER_PG_DSN', 'dbname=postgres user=postgres host=localhost port=5432')
-    
-    # テストテーブル作成SQLを生成
-    sql_commands = f"""
--- テストテーブル削除（存在する場合）
-DROP TABLE IF EXISTS lineorder_test_{rows};
-
--- テストテーブル作成
-CREATE TABLE lineorder_test_{rows} AS
-SELECT 
-    (random() * 1000000)::int as lo_orderkey,
-    (random() * 100000)::int as lo_linenumber,
-    (random() * 200000)::int as lo_custkey,
-    (random() * 40000)::int as lo_partkey,
-    (random() * 10000)::int as lo_suppkey,
-    ('1992-01-01'::date + (random() * 2500)::int)::date as lo_orderdate,
-    ('P'::char || (random() * 9 + 1)::int::text)::char(1) as lo_orderpriority,
-    (random() * 100000)::int as lo_shippriority,
-    (random() * 1000000 + 100000)::numeric(15,2) as lo_quantity,
-    (random() * 10000000 + 1000000)::numeric(15,2) as lo_extendedprice,
-    (random() * 100 + 1)::numeric(15,2) as lo_ordtotalprice,
-    (random() * 50 + 1)::numeric(15,2) as lo_discount,
-    (random() * 100000000 + 10000000)::numeric(15,2) as lo_revenue,
-    (random() * 100000 + 10000)::numeric(15,2) as lo_supplycost,
-    (random() * 1000000 + 100000)::numeric(15,2) as lo_tax,
-    ('1995-01-01'::date + (random() * 1000)::int)::date as lo_commitdate,
-    ('SHIP' || (random() * 999 + 1)::int::text)::char(10) as lo_shipmode
-FROM generate_series(1, {rows});
-
--- インデックス作成（高速化）
-CREATE INDEX idx_lineorder_test_{rows}_orderkey ON lineorder_test_{rows}(lo_orderkey);
-
--- 統計情報更新
-ANALYZE lineorder_test_{rows};
-
--- 確認
-SELECT 'テーブル作成完了:', count(*) as row_count FROM lineorder_test_{rows};
-"""
-    
-    # SQLファイルに保存
-    sql_file = f"input/create_test_table_{rows}.sql"
-    os.makedirs("input", exist_ok=True)
-    
-    with open(sql_file, 'w', encoding='utf-8') as f:
-        f.write(sql_commands)
-    
-    print(f"📝 SQLファイル作成: {sql_file}")
-    
-    # PostgreSQLでSQL実行
-    try:
-        print("🔧 PostgreSQLでテーブル作成中...")
-        result = subprocess.run([
-            'psql', dsn, '-f', sql_file
-        ], capture_output=True, text=True, timeout=300)
-        
-        if result.returncode == 0:
-            print("✅ テストテーブル作成完了")
-            print(result.stdout.split('\n')[-3])  # 行数確認行を表示
-        else:
-            print(f"❌ テーブル作成エラー: {result.stderr}")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        print("⏰ テーブル作成がタイムアウトしました")
-        return False
-    except FileNotFoundError:
-        print("❌ psqlコマンドが見つかりません。PostgreSQLがインストールされていることを確認してください。")
-        return False
-    
-    return True
-
-def run_gpu_parser_benchmark(rows: int):
-    """GPUパーサーベンチマーク実行"""
-    
-    print(f"\n🚀 GPUパーサーベンチマーク開始 ({rows:,}行)")
-    
-    # ベンチマークスクリプト作成
-    benchmark_script = f"""
-import os
-import sys
 import time
 import numpy as np
-from pathlib import Path
+import psycopg
+import pyarrow as pa
+import pyarrow.parquet as pq
+import cudf
+from numba import cuda
+import argparse
 
-# プロジェクトパス設定
-sys.path.insert(0, '/home/ubuntu/gpupgparser')
+from src.metadata import fetch_column_meta
+from src.types import ColumnMeta
+from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
+# GPU最適化処理を使用
+from src.main_postgres_to_parquet import postgresql_to_cudf_parquet
 
-from src.main_postgres_to_parquet import process_postgres_table_to_parquet_optimized
+TABLE_NAME = "lineorder"
+OUTPUT_PARQUET_PATH = "benchmark/lineorder_5m.output.parquet"
 
-def run_benchmark():
-    table_name = 'lineorder_test_{rows}'
-    output_file = f'benchmark/lineorder_test_{{rows}}_gpu_optimized.parquet'
-    
-    print(f"📊 ベンチマーク開始: {{table_name}}")
-    print(f"📁 出力ファイル: {{output_file}}")
-    
-    start_time = time.perf_counter()
+def run_benchmark(limit_rows=1000000):
+    dsn = os.environ.get("GPUPASER_PG_DSN")
+    if not dsn:
+        print("エラー: 環境変数 GPUPASER_PG_DSN が設定されていません。")
+        return
+
+    prefix = os.environ.get("PG_TABLE_PREFIX", "")
+    tbl = f"{prefix}{TABLE_NAME}" if prefix else TABLE_NAME
+
+    # GPU最適化処理
+    print(f"ベンチマーク開始: テーブル={tbl}")
+    start_total_time = time.time()
+    conn = psycopg.connect(dsn)
+    try:
+        print("メタデータを取得中...")
+        start_meta_time = time.time()
+        columns = fetch_column_meta(conn, f"SELECT * FROM {tbl}")
+        meta_time = time.time() - start_meta_time
+        print(f"メタデータ取得完了 ({meta_time:.4f}秒)")
+        
+        ncols = len(columns)
+
+        print("COPY BINARY を実行中...")
+        start_copy_time = time.time()
+        copy_sql = f"COPY (SELECT * FROM {tbl} LIMIT {limit_rows}) TO STDOUT (FORMAT binary)"
+        buf = bytearray()
+        with conn.cursor().copy(copy_sql) as cpy:
+            while True:
+                chunk = cpy.read()
+                if not chunk:
+                    break
+                buf.extend(chunk)
+            raw_host = np.frombuffer(buf, dtype=np.uint8)
+        copy_time = time.time() - start_copy_time
+        print(f"COPY BINARY 完了 ({copy_time:.4f}秒), データサイズ: {len(raw_host) / (1024*1024):.2f} MB")
+
+    finally:
+        conn.close()
+
+    print("GPUにデータを転送中...")
+    start_transfer_time = time.time()
+    raw_dev = cuda.to_device(raw_host)
+    transfer_time = time.time() - start_transfer_time
+    print(f"GPU転送完了 ({transfer_time:.4f}秒)")
+
+    header_sample = raw_dev[:min(128, raw_dev.shape[0])].copy_to_host()
+    header_size = detect_pg_header_size(header_sample)
+    print(f"ヘッダーサイズ: {header_size} バイト")
+
+    # GPU最適化処理を実行
+    print("GPU最適化処理中...")
+    start_processing_time = time.time()
     
     try:
-        # GPUパーサー実行（最新の最適化版）
-        result_df = process_postgres_table_to_parquet_optimized(
-            table_name=table_name,
-            output_path=output_file,
-            use_integrated_parser=True,  # 統合パーサー使用
-            debug=True
+        cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+            raw_dev=raw_dev,
+            columns=columns,
+            ncols=ncols,
+            header_size=header_size,
+            output_path=OUTPUT_PARQUET_PATH,
+            compression='snappy',
+            use_rmm=True,
+            optimize_gpu=True
         )
         
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
+        processing_time = time.time() - start_processing_time
+        rows = len(cudf_df)
+        parse_time = detailed_timing.get('gpu_parsing', 0)
+        decode_time = detailed_timing.get('cudf_creation', 0)
+        write_time = detailed_timing.get('parquet_export', 0)
         
-        print(f"✅ ベンチマーク完了")
-        print(f"⏱️  実行時間: {{elapsed_time:.2f}}秒")
-        print(f"📊 処理行数: {{len(result_df):,}}行")
-        print(f"🔥 スループット: {{len(result_df)/elapsed_time:.0f}}行/秒")
-        
-        # ファイルサイズ確認
-        if os.path.exists(output_file):
-            file_size = os.path.getsize(output_file) / 1024 / 1024
-            print(f"📁 出力ファイルサイズ: {{file_size:.2f}}MB")
-        
-        return elapsed_time, len(result_df)
+        print(f"GPU最適化処理完了 ({processing_time:.4f}秒), 行数: {rows}")
         
     except Exception as e:
-        print(f"❌ ベンチマークエラー: {{e}}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+        print(f"GPU最適化処理でエラー: {e}")
+        print("処理を中断します。")
+        return
 
-if __name__ == '__main__':
-    run_benchmark()
-"""
+    total_time = time.time() - start_total_time
+    decimal_cols = sum(1 for col in columns if col.arrow_id == 5)
     
-    # 一時的なベンチマークスクリプトファイル作成
-    benchmark_file = f"benchmark_temp_{rows}.py"
-    with open(benchmark_file, 'w', encoding='utf-8') as f:
-        f.write(benchmark_script)
-    
-    try:
-        # ベンチマーク実行
-        print("🔧 GPUパーサー実行中...")
-        result = subprocess.run([
-            sys.executable, benchmark_file
-        ], timeout=1800, capture_output=True, text=True)  # 30分タイムアウト
-        
-        print(result.stdout)
-        if result.stderr:
-            print("警告:", result.stderr)
-            
-        if result.returncode != 0:
-            print(f"❌ ベンチマーク実行エラー (終了コード: {result.returncode})")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        print("⏰ ベンチマークがタイムアウトしました")
-        return False
-    finally:
-        # 一時ファイル削除
-        if os.path.exists(benchmark_file):
-            os.remove(benchmark_file)
-    
-    return True
+    print(f"\nベンチマーク完了: 総時間 = {total_time:.4f} 秒")
+    print("--- 時間内訳 ---")
+    print(f"  メタデータ取得: {meta_time:.4f} 秒")
+    print(f"  COPY BINARY   : {copy_time:.4f} 秒")
+    print(f"  GPU転送       : {transfer_time:.4f} 秒")
+    print(f"  GPUパース     : {parse_time:.4f} 秒")
+    print(f"  GPUデコード   : {decode_time:.4f} 秒")
+    print(f"  Parquet書き込み: {write_time:.4f} 秒")
+    print("--- 統計情報 ---")
+    print(f"  処理行数      : {rows:,} 行")
+    print(f"  処理列数      : {len(columns)} 列")
+    print(f"  Decimal列数   : {decimal_cols} 列")
+    print(f"  データサイズ  : {len(raw_host) / (1024*1024):.2f} MB")
+    total_cells = rows * len(columns)
+    throughput = total_cells / decode_time if decode_time > 0 else 0
+    print(f"  スループット  : {throughput:,.0f} cells/sec")
+    print("----------------")
 
-def run_gpu_sort_performance_test():
-    """GPUソート性能テスト実行"""
-    
-    print("\n🧪 GPUソート性能テスト開始")
-    
+
+    print(f"\ncuDFでParquetファイルを読み込み中: {OUTPUT_PARQUET_PATH}")
     try:
-        result = subprocess.run([
-            sys.executable, "test/test_gpu_sort_simple.py"
-        ], timeout=300, capture_output=True, text=True)
+        start_cudf_read_time = time.time()
+        verification_df = cudf.read_parquet(OUTPUT_PARQUET_PATH)
+        cudf_read_time = time.time() - start_cudf_read_time
+        print(f"cuDF読み込み完了 ({cudf_read_time:.4f}秒)")
         
-        print(result.stdout)
-        if result.stderr:
-            print("警告:", result.stderr)
+        print("--- cuDF DataFrame Info ---")
+        verification_df.info()
+        
+        print(f"読み込み結果: {len(verification_df):,} 行 × {len(verification_df.columns)} 列")
+        
+        # データ型確認
+        print("データ型:")
+        for col_name, dtype in verification_df.dtypes.items():
+            print(f"  {col_name}: {dtype}")
+        
+        print("\n--- cuDF DataFrame Head (全列表示) ---")
+        # pandas設定を使用して全列を強制表示
+        import pandas as pd
+        
+        # DataFrameを文字列として表示し、全列を確実に表示
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.max_colwidth', 20)
+        
+        try:
+            # cuDFをpandasに変換して全列表示
+            pandas_df = verification_df.to_pandas()
+            print(pandas_df.head())
+        except Exception:
+            # フォールバック: 列を一つずつ表示
+            print("cuDF Head (列別表示):")
+            for i, col_name in enumerate(verification_df.columns):
+                print(f"  列{i+1:2d} {col_name:20s}: {verification_df[col_name].iloc[:3].to_pandas().tolist()}")
+        
+        # 設定をリセット
+        pd.reset_option('display.max_columns')
+        pd.reset_option('display.width')
+        pd.reset_option('display.max_colwidth')
+        
+        # 基本統計情報
+        print("\n基本統計:")
+        try:
+            numeric_cols = verification_df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                for col in numeric_cols[:5]:  # 最初の5つの数値列のみ
+                    col_data = verification_df[col]
+                    if len(col_data) > 0:
+                        print(f"  {col}: 平均={float(col_data.mean()):.2f}, 最小={float(col_data.min()):.2f}, 最大={float(col_data.max()):.2f}")
+        except Exception as e:
+            print(f"  統計情報エラー: {e}")
             
-        if result.returncode == 0:
-            print("✅ GPUソート性能テスト完了")
-        else:
-            print(f"❌ テスト実行エラー (終了コード: {result.returncode})")
+        print("-------------------------")
+        print("cuDF検証: 成功")
             
-    except subprocess.TimeoutExpired:
-        print("⏰ テストがタイムアウトしました")
-    except FileNotFoundError:
-        print("❌ テストファイルが見つかりません")
+    except Exception as e:
+        print(f"cuDF検証: 失敗 - {e}")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="GPUパーサー ベンチマークツール",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-使用例:
-  python benchmark_main.py --rows 5000000          # 500万行のベンチマーク
-  python benchmark_main.py --rows 10000000         # 1000万行のベンチマーク
-  python benchmark_main.py --test gpu_sort         # GPUソート性能テスト
-  python benchmark_main.py --rows 1000000 --create # テーブル作成のみ
-        """
-    )
-    
-    parser.add_argument(
-        '--rows', 
-        type=int, 
-        help='テストデータの行数 (例: 5000000)'
-    )
-    parser.add_argument(
-        '--test', 
-        choices=['gpu_sort'], 
-        help='実行するテストタイプ'
-    )
-    parser.add_argument(
-        '--create', 
-        action='store_true', 
-        help='テーブル作成のみ実行'
-    )
+    """メイン関数 - ZeroCopy版のみサポート"""
+    parser = argparse.ArgumentParser(description='PostgreSQL → cuDF → Parquet ベンチマーク (ZeroCopy版)')
+    parser.add_argument('--rows', type=int, default=1000000, help='処理行数制限')
     
     args = parser.parse_args()
     
-    print("🚀 GPUパーサー ベンチマークツール")
-    print("=" * 50)
+    try:
+        cuda.current_context()
+        print("CUDA context OK")
+    except Exception as e:
+        print(f"CUDA context initialization failed: {e}")
+        exit(1)
     
-    if args.test == 'gpu_sort':
-        run_gpu_sort_performance_test()
-        return
-    
-    if not args.rows:
-        parser.print_help()
-        print("\n❌ --rows または --test オプションが必要です")
-        return
-    
-    # 環境確認
-    dsn = os.environ.get('GPUPASER_PG_DSN')
-    if not dsn:
-        print("⚠️  警告: GPUPASER_PG_DSN環境変数が設定されていません")
-        print("例: export GPUPASER_PG_DSN='dbname=postgres user=postgres host=localhost port=5432'")
-    
-    # テーブル作成
-    if not create_test_table(args.rows):
-        print("❌ テーブル作成に失敗しました")
-        return
-    
-    if args.create:
-        print("✅ テーブル作成完了（--createオプションのため、ベンチマークは実行しません）")
-        return
-    
-    # ベンチマーク実行
-    if not run_gpu_parser_benchmark(args.rows):
-        print("❌ ベンチマークに失敗しました")
-        return
-    
-    print("\n🎉 すべての処理が完了しました！")
+    run_benchmark(limit_rows=args.rows)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
