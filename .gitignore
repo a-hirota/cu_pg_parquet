@@ -18,6 +18,5 @@ old/
 cufile.log
 *.parquet
 benchmark/*.parquet
-benchmark/*.output_chunk1.parquet
 *.bin
 *.txt
