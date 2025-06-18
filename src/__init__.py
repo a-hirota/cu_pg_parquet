@@ -28,6 +28,14 @@ from .metadata import fetch_column_meta
 from .types import ColumnMeta, PG_OID_TO_ARROW
 from .memory_manager import GPUMemoryManager
 
+# kvikio直接読み込み機能
+from .heap_file_reader import (
+    read_heap_file_direct,
+    get_heap_file_info,
+    HeapFileReaderError,
+    KvikioNotInitializedError
+)
+
 __version__ = "0.2.0"  # ZeroCopy版
 
 __all__ = [
@@ -48,4 +56,10 @@ __all__ = [
     "ColumnMeta",
     "PG_OID_TO_ARROW",
     "GPUMemoryManager",
+    
+    # kvikio直接読み込み
+    "read_heap_file_direct",
+    "get_heap_file_info",
+    "HeapFileReaderError",
+    "KvikioNotInitializedError",
 ]

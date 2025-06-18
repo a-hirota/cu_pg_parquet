@@ -19,3 +19,17 @@ from .decimal_tables import POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 from .integrated_parser_lite import (
     parse_binary_chunk_gpu_ultra_fast_v2_lite
 )
+from .heap_page_parser import (
+    parse_heap_pages_to_tuples,
+    compact_tuple_offsets,
+    parse_heap_file_gpu,
+    create_page_offsets,
+    estimate_max_tuples,
+    POSTGRES_PAGE_SIZE,
+    PAGE_HEADER_SIZE,
+    ITEM_ID_SIZE,
+    LP_NORMAL,
+    LP_UNUSED,
+    LP_REDIRECT,
+    LP_DEAD
+)

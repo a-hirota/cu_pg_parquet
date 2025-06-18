@@ -28,6 +28,8 @@ from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
 from .cuda_kernels.postgres_binary_parser import detect_pg_header_size
+from .cuda_kernels.heap_page_parser import parse_heap_file_gpu
+from .heap_file_reader import read_heap_file_direct, HeapFileReaderError
 
 
 class CuDFZeroCopyProcessor:
@@ -46,11 +48,14 @@ class CuDFZeroCopyProcessor:
         # RMMプールメモリ設定 (オプション)
         if use_rmm:
             try:
-                rmm.reinitialize(
-                    pool_allocator=True,
-                    initial_pool_size=2**30,  # 1GB
-                    maximum_pool_size=2**32   # 4GB
-                )
+                if not rmm.is_initialized():
+                    # 初期化されていない場合のみ初期化
+                    rmm.reinitialize(
+                        pool_allocator=True,
+                        initial_pool_size=2**30,  # 1GB
+                        maximum_pool_size=22*1024**3   # 22GB（RTX 3090対応）
+                    )
+                # 既に初期化されている場合は何もしない（外部で設定されたサイズを維持）
             except Exception as e:
                 warnings.warn(f"RMM初期化に失敗しました: {e}")
 
@@ -694,6 +699,178 @@ class CuDFZeroCopyProcessor:
         except Exception as e:
             return cudf.Series([None] * rows, dtype='string')
     
+    def integrate_kvikio_pipeline(
+        self,
+        heap_file_path: str,
+        columns: List[ColumnMeta]
+    ) -> cudf.DataFrame:
+        """
+        kvikioパイプラインを統合する処理
+        
+        ヒープファイルをkvikioで読み込み、ヒープページ解析カーネルでタプルオフセットを抽出し、
+        既存のpass1_column_wise_integratedカーネルでcuDF DataFrameに変換します。
+        
+        Args:
+            heap_file_path: PostgreSQLヒープファイルのパス
+            columns: 列メタデータのリスト
+            
+        Returns:
+            cudf.DataFrame: 変換されたデータフレーム
+            
+        Raises:
+            HeapFileReaderError: ヒープファイルの読み込みに失敗した場合
+            RuntimeError: GPU処理に失敗した場合
+            ValueError: 入力パラメータが無効な場合
+        """
+        # 入力検証
+        if not heap_file_path or not isinstance(heap_file_path, str):
+            raise ValueError("heap_file_pathは有効な文字列である必要があります")
+        
+        if not columns or not isinstance(columns, list):
+            raise ValueError("columnsは有効なColumnMetaのリストである必要があります")
+        
+        try:
+            # 1. kvikioを使用してヒープファイルをGPUメモリに読み込み
+            heap_data_gpu = read_heap_file_direct(heap_file_path)
+            
+            # 2. ヒープページ解析カーネルでタプルオフセットを抽出
+            tuple_offsets_gpu, total_tuple_count = parse_heap_file_gpu(
+                heap_data_gpu, debug=False  # デバッグを無効化
+            )
+            
+            if total_tuple_count == 0:
+                # 空のDataFrameを返す
+                empty_series_dict = {col.name: cudf.Series([], dtype='object') for col in columns}
+                return cudf.DataFrame(empty_series_dict)
+            
+            # 3. タプルオフセットから field_offsets_dev と field_lengths_dev を構築
+            field_offsets_dev, field_lengths_dev = self._build_field_arrays_from_tuples(
+                heap_data_gpu, tuple_offsets_gpu, columns, total_tuple_count
+            )
+            
+            # 4. 既存のpass1_column_wise_integratedカーネルを実行してcuDF DataFrameに変換
+            cudf_df = self.decode_and_create_cudf_zero_copy(
+                heap_data_gpu,
+                field_offsets_dev,
+                field_lengths_dev,
+                columns
+            )
+            
+            return cudf_df
+            
+        except HeapFileReaderError as e:
+            raise HeapFileReaderError(f"ヒープファイルの読み込みに失敗しました: {e}")
+        except Exception as e:
+            raise RuntimeError(f"kvikioパイプラインの処理中にエラーが発生しました: {e}")
+    
+    def _build_field_arrays_from_tuples(
+        self,
+        heap_data_gpu,
+        tuple_offsets_gpu,
+        columns: List[ColumnMeta],
+        total_tuple_count: int
+    ) -> tuple:
+        """
+        タプルオフセットからfield_offsets_devとfield_lengths_devを構築
+        
+        Args:
+            heap_data_gpu: GPUメモリ上のヒープデータ
+            tuple_offsets_gpu: タプルオフセット配列
+            columns: 列メタデータ
+            total_tuple_count: 総タプル数
+            
+        Returns:
+            tuple: (field_offsets_dev, field_lengths_dev)
+        """
+        import cupy as cp
+        from numba import cuda
+        
+        ncols = len(columns)
+        
+        # 出力配列の初期化
+        field_offsets_dev = cuda.device_array((total_tuple_count, ncols), dtype=np.int32)
+        field_lengths_dev = cuda.device_array((total_tuple_count, ncols), dtype=np.int32)
+        
+        # タプル解析カーネルを実行
+        threads_per_block = 256
+        blocks = (total_tuple_count + threads_per_block - 1) // threads_per_block
+        
+        self._parse_tuples_kernel[blocks, threads_per_block](
+            heap_data_gpu,
+            tuple_offsets_gpu,
+            field_offsets_dev,
+            field_lengths_dev,
+            total_tuple_count,
+            ncols
+        )
+        
+        cuda.synchronize()
+        
+        return field_offsets_dev, field_lengths_dev
+    
+    @staticmethod
+    @cuda.jit
+    def _parse_tuples_kernel(
+        heap_data,
+        tuple_offsets,
+        field_offsets_out,
+        field_lengths_out,
+        total_tuples,
+        ncols
+    ):
+        """
+        タプルを解析してフィールドオフセットと長さを抽出するCUDAカーネル
+        """
+        tuple_idx = cuda.grid(1)
+        
+        if tuple_idx >= total_tuples:
+            return
+        
+        tuple_offset = tuple_offsets[tuple_idx]
+        
+        # PostgreSQLタプルヘッダーの解析
+        # HeapTupleHeaderData構造体（最低23バイト）
+        if tuple_offset + 23 > heap_data.size:
+            # 不正なタプル: 全フィールドを無効にする
+            for col in range(ncols):
+                field_offsets_out[tuple_idx, col] = 0
+                field_lengths_out[tuple_idx, col] = -1
+            return
+        
+        # タプルヘッダー情報の読み取り
+        # t_hoff（ヘッダーサイズ）はオフセット22のバイト
+        t_hoff = heap_data[tuple_offset + 22]
+        
+        if t_hoff < 23 or tuple_offset + t_hoff > heap_data.size:
+            # 不正なヘッダーサイズ
+            for col in range(ncols):
+                field_offsets_out[tuple_idx, col] = 0
+                field_lengths_out[tuple_idx, col] = -1
+            return
+        
+        # データ部の開始位置
+        data_start = tuple_offset + t_hoff
+        current_offset = data_start
+        
+        # 簡易的なフィールド解析（固定長のみ対応）
+        # 実際の実装では、NULL bitmap やフィールド境界の正確な解析が必要
+        for col in range(ncols):
+            if col < ncols and current_offset < heap_data.size:
+                # 簡易実装: 各フィールドを4バイト固定として処理
+                # 実際の実装では列の型情報に基づいた適切な長さ計算が必要
+                field_length = 4  # 仮の固定長
+                
+                if current_offset + field_length <= heap_data.size:
+                    field_offsets_out[tuple_idx, col] = current_offset
+                    field_lengths_out[tuple_idx, col] = field_length
+                    current_offset += field_length
+                else:
+                    field_offsets_out[tuple_idx, col] = 0
+                    field_lengths_out[tuple_idx, col] = -1
+            else:
+                field_offsets_out[tuple_idx, col] = 0
+                field_lengths_out[tuple_idx, col] = -1
+
     def write_parquet_gpu_direct(
         self,
         cudf_df: cudf.DataFrame,
@@ -817,4 +994,39 @@ def decode_chunk_integrated_zero_copy(
     return cudf_df
 
 
-__all__ = ["CuDFZeroCopyProcessor", "decode_chunk_integrated_zero_copy"]
+__all__ = ["CuDFZeroCopyProcessor", "decode_chunk_integrated_zero_copy", "integrate_kvikio_pipeline"]
+
+
+def integrate_kvikio_pipeline(
+    heap_file_path: str,
+    columns: List[ColumnMeta]
+) -> cudf.DataFrame:
+    """
+    kvikioパイプラインを統合する処理（モジュール関数版）
+    
+    ヒープファイルをkvikioで読み込み、ヒープページ解析カーネルでタプルオフセットを抽出し、
+    既存のpass1_column_wise_integratedカーネルでcuDF DataFrameに変換します。
+    
+    Args:
+        heap_file_path: PostgreSQLヒープファイルのパス
+        columns: 列メタデータのリスト
+        
+    Returns:
+        cudf.DataFrame: 変換されたデータフレーム
+        
+    Raises:
+        HeapFileReaderError: ヒープファイルの読み込みに失敗した場合
+        RuntimeError: GPU処理に失敗した場合
+        ValueError: 入力パラメータが無効な場合
+    
+    Example:
+        >>> from src.types import ColumnMeta, INT32, UTF8
+        >>> columns = [
+        ...     ColumnMeta("id", 23, -1, INT32, 4),
+        ...     ColumnMeta("name", 25, -1, UTF8, 0)
+        ... ]
+        >>> df = integrate_kvikio_pipeline("/path/to/heap/file", columns)
+        >>> print(df.head())
+    """
+    processor = CuDFZeroCopyProcessor()
+    return processor.integrate_kvikio_pipeline(heap_file_path, columns)

@@ -64,12 +64,15 @@ class ZeroCopyProcessor:
         # RMM メモリプール最適化
         if use_rmm:
             try:
-                rmm.reinitialize(
-                    pool_allocator=True,
-                    initial_pool_size=2**31,  # 2GB
-                    maximum_pool_size=2**33   # 8GB
-                )
-                print("RMM メモリプール初期化完了 (最大8GB)")
+                if not rmm.is_initialized():
+                    # 初期化されていない場合のみ初期化
+                    rmm.reinitialize(
+                        pool_allocator=True,
+                        initial_pool_size=2**31,  # 2GB
+                        maximum_pool_size=22*1024**3   # 22GB（RTX 3090対応）
+                    )
+                    print("RMM メモリプール初期化完了 (最大22GB)")
+                # 既に初期化されている場合は何もしない（外部で設定されたサイズを維持）
             except Exception as e:
                 warnings.warn(f"RMM初期化警告: {e}")
     
