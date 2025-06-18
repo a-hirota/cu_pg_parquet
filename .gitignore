@@ -16,5 +16,7 @@ old/
 # memory-bank
 
 cufile.log
+*.parquet
+benchmark/*.parquet
 *.bin
 *.txt
