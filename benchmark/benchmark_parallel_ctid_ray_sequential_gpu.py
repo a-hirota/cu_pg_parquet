@@ -302,7 +302,8 @@ def check_gpu_direct_support() -> bool:
 def run_ray_parallel_sequential_gpu(
     limit_rows: int = 10000000,
     parallel_count: int = DEFAULT_PARALLEL,
-    use_gpu_direct: bool = True
+    use_gpu_direct: bool = True,
+    batch_size: int = 4
 ):
     """Ray並列COPY + 順次GPU処理"""
     
@@ -317,9 +318,10 @@ def run_ray_parallel_sequential_gpu(
     print(f"並列数: {parallel_count}")
     print(f"チャンク数: {CHUNK_COUNT}")
     print(f"総タスク数: {parallel_count * CHUNK_COUNT}")
+    print(f"バッチサイズ: {batch_size}")
     print(f"処理方式:")
     print(f"  ① CPU: {parallel_count}並列でPostgreSQL COPY実行")
-    print(f"  ② GPU: 順次処理（メモリ競合回避）")
+    print(f"  ② GPU: セミパイプライン処理（{batch_size}個のCOPY完了ごとにGPU処理開始）")
     
     # GPU Direct サポート確認
     gds_supported = check_gpu_direct_support() if use_gpu_direct else False
@@ -371,68 +373,88 @@ def run_ray_parallel_sequential_gpu(
     
     print(f"✅ {len(all_copy_futures)}個のCOPYタスクを投入")
     
-    # COPY結果を収集
+    # セミパイプライン処理: COPYとGPUを並行実行
     copy_results = []
+    gpu_results = []
+    pending_gpu_tasks = []  # GPU処理待ちのタスク
+    
     total_copy_time = 0
     total_data_size = 0
-    
-    while all_copy_futures:
-        # 完了したタスクを1つずつ処理
-        ready_futures, remaining_futures = ray.wait(all_copy_futures, num_returns=1)
-        all_copy_futures = remaining_futures
-        
-        for future in ready_futures:
-            result = ray.get(future)
-            copy_results.append(result)
-            
-            if result['status'] == 'success':
-                total_copy_time += result['copy_time']
-                total_data_size += result['data_size']
-            else:
-                print(f"❌ Worker {result['worker_id']}-Chunk{result['chunk_idx']} COPY失敗: {result.get('error', 'Unknown')}")
-    
-    # 成功したCOPY結果のみ抽出
-    successful_copies = [r for r in copy_results if r['status'] == 'success']
-    print(f"\n✅ COPY完了: {len(successful_copies)}/{len(copy_results)} タスク成功")
-    print(f"総データサイズ: {total_data_size / (1024*1024):.2f} MB")
-    
-    # GPU処理を順次実行
-    print(f"\n=== フェーズ2: GPU順次処理 ===")
-    gpu_results = []
     total_gpu_transfer_time = 0
     total_gpu_processing_time = 0
     total_rows_processed = 0
     
     output_base = OUTPUT_PARQUET_PATH
     
-    for i, copy_result in enumerate(successful_copies):
-        if 'temp_file' not in copy_result:
-            continue
-            
-        output_path = f"{output_base}_worker{copy_result['worker_id']}_chunk{copy_result['chunk_idx']}.parquet"
-        
-        # GPU処理（メインプロセスで実行）
-        gpu_result = process_file_on_gpu(
-            copy_result['temp_file'],
-            copy_result['data_size'],
-            columns,
-            gds_supported,
-            output_path,
-            copy_result['worker_id'],
-            copy_result['chunk_idx']
-        )
-        
-        gpu_results.append(gpu_result)
-        
-        if gpu_result['status'] == 'success':
-            total_gpu_transfer_time += gpu_result['gpu_transfer_time']
-            total_gpu_processing_time += gpu_result['gpu_processing_time']
-            total_rows_processed += gpu_result['rows_processed']
-        
-        print(f"進捗: {i+1}/{len(successful_copies)} 完了")
+    print(f"\n=== セミパイプライン処理開始 ===")
+    print(f"COPYが{batch_size}個完了するごとにGPU処理を開始します")
     
-    # 成功したGPU処理の数
+    while all_copy_futures or pending_gpu_tasks:
+        # COPYタスクがまだある場合
+        if all_copy_futures:
+            # 完了したCOPYタスクをバッチサイズまで収集
+            num_to_wait = min(batch_size, len(all_copy_futures))
+            ready_futures, remaining_futures = ray.wait(all_copy_futures, num_returns=num_to_wait, timeout=0.1)
+            all_copy_futures = remaining_futures
+            
+            # COPY結果を処理
+            for future in ready_futures:
+                result = ray.get(future)
+                copy_results.append(result)
+                
+                if result['status'] == 'success':
+                    total_copy_time += result['copy_time']
+                    total_data_size += result['data_size']
+                    pending_gpu_tasks.append(result)
+                    print(f"✅ COPY完了: Worker{result['worker_id']}-Chunk{result['chunk_idx']} "
+                          f"({result['data_size']/(1024*1024):.1f}MB)")
+                else:
+                    print(f"❌ COPY失敗: Worker{result['worker_id']}-Chunk{result['chunk_idx']} - "
+                          f"{result.get('error', 'Unknown')}")
+        
+        # GPU処理待ちタスクがバッチサイズに達した場合、またはCOPYが全て完了した場合
+        if (len(pending_gpu_tasks) >= batch_size) or (not all_copy_futures and pending_gpu_tasks):
+            # バッチサイズ分のGPU処理を実行
+            tasks_to_process = pending_gpu_tasks[:batch_size] if len(pending_gpu_tasks) >= batch_size else pending_gpu_tasks
+            pending_gpu_tasks = pending_gpu_tasks[len(tasks_to_process):]
+            
+            print(f"\n📊 GPU処理開始: {len(tasks_to_process)}個のタスク")
+            
+            for copy_result in tasks_to_process:
+                if 'temp_file' not in copy_result:
+                    continue
+                
+                output_path = f"{output_base}_worker{copy_result['worker_id']}_chunk{copy_result['chunk_idx']}.parquet"
+                
+                # GPU処理（メインプロセスで実行）
+                gpu_result = process_file_on_gpu(
+                    copy_result['temp_file'],
+                    copy_result['data_size'],
+                    columns,
+                    gds_supported,
+                    output_path,
+                    copy_result['worker_id'],
+                    copy_result['chunk_idx']
+                )
+                
+                gpu_results.append(gpu_result)
+                
+                if gpu_result['status'] == 'success':
+                    total_gpu_transfer_time += gpu_result['gpu_transfer_time']
+                    total_gpu_processing_time += gpu_result['gpu_processing_time']
+                    total_rows_processed += gpu_result['rows_processed']
+            
+            print(f"✅ GPU処理完了: {len(tasks_to_process)}個のタスク処理済み "
+                  f"(累計: {len(gpu_results)}/{len(copy_results)})")
+    
+    # 成功した処理の数を集計
+    successful_copies = [r for r in copy_results if r['status'] == 'success']
     successful_gpu = [r for r in gpu_results if r['status'] == 'success']
+    
+    print(f"\n✅ 全処理完了")
+    print(f"COPY: {len(successful_copies)}/{len(copy_results)} タスク成功")
+    print(f"GPU: {len(successful_gpu)}/{len(gpu_results)} タスク成功")
+    print(f"総データサイズ: {total_data_size / (1024*1024):.2f} MB")
     
     # 総合結果
     total_time = time.time() - start_total_time
@@ -460,7 +482,8 @@ def run_ray_parallel_sequential_gpu(
         print(f"  全体スループット  : {overall_throughput:.2f} MB/sec")
     
     print("\n--- 処理方式の特徴 ---")
-    print("  ✅ 安定性優先: GPU処理を順次実行")
+    print("  ✅ セミパイプライン: COPYとGPU処理を並行実行")
+    print(f"  ✅ バッチサイズ: {batch_size}個のCOPY完了ごとにGPU処理開始")
     print("  ✅ メモリ効率: GPUメモリ競合を回避")
     print("  ✅ 確実な処理: 64個のParquetファイル生成")
     print("=========================================")
@@ -504,7 +527,8 @@ def main():
     run_ray_parallel_sequential_gpu(
         limit_rows=final_limit_rows,
         parallel_count=args.parallel,
-        use_gpu_direct=not args.no_gpu_direct
+        use_gpu_direct=not args.no_gpu_direct,
+        batch_size=args.batch_size
     )
 
 if __name__ == "__main__":

@@ -39,5 +39,29 @@
 
 この哲学により、従来のCPU中心の処理を完全に刷新し、GPU本来の性能を100%引き出す革新的な実装を実現しています。
 
+## 環境設定
+
+### 重要: 実行環境の設定
+このプロジェクトを実行する際は、必ず正しいconda環境を使用してください：
+
+```bash
+# conda環境のアクティベート（必須）
+source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
+conda activate cudf_dev
+
+# 環境変数の設定
+export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
+```
+
+### 利用可能なconda環境
+- `cudf_dev` - **推奨**: cuDF/RAPIDS開発環境（メイン開発環境）
+- `cudf_dev2412` - cuDF 24.12バージョン
+- `numba-cuda` - Numba CUDA環境（cuDFなし）
+
+### よくある問題
+- `ModuleNotFoundError: No module named 'cudf'` → conda環境が間違っています。`conda activate cudf_dev`を実行してください
+- `CondaError: Run 'conda init' before 'conda activate'` → `source /home/ubuntu/miniconda3/etc/profile.d/conda.sh`を先に実行してください
+
 ## Memories
 - **Memory**: Added memory section to track development insights and key project memories
+- **Environment Setup**: 毎回conda環境の設定で問題が発生。必ず`cudf_dev`環境を使用すること
