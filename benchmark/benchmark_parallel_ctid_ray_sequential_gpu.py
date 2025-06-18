@@ -438,7 +438,7 @@ def run_ray_parallel_sequential_gpu(
     total_time = time.time() - start_total_time
     
     print(f"\n{'='*60}")
-    print(f"=== Ray並列順次GPU処理ベンチマーク完了 ===")
+    print(f"=== Ray並列セミパイプラインGPU処理ベンチマーク完了 ===")
     print(f"{'='*60}")
     print(f"総時間 = {total_time:.4f} 秒")
     print("--- 時間内訳 ---")
@@ -472,10 +472,11 @@ def run_ray_parallel_sequential_gpu(
 
 def main():
     """メイン関数"""
-    parser = argparse.ArgumentParser(description='PostgreSQL → GPU Ray並列 順次GPU処理版')
+    parser = argparse.ArgumentParser(description='PostgreSQL → GPU Ray並列 セミパイプライン処理版')
     parser.add_argument('--rows', type=int, default=10000000, help='処理行数制限')
     parser.add_argument('--parallel', type=int, default=DEFAULT_PARALLEL, help='並列数')
     parser.add_argument('--chunks', type=int, default=4, help='チャンク数')
+    parser.add_argument('--batch-size', type=int, default=4, help='セミパイプラインのバッチサイズ')
     parser.add_argument('--no-limit', action='store_true', help='LIMIT無し（全件高速モード）')
     parser.add_argument('--check-support', action='store_true', help='GPU Directサポート確認のみ')
     parser.add_argument('--no-gpu-direct', action='store_true', help='GPU Direct無効化')

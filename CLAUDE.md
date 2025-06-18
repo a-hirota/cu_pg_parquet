@@ -41,4 +41,3 @@
 
 ## Memories
 - **Memory**: Added memory section to track development insights and key project memories
-- **to memorize**
