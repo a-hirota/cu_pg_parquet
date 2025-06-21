@@ -91,7 +91,27 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - エラーや問題は隠さず、透明性を持って報告
 - 実装の進捗を定期的に共有
 
+## ベンチマーク実行の原則
+
+### 重要な開発指針
+1. **必ず全テーブルを対象に実施すること**
+   - LIMITやサンプリングは使用しない
+   - ctid範囲分割による並列処理で全データを処理
+   - 真の性能測定のため、常に完全なデータセットを使用
+
+2. **ストリーミング処理は使わないこと**
+   - データは一括でメモリに読み込む
+   - メモリ効率よりも処理速度を優先
+   - GPU処理の真の性能を測定するため
+
+3. **標準ベンチマーク設定**
+   - **並列数**: 16 (`--parallel 16`)
+   - **チャンク数**: 4 (`--chunks 4`)
+   - **総タスク数**: 64（16×4）
+   - この設定により真の高並列処理性能を測定
+
 ## Memories
 - **Memory**: Added memory section to track development insights and key project memories
 - **Environment Setup**: 毎回conda環境の設定で問題が発生。必ず`cudf_dev`環境を使用すること
 - **Development Governance**: 方針変更には上司の許可が必要。実装困難時は即座に状況報告と代替案の提示を行う
+- **Benchmark Principles**: 必ず全テーブルを対象に実施。ストリーミング処理は使用禁止

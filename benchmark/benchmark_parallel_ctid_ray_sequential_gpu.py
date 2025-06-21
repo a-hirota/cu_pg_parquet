@@ -23,6 +23,8 @@ import numpy as np
 from numba import cuda
 import argparse
 from typing import List, Dict, Tuple, Optional
+import psutil
+import sys
 
 from src.metadata import fetch_column_meta
 from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
@@ -56,6 +58,10 @@ class PostgreSQLWorker:
     ) -> Dict[str, any]:
         """PostgreSQLからデータをCOPYしてピンメモリに保存"""
         
+        # メモリ使用量デバッグ用
+        process = psutil.Process()
+        initial_memory = process.memory_info().rss / (1024**3)  # GB
+        
         # チャンクに応じてctid範囲を分割
         block_range = end_block - start_block
         chunk_block_size = block_range // total_chunks
@@ -64,6 +70,7 @@ class PostgreSQLWorker:
         chunk_end_block = start_block + ((chunk_idx + 1) * chunk_block_size) if chunk_idx < total_chunks - 1 else end_block
         
         print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY開始 ctid範囲 ({chunk_start_block},{chunk_end_block})...")
+        print(f"  初期メモリ使用量: {initial_memory:.2f} GB")
         
         start_time = time.time()
         
@@ -83,19 +90,40 @@ class PostgreSQLWorker:
                 with conn.cursor() as cur:
                     with cur.copy(copy_sql) as copy_obj:
                         if batch_read:
-                            # 一括読み込み方式（メモリ効率的）
-                            all_chunks = []
+                            # io.BytesIOを使用した効率的な読み込み（ADBCスタイル）
+                            import io
+                            buffer_io = io.BytesIO()
+                            chunk_count = 0
+                            chunk_total_size = 0
+                            
                             for chunk in copy_obj:
                                 if chunk:
-                                    # memoryview → bytes変換
+                                    chunk_count += 1
+                                    # 直接BytesIOに書き込み（中間オブジェクトを作成しない）
                                     if isinstance(chunk, memoryview):
-                                        chunk_bytes = chunk.tobytes()
+                                        buffer_io.write(chunk)
+                                        chunk_size = len(chunk)
                                     else:
-                                        chunk_bytes = bytes(chunk)
-                                    all_chunks.append(chunk_bytes)
+                                        buffer_io.write(chunk)
+                                        chunk_size = len(chunk)
+                                    
+                                    chunk_total_size += chunk_size
+                                    
+                                    # デバッグ: 最初の10チャンクのサイズを表示
+                                    if chunk_count <= 10:
+                                        print(f"    チャンク{chunk_count}: {chunk_size} bytes")
                             
-                            # 全チャンクを結合
-                            buffer = bytearray(b''.join(all_chunks))
+                            # メモリ使用量（BytesIO書き込み後）
+                            memory_after_io = process.memory_info().rss / (1024**3)
+                            print(f"  チャンク読み込み完了: {chunk_count}個, 合計{chunk_total_size/(1024**2):.2f} MB")
+                            print(f"  メモリ使用量（BytesIO書き込み後）: {memory_after_io:.2f} GB (+{memory_after_io - initial_memory:.2f} GB)")
+                            
+                            # BytesIOからbytearrayを取得
+                            buffer = bytearray(buffer_io.getvalue())
+                            
+                            # メモリ使用量（最終）
+                            memory_after_buffer = process.memory_info().rss / (1024**3)
+                            print(f"  メモリ使用量（最終）: {memory_after_buffer:.2f} GB (+{memory_after_buffer - memory_after_io:.2f} GB)")
                         else:
                             # 従来方式（逐次追加）
                             buffer = bytearray()
@@ -112,8 +140,12 @@ class PostgreSQLWorker:
                 
                 copy_time = time.time() - start_time
                 data_size = len(buffer)  # 実際のデータサイズ
+                
+                # 最終メモリ使用量
+                final_memory = process.memory_info().rss / (1024**3)
                 print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY完了 "
                       f"({copy_time:.2f}秒, {data_size/(1024*1024):.1f}MB)")
+                print(f"  最終メモリ使用量: {final_memory:.2f} GB (合計増加: +{final_memory - initial_memory:.2f} GB)")
                 
                 # bytearrayをbytesに変換して返す
                 return {
@@ -140,18 +172,14 @@ class PostgreSQLWorker:
     
     def _make_copy_sql(self, table_name: str, start_block: int, end_block: int, limit_rows: Optional[int]) -> str:
         """COPY SQL生成"""
+        # 純粋なctid範囲分割による並列実行（LIMIT削除）
         sql = f"""
         COPY (
             SELECT * FROM {table_name}
             WHERE ctid >= '({start_block},1)'::tid
               AND ctid < '({end_block+1},1)'::tid
-        """
+        ) TO STDOUT (FORMAT binary)"""
         
-        if limit_rows:
-            # 64タスク全体での行数制限
-            sql += f" LIMIT {limit_rows // (DEFAULT_PARALLEL * CHUNK_COUNT)}"
-        
-        sql += ") TO STDOUT (FORMAT binary)"
         return sql
 
 
