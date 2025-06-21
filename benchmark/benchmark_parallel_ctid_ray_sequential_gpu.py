@@ -21,7 +21,6 @@ import ray
 import gc
 import numpy as np
 from numba import cuda
-import cupy as cp
 import argparse
 from typing import List, Dict, Tuple, Optional
 
@@ -44,7 +43,7 @@ class PostgreSQLWorker:
         self.worker_id = worker_id
         self.dsn = dsn
         
-    def copy_data_to_file(
+    def copy_data_to_memory(
         self, 
         table_name: str,
         start_block: int, 
@@ -52,9 +51,9 @@ class PostgreSQLWorker:
         chunk_idx: int,
         total_chunks: int,
         limit_rows: Optional[int] = None,
-        chunk_size: int = 16 * 1024 * 1024  # 16MB
+        initial_buffer_size: int = 64 * 1024 * 1024  # 64MB
     ) -> Dict[str, any]:
-        """PostgreSQLからデータをCOPYしてファイルに保存"""
+        """PostgreSQLからデータをCOPYしてピンメモリに保存"""
         
         # チャンクに応じてctid範囲を分割
         block_range = end_block - start_block
@@ -65,18 +64,15 @@ class PostgreSQLWorker:
         
         print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY開始 ctid範囲 ({chunk_start_block},{chunk_end_block})...")
         
-        # 一時ファイル作成
-        temp_file = os.path.join(
-            tempfile.gettempdir(),
-            f"ray_worker_{self.worker_id}_chunk{chunk_idx}_{chunk_start_block}_{chunk_end_block}.bin"
-        )
-        
         start_time = time.time()
         
         try:
             # PostgreSQL接続
             conn = psycopg.connect(self.dsn)
-            data_size = 0
+            
+            # 通常のbytearrayを使用（Rayワーカーでピンメモリ確保は困難）
+            buffer = bytearray()
+            offset = 0
             
             try:
                 # COPY SQL生成
@@ -85,38 +81,27 @@ class PostgreSQLWorker:
                 # データ取得
                 with conn.cursor() as cur:
                     with cur.copy(copy_sql) as copy_obj:
-                        with open(temp_file, 'wb') as f:
-                            buffer = bytearray()
-                            
-                            for chunk in copy_obj:
-                                if chunk:
-                                    # memoryview → bytes変換
-                                    if isinstance(chunk, memoryview):
-                                        chunk_bytes = chunk.tobytes()
-                                    else:
-                                        chunk_bytes = bytes(chunk)
-                                    
-                                    buffer.extend(chunk_bytes)
-                                    
-                                    # チャンクサイズに達したら書き込み
-                                    if len(buffer) >= chunk_size:
-                                        f.write(buffer)
-                                        data_size += len(buffer)
-                                        buffer.clear()
-                            
-                            # 残りバッファを書き込み
-                            if buffer:
-                                f.write(buffer)
-                                data_size += len(buffer)
+                        for chunk in copy_obj:
+                            if chunk:
+                                # memoryview → bytes変換
+                                if isinstance(chunk, memoryview):
+                                    chunk_bytes = chunk.tobytes()
+                                else:
+                                    chunk_bytes = bytes(chunk)
+                                
+                                # bytearrayに追加
+                                buffer.extend(chunk_bytes)
                 
                 copy_time = time.time() - start_time
+                data_size = len(buffer)  # 実際のデータサイズ
                 print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY完了 "
                       f"({copy_time:.2f}秒, {data_size/(1024*1024):.1f}MB)")
                 
+                # bytearrayをbytesに変換して返す
                 return {
                     'worker_id': self.worker_id,
                     'chunk_idx': chunk_idx,
-                    'temp_file': temp_file,
+                    'data': bytes(buffer),  # bytesに変換してシリアライズ可能に
                     'data_size': data_size,
                     'copy_time': copy_time,
                     'status': 'success'
@@ -152,92 +137,124 @@ class PostgreSQLWorker:
         return sql
 
 
-def process_file_on_gpu(
-    temp_file: str,
-    data_size: int,
+def process_batch_on_gpu(
+    batch_tasks: List[Dict],
     columns: List,
     gds_supported: bool,
-    output_path: str,
-    worker_id: int,
-    chunk_idx: int
-) -> Dict[str, any]:
-    """単一ファイルをGPUで処理（メインプロセスで実行）"""
+    output_base: str
+) -> List[Dict]:
+    """複数のメモリバッファを結合して1回のGPU処理で実行"""
     
-    print(f"\nGPU処理開始: Worker {worker_id}-Chunk{chunk_idx}")
-    timing_info = {
-        'gpu_transfer_time': 0.0,
-        'gpu_processing_time': 0.0,
-        'rows_processed': 0
-    }
+    import cupy as cp  # メインプロセスでインポート
+    
+    num_tasks = len(batch_tasks)
+    print(f"\n📊 バッチGPU処理開始: {num_tasks}個のタスクを統合処理")
+    
+    results = []
+    start_total_time = time.time()
     
     try:
-        # GPU転送
+        # 1. 全データサイズを計算
+        total_size = sum(task['data_size'] for task in batch_tasks)
+        print(f"  統合データサイズ: {total_size/(1024*1024):.2f} MB")
+        
+        # 2. cupyxの高レベルAPIを使用してピンメモリ配列を作成
         start_gpu_transfer_time = time.time()
+        import cupyx
+        pinned_array = cupyx.zeros_pinned(total_size, dtype=np.uint8)
         
-        # CuPy配列として確保
-        gpu_array = cp.zeros(data_size, dtype=cp.uint8)
+        # 3. 各タスクのデータをピンメモリにコピー
+        task_offsets = []
+        current_offset = 0
         
-        if gds_supported:
-            # GPU Direct転送
-            import kvikio
-            from kvikio import CuFile
+        for task in batch_tasks:
+            # データを直接ピンメモリにコピー
+            data_len = task['data_size']
+            pinned_array[current_offset:current_offset + data_len] = np.frombuffer(task['data'], dtype=np.uint8)
             
-            with CuFile(temp_file, "r") as cufile:
-                future = cufile.pread(gpu_array)
-                future.get()
-        else:
-            # 通常転送
-            with open(temp_file, 'rb') as f:
-                file_data = f.read()
-            gpu_array[:] = cp.frombuffer(file_data, dtype=cp.uint8)
+            task_offsets.append({
+                'worker_id': task['worker_id'],
+                'chunk_idx': task['chunk_idx'],
+                'offset': current_offset,
+                'size': task['data_size']
+            })
+            current_offset += task['data_size']
         
-        timing_info['gpu_transfer_time'] = time.time() - start_gpu_transfer_time
-        print(f"  GPU転送完了 ({timing_info['gpu_transfer_time']:.2f}秒)")
+        # 4. GPU配列を確保し、ピンメモリから高速転送（set()を使用）
+        gpu_array = cp.empty(total_size, dtype=cp.uint8)
+        gpu_array.set(pinned_array)  # 効率的なコピー方法
         
-        # 一時ファイル削除
-        os.remove(temp_file)
+        gpu_transfer_time = time.time() - start_gpu_transfer_time
+        print(f"  GPU転送完了 ({gpu_transfer_time:.2f}秒, {(total_size/(1024*1024))/gpu_transfer_time:.2f} MB/sec)")
         
-        # GPU処理
+        # 5. 統合データで1回のGPU処理を実行
         start_gpu_processing_time = time.time()
         
-        # numba用の配列に変換
-        raw_dev = cuda.as_cuda_array(gpu_array)
-        header_sample = gpu_array[:min(128, len(gpu_array))].get()
-        header_size = detect_pg_header_size(header_sample)
+        # 各データセットを個別に処理（将来的には統合処理に拡張可能）
+        for i, (task, offset_info) in enumerate(zip(batch_tasks, task_offsets)):
+            print(f"\n  処理中 [{i+1}/{num_tasks}]: Worker{offset_info['worker_id']}-Chunk{offset_info['chunk_idx']}")
+            
+            # データセットの切り出し
+            dataset_gpu = gpu_array[offset_info['offset']:offset_info['offset'] + offset_info['size']]
+            
+            # numba用の配列に変換
+            raw_dev = cuda.as_cuda_array(dataset_gpu)
+            header_sample = dataset_gpu[:min(128, len(dataset_gpu))].get()
+            header_size = detect_pg_header_size(header_sample)
+            
+            # 出力パス
+            output_path = f"{output_base}_worker{offset_info['worker_id']}_chunk{offset_info['chunk_idx']}.parquet"
+            
+            # GPU最適化処理
+            cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                raw_dev=raw_dev,
+                columns=columns,
+                ncols=len(columns),
+                header_size=header_size,
+                output_path=output_path,
+                compression='snappy',
+                use_rmm=False,
+                optimize_gpu=True
+            )
+            
+            results.append({
+                'worker_id': offset_info['worker_id'],
+                'chunk_idx': offset_info['chunk_idx'],
+                'gpu_transfer_time': gpu_transfer_time / num_tasks,  # 転送時間を分配
+                'gpu_processing_time': detailed_timing.get('overall_total', 0),
+                'rows_processed': len(cudf_df),
+                'status': 'success'
+            })
         
-        # GPU最適化処理
-        cudf_df, detailed_timing = postgresql_to_cudf_parquet(
-            raw_dev=raw_dev,
-            columns=columns,
-            ncols=len(columns),
-            header_size=header_size,
-            output_path=output_path,
-            compression='snappy',
-            use_rmm=False,  # CuPyでメモリ管理
-            optimize_gpu=True
-        )
+        gpu_processing_time = time.time() - start_gpu_processing_time
+        total_time = time.time() - start_total_time
         
-        timing_info['gpu_processing_time'] = time.time() - start_gpu_processing_time
-        timing_info['rows_processed'] = len(cudf_df)
-        
-        print(f"  GPU処理完了 ({timing_info['gpu_processing_time']:.2f}秒, {timing_info['rows_processed']:,}行)")
+        print(f"\n✅ バッチGPU処理完了:")
+        print(f"  総処理時間: {total_time:.2f}秒")
+        print(f"  GPU転送: {gpu_transfer_time:.2f}秒")
+        print(f"  GPU処理: {gpu_processing_time:.2f}秒")
+        print(f"  スループット: {(total_size/(1024*1024))/total_time:.2f} MB/sec")
         
         # メモリ解放
         del gpu_array
-        del raw_dev
         gc.collect()
         cp.get_default_memory_pool().free_all_blocks()
         cuda.synchronize()
         
-        timing_info['status'] = 'success'
-        return timing_info
+        return results
         
     except Exception as e:
-        print(f"  ❌GPU処理失敗: {e}")
-        timing_info['status'] = 'error'
-        timing_info['error'] = str(e)
+        print(f"  ❌バッチGPU処理失敗: {e}")
+        # エラー時は個別にエラー結果を返す
+        for task in batch_tasks:
+            results.append({
+                'worker_id': task['worker_id'],
+                'chunk_idx': task['chunk_idx'],
+                'status': 'error',
+                'error': str(e)
+            })
         
-        # エラー時もメモリ解放を試みる
+        # メモリ解放を試みる
         try:
             gc.collect()
             cp.get_default_memory_pool().free_all_blocks()
@@ -245,7 +262,7 @@ def process_file_on_gpu(
         except:
             pass
             
-        return timing_info
+        return results
 
 
 def get_table_blocks(dsn: str, table_name: str) -> int:
@@ -366,7 +383,7 @@ def run_ray_parallel_sequential_gpu(
     
     for worker_idx, (start_block, end_block) in enumerate(ranges):
         for chunk_idx in range(CHUNK_COUNT):
-            future = workers[worker_idx].copy_data_to_file.remote(
+            future = workers[worker_idx].copy_data_to_memory.remote(
                 TABLE_NAME, start_block, end_block, chunk_idx, CHUNK_COUNT, limit_rows
             )
             all_copy_futures.append(future)
@@ -414,29 +431,20 @@ def run_ray_parallel_sequential_gpu(
         
         # GPU処理待ちタスクがバッチサイズに達した場合、またはCOPYが全て完了した場合
         if (len(pending_gpu_tasks) >= batch_size) or (not all_copy_futures and pending_gpu_tasks):
-            # バッチサイズ分のGPU処理を実行
+            # バッチサイズ分のタスクを取得
             tasks_to_process = pending_gpu_tasks[:batch_size] if len(pending_gpu_tasks) >= batch_size else pending_gpu_tasks
             pending_gpu_tasks = pending_gpu_tasks[len(tasks_to_process):]
             
-            print(f"\n📊 GPU処理開始: {len(tasks_to_process)}個のタスク")
+            # バッチGPU処理を実行
+            batch_results = process_batch_on_gpu(
+                tasks_to_process,
+                columns,
+                gds_supported,
+                output_base
+            )
             
-            for copy_result in tasks_to_process:
-                if 'temp_file' not in copy_result:
-                    continue
-                
-                output_path = f"{output_base}_worker{copy_result['worker_id']}_chunk{copy_result['chunk_idx']}.parquet"
-                
-                # GPU処理（メインプロセスで実行）
-                gpu_result = process_file_on_gpu(
-                    copy_result['temp_file'],
-                    copy_result['data_size'],
-                    columns,
-                    gds_supported,
-                    output_path,
-                    copy_result['worker_id'],
-                    copy_result['chunk_idx']
-                )
-                
+            # 結果を集計
+            for gpu_result in batch_results:
                 gpu_results.append(gpu_result)
                 
                 if gpu_result['status'] == 'success':
@@ -444,8 +452,7 @@ def run_ray_parallel_sequential_gpu(
                     total_gpu_processing_time += gpu_result['gpu_processing_time']
                     total_rows_processed += gpu_result['rows_processed']
             
-            print(f"✅ GPU処理完了: {len(tasks_to_process)}個のタスク処理済み "
-                  f"(累計: {len(gpu_results)}/{len(copy_results)})")
+            print(f"処理済みタスク累計: {len(gpu_results)}/{len(copy_results)}")
     
     # 成功した処理の数を集計
     successful_copies = [r for r in copy_results if r['status'] == 'success']
