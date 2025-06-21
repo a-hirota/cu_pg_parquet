@@ -1,12 +1,17 @@
 """
-PostgreSQL → GPU Ray並列 順次GPU処理版
-CPU並列でCOPY、GPU処理は順次実行して安定性を確保
+PostgreSQL → GPU Ray並列 順次GPU処理版（詳細デバッグ版）
+psycopg3のボトルネック分析用の詳細プロファイリング機能付き
 
 最適化:
 - 16並列でPostgreSQL COPYを実行
 - GPU処理は1つずつ順次実行（メモリ競合回避）
 - CuPy配列による安定したメモリ管理
 - 64個の独立したParquetファイル出力
+
+デバッグ機能:
+- psycopg3チャンクサイズ可視化
+- 詳細タイミング測定
+- CSV/JSON結果出力
 
 環境変数:
 GPUPASER_PG_DSN  : PostgreSQL接続文字列
@@ -23,25 +28,43 @@ import numpy as np
 from numba import cuda
 import argparse
 from typing import List, Dict, Tuple, Optional
+import json
+import csv
+from datetime import datetime
 
 from src.metadata import fetch_column_meta
 from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet
 
 TABLE_NAME = "lineorder"
-OUTPUT_PARQUET_PATH = "benchmark/lineorder_parallel_ctid_ray_sequential_gpu.output"
+OUTPUT_PARQUET_PATH = "benchmark/lineorder_parallel_ctid_ray_sequential_gpu_debug.output"
+DEBUG_OUTPUT_DIR = "benchmark/debug_output"
 
 # 並列設定
 DEFAULT_PARALLEL = 16
 CHUNK_COUNT = 4  # 各ワーカーのctid範囲をチャンクに分割
 
+# デバッグ用グローバル統計
+DEBUG_STATS = {
+    'chunk_sizes': [],
+    'chunk_times': [],
+    'connection_times': [],
+    'copy_init_times': [],
+    'buffer_operations': []
+}
+
 @ray.remote
 class PostgreSQLWorker:
-    """Ray並列ワーカー: PostgreSQL COPY専用"""
+    """Ray並列ワーカー: PostgreSQL COPY専用（デバッグ機能付き）"""
     
     def __init__(self, worker_id: int, dsn: str):
         self.worker_id = worker_id
         self.dsn = dsn
+        self.debug_stats = {
+            'chunks_received': [],
+            'chunk_times': [],
+            'buffer_resizes': 0
+        }
         
     def copy_data_to_memory(
         self, 
@@ -52,9 +75,9 @@ class PostgreSQLWorker:
         total_chunks: int,
         limit_rows: Optional[int] = None,
         initial_buffer_size: int = 64 * 1024 * 1024,  # 64MB
-        batch_read: bool = True  # 一括読み込み最適化
+        debug_mode: bool = True
     ) -> Dict[str, any]:
-        """PostgreSQLからデータをCOPYしてピンメモリに保存"""
+        """PostgreSQLからデータをCOPYしてピンメモリに保存（詳細デバッグ付き）"""
         
         # チャンクに応じてctid範囲を分割
         block_range = end_block - start_block
@@ -66,54 +89,91 @@ class PostgreSQLWorker:
         print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY開始 ctid範囲 ({chunk_start_block},{chunk_end_block})...")
         
         start_time = time.time()
+        timing_details = {
+            'connection': 0,
+            'copy_init': 0,
+            'chunk_reads': [],
+            'buffer_ops': 0,
+            'total': 0
+        }
         
         try:
             # PostgreSQL接続
+            conn_start = time.time()
             conn = psycopg.connect(self.dsn)
+            timing_details['connection'] = time.time() - conn_start
             
             # 通常のbytearrayを使用（Rayワーカーでピンメモリ確保は困難）
             buffer = bytearray()
-            offset = 0
+            chunk_count = 0
+            total_bytes = 0
             
             try:
                 # COPY SQL生成
                 copy_sql = self._make_copy_sql(table_name, chunk_start_block, chunk_end_block, limit_rows)
                 
                 # データ取得
+                copy_init_start = time.time()
                 with conn.cursor() as cur:
                     with cur.copy(copy_sql) as copy_obj:
-                        if batch_read:
-                            # 一括読み込み方式（メモリ効率的）
-                            all_chunks = []
-                            for chunk in copy_obj:
-                                if chunk:
-                                    # memoryview → bytes変換
-                                    if isinstance(chunk, memoryview):
-                                        chunk_bytes = chunk.tobytes()
-                                    else:
-                                        chunk_bytes = bytes(chunk)
-                                    all_chunks.append(chunk_bytes)
-                            
-                            # 全チャンクを結合
-                            buffer = bytearray(b''.join(all_chunks))
-                        else:
-                            # 従来方式（逐次追加）
-                            buffer = bytearray()
-                            for chunk in copy_obj:
-                                if chunk:
-                                    # memoryview → bytes変換
-                                    if isinstance(chunk, memoryview):
-                                        chunk_bytes = chunk.tobytes()
-                                    else:
-                                        chunk_bytes = bytes(chunk)
+                        timing_details['copy_init'] = time.time() - copy_init_start
+                        
+                        for chunk in copy_obj:
+                            chunk_start = time.time()
+                            if chunk:
+                                # チャンクサイズ記録
+                                chunk_size = len(chunk)
+                                chunk_count += 1
+                                
+                                # memoryview → bytes変換
+                                if isinstance(chunk, memoryview):
+                                    chunk_bytes = chunk.tobytes()
+                                else:
+                                    chunk_bytes = bytes(chunk)
+                                
+                                # bytearrayに追加
+                                buffer_start = time.time()
+                                buffer.extend(chunk_bytes)
+                                buffer_time = time.time() - buffer_start
+                                
+                                chunk_time = time.time() - chunk_start
+                                total_bytes += chunk_size
+                                
+                                # デバッグ情報記録
+                                if debug_mode:
+                                    timing_details['chunk_reads'].append({
+                                        'chunk_num': chunk_count,
+                                        'size': chunk_size,
+                                        'time': chunk_time,
+                                        'buffer_time': buffer_time,
+                                        'cumulative_size': total_bytes
+                                    })
                                     
-                                    # bytearrayに追加
-                                    buffer.extend(chunk_bytes)
+                                    # 10チャンクごとに進捗表示
+                                    if chunk_count % 10 == 0:
+                                        avg_chunk_size = total_bytes / chunk_count
+                                        print(f"  Worker{self.worker_id}-Chunk{chunk_idx}: "
+                                              f"{chunk_count}チャンク読込済 "
+                                              f"(平均{avg_chunk_size/1024:.1f}KB/chunk, "
+                                              f"合計{total_bytes/(1024*1024):.1f}MB)")
                 
                 copy_time = time.time() - start_time
                 data_size = len(buffer)  # 実際のデータサイズ
+                
                 print(f"Worker {self.worker_id}-Chunk{chunk_idx}: COPY完了 "
-                      f"({copy_time:.2f}秒, {data_size/(1024*1024):.1f}MB)")
+                      f"({copy_time:.2f}秒, {data_size/(1024*1024):.1f}MB, "
+                      f"{chunk_count}チャンク)")
+                
+                # デバッグ統計サマリー
+                if debug_mode and timing_details['chunk_reads']:
+                    avg_chunk_size = np.mean([c['size'] for c in timing_details['chunk_reads']])
+                    max_chunk_size = max([c['size'] for c in timing_details['chunk_reads']])
+                    min_chunk_size = min([c['size'] for c in timing_details['chunk_reads']])
+                    
+                    print(f"  チャンクサイズ統計: 平均{avg_chunk_size/1024:.1f}KB, "
+                          f"最小{min_chunk_size/1024:.1f}KB, 最大{max_chunk_size/1024:.1f}KB")
+                
+                timing_details['total'] = copy_time
                 
                 # bytearrayをbytesに変換して返す
                 return {
@@ -122,6 +182,8 @@ class PostgreSQLWorker:
                     'data': bytes(buffer),  # bytesに変換してシリアライズ可能に
                     'data_size': data_size,
                     'copy_time': copy_time,
+                    'chunk_count': chunk_count,
+                    'timing_details': timing_details,
                     'status': 'success'
                 }
                 
@@ -135,7 +197,8 @@ class PostgreSQLWorker:
                 'chunk_idx': chunk_idx,
                 'status': 'error',
                 'error': str(e),
-                'copy_time': time.time() - start_time
+                'copy_time': time.time() - start_time,
+                'timing_details': timing_details
             }
     
     def _make_copy_sql(self, table_name: str, start_block: int, end_block: int, limit_rows: Optional[int]) -> str:
@@ -160,9 +223,9 @@ def process_batch_on_gpu(
     columns: List,
     gds_supported: bool,
     output_base: str,
-    true_batch_mode: bool = False
+    debug_mode: bool = True
 ) -> List[Dict]:
-    """複数のメモリバッファを結合して1回のGPU処理で実行"""
+    """複数のメモリバッファを結合して1回のGPU処理で実行（デバッグ付き）"""
     
     import cupy as cp  # メインプロセスでインポート
     
@@ -171,6 +234,14 @@ def process_batch_on_gpu(
     
     results = []
     start_total_time = time.time()
+    timing_breakdown = {
+        'pinned_alloc': 0,
+        'data_copy_to_pinned': 0,
+        'gpu_alloc': 0,
+        'gpu_transfer': 0,
+        'gpu_processing': [],
+        'memory_cleanup': 0
+    }
     
     try:
         # 1. 全データサイズを計算
@@ -178,11 +249,13 @@ def process_batch_on_gpu(
         print(f"  統合データサイズ: {total_size/(1024*1024):.2f} MB")
         
         # 2. cupyxの高レベルAPIを使用してピンメモリ配列を作成
-        start_gpu_transfer_time = time.time()
+        pinned_start = time.time()
         import cupyx
         pinned_array = cupyx.zeros_pinned(total_size, dtype=np.uint8)
+        timing_breakdown['pinned_alloc'] = time.time() - pinned_start
         
         # 3. 各タスクのデータをピンメモリにコピー
+        copy_start = time.time()
         task_offsets = []
         current_offset = 0
         
@@ -199,115 +272,95 @@ def process_batch_on_gpu(
             })
             current_offset += task['data_size']
         
-        # 4. GPU配列を確保し、ピンメモリから高速転送（set()を使用）
-        gpu_array = cp.empty(total_size, dtype=cp.uint8)
-        gpu_array.set(pinned_array)  # 効率的なコピー方法
+        timing_breakdown['data_copy_to_pinned'] = time.time() - copy_start
         
-        gpu_transfer_time = time.time() - start_gpu_transfer_time
-        print(f"  GPU転送完了 ({gpu_transfer_time:.2f}秒, {(total_size/(1024*1024))/gpu_transfer_time:.2f} MB/sec)")
+        # 4. GPU配列を確保し、ピンメモリから高速転送（set()を使用）
+        gpu_alloc_start = time.time()
+        gpu_array = cp.empty(total_size, dtype=cp.uint8)
+        timing_breakdown['gpu_alloc'] = time.time() - gpu_alloc_start
+        
+        gpu_transfer_start = time.time()
+        gpu_array.set(pinned_array)  # 効率的なコピー方法
+        cuda.synchronize()  # 転送完了を待つ
+        timing_breakdown['gpu_transfer'] = time.time() - gpu_transfer_start
+        
+        gpu_transfer_bandwidth = (total_size / (1024**3)) / timing_breakdown['gpu_transfer']  # GB/s
+        print(f"  GPU転送完了 ({timing_breakdown['gpu_transfer']:.2f}秒, {gpu_transfer_bandwidth:.2f} GB/s)")
         
         # 5. 統合データで1回のGPU処理を実行
         start_gpu_processing_time = time.time()
         
-        if true_batch_mode:
-            # 真のバッチ処理モード: 1回のGPU処理で全タスクを処理
-            print(f"\n  🚀 真のバッチ処理モード: {num_tasks}個のタスクを1回のGPU処理で実行")
+        # 各データセットを個別に処理（将来的には統合処理に拡張可能）
+        for i, (task, offset_info) in enumerate(zip(batch_tasks, task_offsets)):
+            gpu_task_start = time.time()
+            print(f"\n  処理中 [{i+1}/{num_tasks}]: Worker{offset_info['worker_id']}-Chunk{offset_info['chunk_idx']}")
             
-            # 統合されたGPU配列全体を処理
-            raw_dev = cuda.as_cuda_array(gpu_array)
+            # データセットの切り出し
+            dataset_gpu = gpu_array[offset_info['offset']:offset_info['offset'] + offset_info['size']]
             
-            # 最初のデータセットのヘッダーサイズを検出
-            header_sample = gpu_array[:min(128, len(gpu_array))].get()
+            # numba用の配列に変換
+            raw_dev = cuda.as_cuda_array(dataset_gpu)
+            header_sample = dataset_gpu[:min(128, len(dataset_gpu))].get()
             header_size = detect_pg_header_size(header_sample)
             
-            # 統合出力パス
-            output_path = f"{output_base}_batch_integrated.parquet"
+            # 出力パス
+            output_path = f"{output_base}_worker{offset_info['worker_id']}_chunk{offset_info['chunk_idx']}.parquet"
             
-            print(f"  統合データサイズ: {total_size/(1024*1024):.2f} MB")
-            print(f"  ヘッダーサイズ: {header_size} bytes")
-            print(f"  出力パス: {output_path}")
+            # GPU最適化処理
+            cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                raw_dev=raw_dev,
+                columns=columns,
+                ncols=len(columns),
+                header_size=header_size,
+                output_path=output_path,
+                compression='snappy',
+                use_rmm=False,
+                optimize_gpu=True
+            )
             
-            # 全データを1回で処理
-            try:
-                cudf_df, detailed_timing = postgresql_to_cudf_parquet(
-                    raw_dev=raw_dev,
-                    columns=columns,
-                    ncols=len(columns),
-                    header_size=header_size,
-                    output_path=output_path,
-                    compression='snappy',
-                    use_rmm=False,
-                    optimize_gpu=True
-                )
-                
-                print(f"  ✅ バッチ処理成功: {len(cudf_df):,} 行処理済み")
-                
-                # 結果を返す（統合結果として1つのエントリ）
-                results.append({
-                    'worker_id': 'batch',
-                    'chunk_idx': 0,
-                    'gpu_transfer_time': gpu_transfer_time,
-                    'gpu_processing_time': detailed_timing.get('overall_total', 0),
-                    'rows_processed': len(cudf_df),
-                    'status': 'success'
-                })
-                
-            except Exception as e:
-                print(f"  ❌ バッチ処理失敗: {e}")
-                print(f"  個別処理にフォールバック...")
-                true_batch_mode = False
-        
-        if not true_batch_mode:
-            # 各データセットを個別に処理（現在の実装）
-            for i, (task, offset_info) in enumerate(zip(batch_tasks, task_offsets)):
-                print(f"\n  処理中 [{i+1}/{num_tasks}]: Worker{offset_info['worker_id']}-Chunk{offset_info['chunk_idx']}")
-                
-                # データセットの切り出し
-                dataset_gpu = gpu_array[offset_info['offset']:offset_info['offset'] + offset_info['size']]
+            gpu_task_time = time.time() - gpu_task_start
+            timing_breakdown['gpu_processing'].append({
+                'task_id': f"Worker{offset_info['worker_id']}-Chunk{offset_info['chunk_idx']}",
+                'time': gpu_task_time,
+                'rows': len(cudf_df),
+                'detailed': detailed_timing
+            })
             
-                # numba用の配列に変換
-                raw_dev = cuda.as_cuda_array(dataset_gpu)
-                header_sample = dataset_gpu[:min(128, len(dataset_gpu))].get()
-                header_size = detect_pg_header_size(header_sample)
-                
-                # 出力パス
-                output_path = f"{output_base}_worker{offset_info['worker_id']}_chunk{offset_info['chunk_idx']}.parquet"
-                
-                # GPU最適化処理
-                cudf_df, detailed_timing = postgresql_to_cudf_parquet(
-                    raw_dev=raw_dev,
-                    columns=columns,
-                    ncols=len(columns),
-                    header_size=header_size,
-                    output_path=output_path,
-                    compression='snappy',
-                    use_rmm=False,
-                    optimize_gpu=True
-                )
-                
-                results.append({
-                    'worker_id': offset_info['worker_id'],
-                    'chunk_idx': offset_info['chunk_idx'],
-                    'gpu_transfer_time': gpu_transfer_time / num_tasks,  # 転送時間を分配
-                    'gpu_processing_time': detailed_timing.get('overall_total', 0),
-                    'rows_processed': len(cudf_df),
-                    'status': 'success'
-                })
+            results.append({
+                'worker_id': offset_info['worker_id'],
+                'chunk_idx': offset_info['chunk_idx'],
+                'gpu_transfer_time': timing_breakdown['gpu_transfer'] / num_tasks,  # 転送時間を分配
+                'gpu_processing_time': gpu_task_time,
+                'rows_processed': len(cudf_df),
+                'status': 'success'
+            })
         
         gpu_processing_time = time.time() - start_gpu_processing_time
         total_time = time.time() - start_total_time
         
-        print(f"\n✅ バッチGPU処理完了:")
-        print(f"  総処理時間: {total_time:.2f}秒")
-        print(f"  GPU転送: {gpu_transfer_time:.2f}秒")
-        print(f"  GPU処理: {gpu_processing_time:.2f}秒")
-        print(f"  スループット: {(total_size/(1024*1024))/total_time:.2f} MB/sec")
-        
         # メモリ解放
+        cleanup_start = time.time()
         del gpu_array
         gc.collect()
         cp.get_default_memory_pool().free_all_blocks()
         cuda.synchronize()
+        timing_breakdown['memory_cleanup'] = time.time() - cleanup_start
+        
+        print(f"\n✅ バッチGPU処理完了:")
+        print(f"  総処理時間: {total_time:.2f}秒")
+        if debug_mode:
+            print(f"  --- 詳細タイミング ---")
+            print(f"  ピンメモリ確保: {timing_breakdown['pinned_alloc']:.3f}秒")
+            print(f"  データコピー: {timing_breakdown['data_copy_to_pinned']:.3f}秒")
+            print(f"  GPU配列確保: {timing_breakdown['gpu_alloc']:.3f}秒")
+            print(f"  GPU転送: {timing_breakdown['gpu_transfer']:.3f}秒 ({gpu_transfer_bandwidth:.2f} GB/s)")
+            print(f"  GPU処理: {gpu_processing_time:.3f}秒")
+            print(f"  メモリ解放: {timing_breakdown['memory_cleanup']:.3f}秒")
+        print(f"  スループット: {(total_size/(1024*1024))/total_time:.2f} MB/sec")
+        
+        # タイミング詳細を結果に追加
+        for result in results:
+            result['timing_breakdown'] = timing_breakdown
         
         return results
         
@@ -319,7 +372,8 @@ def process_batch_on_gpu(
                 'worker_id': task['worker_id'],
                 'chunk_idx': task['chunk_idx'],
                 'status': 'error',
-                'error': str(e)
+                'error': str(e),
+                'timing_breakdown': timing_breakdown
             })
         
         # メモリ解放を試みる
@@ -331,6 +385,98 @@ def process_batch_on_gpu(
             pass
             
         return results
+
+
+def save_debug_results(all_results: Dict, output_dir: str = DEBUG_OUTPUT_DIR):
+    """デバッグ結果をCSVとJSONで保存"""
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # JSON出力（全詳細）
+    json_path = os.path.join(output_dir, f"debug_results_{timestamp}.json")
+    with open(json_path, 'w') as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\n✅ 詳細結果をJSON保存: {json_path}")
+    
+    # CSV出力（サマリー）
+    csv_path = os.path.join(output_dir, f"debug_summary_{timestamp}.csv")
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        # ヘッダー
+        writer.writerow([
+            'worker_id', 'chunk_idx', 'status',
+            'data_size_mb', 'copy_time', 'chunk_count',
+            'avg_chunk_kb', 'connection_time', 'copy_init_time',
+            'gpu_transfer_time', 'gpu_processing_time', 'rows_processed'
+        ])
+        
+        # データ行
+        for copy_result in all_results['copy_results']:
+            if copy_result['status'] == 'success':
+                # チャンクサイズ統計
+                chunk_reads = copy_result.get('timing_details', {}).get('chunk_reads', [])
+                avg_chunk_kb = 0
+                if chunk_reads:
+                    avg_chunk_kb = np.mean([c['size'] for c in chunk_reads]) / 1024
+                
+                # 対応するGPU結果を探す
+                gpu_result = next(
+                    (g for g in all_results['gpu_results'] 
+                     if g['worker_id'] == copy_result['worker_id'] 
+                     and g['chunk_idx'] == copy_result['chunk_idx']),
+                    {}
+                )
+                
+                writer.writerow([
+                    copy_result['worker_id'],
+                    copy_result['chunk_idx'],
+                    copy_result['status'],
+                    copy_result['data_size'] / (1024*1024),
+                    copy_result['copy_time'],
+                    copy_result.get('chunk_count', 0),
+                    avg_chunk_kb,
+                    copy_result.get('timing_details', {}).get('connection', 0),
+                    copy_result.get('timing_details', {}).get('copy_init', 0),
+                    gpu_result.get('gpu_transfer_time', 0),
+                    gpu_result.get('gpu_processing_time', 0),
+                    gpu_result.get('rows_processed', 0)
+                ])
+    
+    print(f"✅ サマリーをCSV保存: {csv_path}")
+    
+    # チャンクサイズ分析
+    analyze_chunk_sizes(all_results, output_dir, timestamp)
+
+
+def analyze_chunk_sizes(all_results: Dict, output_dir: str, timestamp: str):
+    """チャンクサイズの詳細分析"""
+    chunk_sizes = []
+    
+    for copy_result in all_results['copy_results']:
+        if copy_result['status'] == 'success':
+            chunk_reads = copy_result.get('timing_details', {}).get('chunk_reads', [])
+            chunk_sizes.extend([c['size'] for c in chunk_reads])
+    
+    if chunk_sizes:
+        print(f"\n=== psycopg3チャンクサイズ分析 ===")
+        print(f"総チャンク数: {len(chunk_sizes)}")
+        print(f"平均サイズ: {np.mean(chunk_sizes)/1024:.1f} KB")
+        print(f"中央値: {np.median(chunk_sizes)/1024:.1f} KB")
+        print(f"最小: {min(chunk_sizes)/1024:.1f} KB")
+        print(f"最大: {max(chunk_sizes)/1024:.1f} KB")
+        print(f"標準偏差: {np.std(chunk_sizes)/1024:.1f} KB")
+        
+        # ヒストグラム出力
+        hist_path = os.path.join(output_dir, f"chunk_size_histogram_{timestamp}.txt")
+        with open(hist_path, 'w') as f:
+            f.write("=== チャンクサイズ分布 ===\n")
+            hist, bins = np.histogram(chunk_sizes, bins=20)
+            for i in range(len(hist)):
+                size_kb = bins[i] / 1024
+                count = hist[i]
+                f.write(f"{size_kb:6.1f}KB - {bins[i+1]/1024:6.1f}KB: {'#' * min(count, 50)} ({count})\n")
+        
+        print(f"✅ チャンクサイズ分布を保存: {hist_path}")
 
 
 def get_table_blocks(dsn: str, table_name: str) -> int:
@@ -384,30 +530,28 @@ def check_gpu_direct_support() -> bool:
         return False
 
 
-def run_ray_parallel_sequential_gpu(
+def run_ray_parallel_sequential_gpu_debug(
     limit_rows: int = 10000000,
     parallel_count: int = DEFAULT_PARALLEL,
     use_gpu_direct: bool = True,
     batch_size: int = 4,
-    copy_buffer_size: int = 64 * 1024 * 1024,  # 64MB
-    true_batch_mode: bool = False
+    debug_mode: bool = True
 ):
-    """Ray並列COPY + 順次GPU処理"""
+    """Ray並列COPY + 順次GPU処理（デバッグ版）"""
     
     dsn = os.environ.get("GPUPASER_PG_DSN")
     if not dsn:
         print("エラー: 環境変数 GPUPASER_PG_DSN が設定されていません。")
         return
     
-    print(f"=== PostgreSQL → GPU Ray並列 順次GPU処理版 ===")
+    print(f"=== PostgreSQL → GPU Ray並列 順次GPU処理版（デバッグ） ===")
     print(f"テーブル: {TABLE_NAME}")
     print(f"行数制限: {limit_rows:,}" if limit_rows else "行数制限: なし（全件処理）")
     print(f"並列数: {parallel_count}")
     print(f"チャンク数: {CHUNK_COUNT}")
     print(f"総タスク数: {parallel_count * CHUNK_COUNT}")
     print(f"バッチサイズ: {batch_size}")
-    print(f"COPY読み込み方式: {'一括読み込み最適化' if copy_buffer_size > 0 else '従来方式（逐次追加）'}")
-    print(f"GPU処理方式: {'🚀 真のバッチ処理（実験的）' if true_batch_mode else '従来の個別処理'}")
+    print(f"デバッグモード: {'ON' if debug_mode else 'OFF'}")
     print(f"処理方式:")
     print(f"  ① CPU: {parallel_count}並列でPostgreSQL COPY実行")
     print(f"  ② GPU: セミパイプライン処理（{batch_size}個のCOPY完了ごとにGPU処理開始）")
@@ -456,8 +600,8 @@ def run_ray_parallel_sequential_gpu(
     for worker_idx, (start_block, end_block) in enumerate(ranges):
         for chunk_idx in range(CHUNK_COUNT):
             future = workers[worker_idx].copy_data_to_memory.remote(
-                TABLE_NAME, start_block, end_block, chunk_idx, CHUNK_COUNT, limit_rows,
-                batch_read=copy_buffer_size > 0  # バッファサイズが0より大きい場合は一括読み込み
+                TABLE_NAME, start_block, end_block, chunk_idx, CHUNK_COUNT, 
+                limit_rows, debug_mode=debug_mode
             )
             all_copy_futures.append(future)
     
@@ -497,7 +641,8 @@ def run_ray_parallel_sequential_gpu(
                     total_data_size += result['data_size']
                     pending_gpu_tasks.append(result)
                     print(f"✅ COPY完了: Worker{result['worker_id']}-Chunk{result['chunk_idx']} "
-                          f"({result['data_size']/(1024*1024):.1f}MB)")
+                          f"({result['data_size']/(1024*1024):.1f}MB, "
+                          f"{result.get('chunk_count', 0)}チャンク)")
                 else:
                     print(f"❌ COPY失敗: Worker{result['worker_id']}-Chunk{result['chunk_idx']} - "
                           f"{result.get('error', 'Unknown')}")
@@ -514,7 +659,7 @@ def run_ray_parallel_sequential_gpu(
                 columns,
                 gds_supported,
                 output_base,
-                true_batch_mode=true_batch_mode
+                debug_mode=debug_mode
             )
             
             # 結果を集計
@@ -539,6 +684,31 @@ def run_ray_parallel_sequential_gpu(
     
     # 総合結果
     total_time = time.time() - start_total_time
+    
+    # デバッグ結果の保存
+    if debug_mode:
+        all_results = {
+            'metadata': {
+                'table_name': TABLE_NAME,
+                'limit_rows': limit_rows,
+                'parallel_count': parallel_count,
+                'chunk_count': CHUNK_COUNT,
+                'batch_size': batch_size,
+                'total_blocks': total_blocks,
+                'total_time': total_time,
+                'timestamp': datetime.now().isoformat()
+            },
+            'copy_results': copy_results,
+            'gpu_results': gpu_results,
+            'summary': {
+                'total_data_size_mb': total_data_size / (1024*1024),
+                'total_copy_time': total_copy_time,
+                'total_gpu_transfer_time': total_gpu_transfer_time,
+                'total_gpu_processing_time': total_gpu_processing_time,
+                'total_rows_processed': total_rows_processed
+            }
+        }
+        save_debug_results(all_results)
     
     print(f"\n{'='*60}")
     print(f"=== Ray並列セミパイプラインGPU処理ベンチマーク完了 ===")
@@ -576,16 +746,15 @@ def run_ray_parallel_sequential_gpu(
 
 def main():
     """メイン関数"""
-    parser = argparse.ArgumentParser(description='PostgreSQL → GPU Ray並列 セミパイプライン処理版')
+    parser = argparse.ArgumentParser(description='PostgreSQL → GPU Ray並列 セミパイプライン処理版（デバッグ）')
     parser.add_argument('--rows', type=int, default=10000000, help='処理行数制限')
     parser.add_argument('--parallel', type=int, default=DEFAULT_PARALLEL, help='並列数')
     parser.add_argument('--chunks', type=int, default=4, help='チャンク数')
     parser.add_argument('--batch-size', type=int, default=4, help='セミパイプラインのバッチサイズ')
-    parser.add_argument('--copy-buffer-mb', type=int, default=64, help='psycopg3一括読み込み最適化を有効化（0で無効）')
-    parser.add_argument('--true-batch', action='store_true', help='真のバッチGPU処理を有効化（実験的）')
     parser.add_argument('--no-limit', action='store_true', help='LIMIT無し（全件高速モード）')
     parser.add_argument('--check-support', action='store_true', help='GPU Directサポート確認のみ')
     parser.add_argument('--no-gpu-direct', action='store_true', help='GPU Direct無効化')
+    parser.add_argument('--no-debug', action='store_true', help='デバッグモード無効化')
     
     args = parser.parse_args()
     
@@ -607,14 +776,12 @@ def main():
     
     # ベンチマーク実行
     final_limit_rows = None if args.no_limit else args.rows
-    copy_buffer_size = args.copy_buffer_mb * 1024 * 1024  # MB to bytes
-    run_ray_parallel_sequential_gpu(
+    run_ray_parallel_sequential_gpu_debug(
         limit_rows=final_limit_rows,
         parallel_count=args.parallel,
         use_gpu_direct=not args.no_gpu_direct,
         batch_size=args.batch_size,
-        copy_buffer_size=copy_buffer_size,
-        true_batch_mode=args.true_batch
+        debug_mode=not args.no_debug
     )
 
 if __name__ == "__main__":
