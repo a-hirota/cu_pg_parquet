@@ -1,0 +1,32 @@
+[package]
+name = "gpupgparser-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"] }
+postgres-types = "0.2"
+bytes = "1"
+byteorder = "1"
+anyhow = "1"
+thiserror = "1"
+libc = "0.2"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+arrow = "54"
+arrow-buffer = "54"
+arrow-array = "54"
+arrow-schema = "54"
+
+[lib]
+name = "gpupgparser_rust"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+opt-level = 3
+
+[build-dependencies]
+cc = "1"

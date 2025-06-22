@@ -1,0 +1,1 @@
+/home/ubuntu/gpupgparser/rust/target/release/libgpupgparser_rust.so: /home/ubuntu/gpupgparser/rust/build.rs /home/ubuntu/gpupgparser/rust/src/arrow_builder.rs /home/ubuntu/gpupgparser/rust/src/cuda.rs /home/ubuntu/gpupgparser/rust/src/ffi.rs /home/ubuntu/gpupgparser/rust/src/lib.rs /home/ubuntu/gpupgparser/rust/src/postgres.rs

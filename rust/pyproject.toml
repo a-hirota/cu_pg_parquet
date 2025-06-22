@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gpupgparser-rust"
+version = "0.1.0"
+description = "GPU-accelerated PostgreSQL binary parser (Rust implementation)"
+authors = [{name = "GPUPGParser Team"}]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "gpupgparser_rust"

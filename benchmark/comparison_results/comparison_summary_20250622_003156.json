@@ -1,0 +1,84 @@
+{
+  "direct": {
+    "memory": {
+      "initial_system_mb": 0,
+      "peak_system_mb": 501.40625,
+      "initial_gpu_mb": 0,
+      "peak_gpu_mb": 0,
+      "chunk_count": 0,
+      "avg_chunk_size": 0,
+      "total_data_size_mb": 0.0,
+      "memory_overhead_ratio": 0
+    },
+    "performance": {
+      "copy_time_sec": 0,
+      "gpu_transfer_time_sec": 0,
+      "gpu_transfer_count": 0,
+      "gpu_processing_time_sec": 0,
+      "total_time_sec": 0.8263509273529053,
+      "throughput_mb_sec": 0.0
+    },
+    "details": [
+      {
+        "timestamp": 1750519798.9759529,
+        "stage": "start",
+        "system_memory_mb": 444.15625,
+        "gpu_memory_mb": 0.0
+      },
+      {
+        "timestamp": 1750519801.5181224,
+        "stage": "after_metadata",
+        "system_memory_mb": 496.15625,
+        "gpu_memory_mb": 0.0
+      },
+      {
+        "timestamp": 1750519802.3184712,
+        "stage": "end",
+        "system_memory_mb": 501.40625,
+        "gpu_memory_mb": 0.0
+      }
+    ]
+  },
+  "batch": {
+    "memory": {
+      "initial_system_mb": 0,
+      "peak_system_mb": 502.125,
+      "initial_gpu_mb": 0,
+      "peak_gpu_mb": 0,
+      "chunk_count": 0,
+      "avg_chunk_size": 0,
+      "total_data_size_mb": 0.0,
+      "memory_overhead_ratio": 0,
+      "batch_count": 0,
+      "avg_batch_size_mb": 0
+    },
+    "performance": {
+      "copy_time_sec": 0,
+      "gpu_transfer_time_sec": 0,
+      "gpu_transfer_count": 0,
+      "gpu_processing_time_sec": 0,
+      "total_time_sec": 4.040645122528076,
+      "throughput_mb_sec": 0.0
+    },
+    "details": [
+      {
+        "timestamp": 1750519806.1597533,
+        "stage": "start",
+        "system_memory_mb": 444.1328125,
+        "gpu_memory_mb": 0.0
+      },
+      {
+        "timestamp": 1750519808.6023018,
+        "stage": "after_metadata",
+        "system_memory_mb": 496.375,
+        "gpu_memory_mb": 0.0
+      },
+      {
+        "timestamp": 1750519812.6115787,
+        "stage": "end",
+        "system_memory_mb": 502.125,
+        "gpu_memory_mb": 0.0
+      }
+    ]
+  }
+}
