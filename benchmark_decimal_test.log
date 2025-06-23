@@ -207,4 +207,376 @@ GPUパース完了: 14496508 行 (5.7073秒)
   ファイル読み込み: 3.42秒 (1.90 GB/秒)
   GPU転送: 0.52秒 (12.56 GB/秒)
 === GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+
+GPUパース完了: 14496733 行 (9.3884秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217450995 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496733 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115973864 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144967330 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496733 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,733 行 × 17 列
+データサイズ: 6650.09 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.3884 秒
+  process_and_export  : 1.6112 秒
+    ├─ string_buffers  : 0.3322 秒
+    ├─ direct_extract  : 0.0477 秒
+    └─ parquet_export  : 1.2313 秒
+  total               : 1.6112 秒
+  overall_total       : 10.9997 秒
+
+--- スループット ---
+  セル処理速度: 22,404,734 cells/sec
+  データ処理速度: 604.57 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 4 処理完了:
+  - 処理行数: 14,496,733 行
+  - GPU全体時間: 14.95秒
+  - 内訳:
+    - ファイル読込: 3.42秒
+    - GPU転送: 0.52秒
+    - GPUパース: 9.39秒
+    - 直接抽出処理: 1.61秒
+      - 文字列バッファ: 0.33秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.23秒
+  - スループット: 0.43 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 5/8 転送開始
+[Rust] チャンク 5 転送完了: 6.49 GB, 4.84秒 (1.34 GB/秒)
+
+[GPU] チャンク 5 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.65秒 (1.78 GB/秒)
+  GPU転送: 0.54秒 (12.12 GB/秒)
+=== GPU並列パース開始 ===
 ✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14495909 行 (12.1681秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217438635 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14495909 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115967272 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144959090 bytes)
+直接列抽出開始（統合バッファ不使用）: 14495909 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,495,909 行 × 17 列
+データサイズ: 6649.85 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 12.1681 秒
+  process_and_export  : 1.6719 秒
+    ├─ string_buffers  : 0.3458 秒
+    ├─ direct_extract  : 0.0480 秒
+    └─ parquet_export  : 1.2781 秒
+  total               : 1.6719 秒
+  overall_total       : 13.8401 秒
+
+--- スループット ---
+  セル処理速度: 17,805,581 cells/sec
+  データ処理速度: 480.48 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.4 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 5 処理完了:
+  - 処理行数: 14,495,909 行
+  - GPU全体時間: 18.03秒
+  - 内訳:
+    - ファイル読込: 3.65秒
+    - GPU転送: 0.54秒
+    - GPUパース: 12.17秒
+    - 直接抽出処理: 1.67秒
+      - 文字列バッファ: 0.35秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.28秒
+  - スループット: 0.36 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 6/8 転送開始
+[Rust] チャンク 6 転送完了: 6.73 GB, 5.14秒 (1.31 GB/秒)
+
+[GPU] チャンク 6 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.63秒 (1.85 GB/秒)
+  GPU転送: 0.53秒 (12.60 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15304314 行 (11.7756秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (229564710 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15304314 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (122434512 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (153043140 bytes)
+直接列抽出開始（統合バッファ不使用）: 15304314 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,304,314 行 × 17 列
+データサイズ: 6894.37 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 11.7756 秒
+  process_and_export  : 1.7068 秒
+    ├─ string_buffers  : 0.3250 秒
+    ├─ direct_extract  : 0.0500 秒
+    └─ parquet_export  : 1.3318 秒
+  total               : 1.7068 秒
+  overall_total       : 13.4824 秒
+
+--- スループット ---
+  セル処理速度: 19,297,302 cells/sec
+  データ処理速度: 511.36 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1459.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 6 処理完了:
+  - 処理行数: 15,304,314 行
+  - GPU全体時間: 17.66秒
+  - 内訳:
+    - ファイル読込: 3.63秒
+    - GPU転送: 0.53秒
+    - GPUパース: 11.78秒
+    - 直接抽出処理: 1.71秒
+      - 文字列バッファ: 0.32秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.33秒
+  - スループット: 0.38 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 7/8 転送開始
+[Rust] チャンク 7 転送完了: 6.78 GB, 5.13秒 (1.32 GB/秒)
+
+[GPU] チャンク 7 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.78秒 (1.80 GB/秒)
+  GPU転送: 0.54秒 (12.58 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15470157 行 (9.2285秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (232052355 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15470157 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (123761256 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (154701570 bytes)
+直接列抽出開始（統合バッファ不使用）: 15470157 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,470,157 行 × 17 列
+データサイズ: 6945.00 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.2285 秒
+  process_and_export  : 1.7529 秒
+    ├─ string_buffers  : 0.3313 秒
+    ├─ direct_extract  : 0.0506 秒
+    └─ parquet_export  : 1.3710 秒
+  total               : 1.7528 秒
+  overall_total       : 10.9813 秒
+
+--- スループット ---
+  セル処理速度: 23,949,052 cells/sec/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+
+  データ処理速度: 632.44 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1475.3 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 7 処理完了:
+  - 処理行数: 15,470,157 行
+  - GPU全体時間: 15.30秒
+  - 内訳:
+    - ファイル読込: 3.78秒
+    - GPU転送: 0.54秒
+    - GPUパース: 9.23秒
+    - 直接抽出処理: 1.75秒
+      - 文字列バッファ: 0.33秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.37秒
+  - スループット: 0.44 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 8/8 転送開始
+[Rust] チャンク 8 転送完了: 6.78 GB, 5.07秒 (1.34 GB/秒)
+
+[GPU] チャンク 8 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.67秒 (1.85 GB/秒)
+  GPU転送: 0.54秒 (12.55 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15469079 行 (9.6084秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (232036185 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15469079 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (123752632 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (154690790 bytes)
+直接列抽出開始（統合バッファ不使用）: 15469079 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,469,079 行 × 17 列
+データサイズ: 6944.70 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.6084 秒
+  process_and_export  : 1.7412 秒
+    ├─ string_buffers  : 0.3279 秒
+    ├─ direct_extract  : 0.0516 秒
+    └─ parquet_export  : 1.3617 秒
+  total               : 1.7412 秒
+  overall_total       : 11.3496 秒
+
+--- スループット ---
+  セル処理速度: 23,170,369 cells/sec
+  データ処理速度: 611.89 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1475.2 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 8 処理完了:
+  - 処理行数: 15,469,079 行
+  - GPU全体時間: 15.57秒
+  - 内訳:
+    - ファイル読込: 3.67秒
+    - GPU転送: 0.54秒
+    - GPUパース: 9.61秒
+    - 直接抽出処理: 1.74秒
+      - 文字列バッファ: 0.33秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.36秒
+  - スループット: 0.44 GB/秒
+  - 統合バッファ: 【削除済み】
+
+============================================================
+✅ 全チャンク処理完了!
+============================================================
+総実行時間: 165.47秒
+  - Rust転送合計: 39.92秒
+  - GPU処理合計: 110.54秒
+総データサイズ: 52.86 GB
+総行数: 119,043,554 行
+全体スループット: 0.32 GB/秒
+Rust平均速度: 1.32 GB/秒
+GPU平均速度: 0.48 GB/秒
+
+改善率: 1.6倍（4チャンクベースライン比）
+
+メモリ効率改善:
+  - 統合バッファ削除: 約11.1 GB節約
+  - ピークメモリ使用量: 大幅削減
+
+============================================================
+処理結果の検証
+============================================================
+
+cuDFでParquetファイルを読み込み中: benchmark/chunk_0_direct.parquet
+cuDF読み込み完了 (0.3334秒)
+
+--- cuDF DataFrame Info ---
+<class 'cudf.core.dataframe.DataFrame'>
+RangeIndex: 14814370 entries, 0 to 14814369
+Data columns (total 17 columns):
+ #   Column              Dtype
+---  ------              -----
+ 0   lo_orderkey         decimal128
+ 1   lo_linenumber       int32
+ 2   lo_custkey          decimal128
+ 3   lo_partkey          int32
+ 4   lo_suppkey          decimal128
+ 5   lo_orderdate        int32
+ 6   lo_orderpriority    object
+ 7   lo_shippriority     object
+ 8   lo_quantity         decimal128
+ 9   lo_extendedprice    decimal128
+ 10  lo_ordertotalprice  decimal128
+ 11  lo_discount         decimal128
+ 12  lo_revenue          decimal128
+ 13  lo_supplycost       decimal128
+ 14  lo_tax              decimal128
+ 15  lo_commit_date      object
+ 16  lo_shipmode         object
+dtypes: decimal128(10), int32(3), object(4)
+memory usage: 3.1+ GB
+
+読み込み結果: 14,814,370 行 × 17 列
+
+データ型:
+  lo_orderkey: decimal128
+  lo_linenumber: int32
+  lo_custkey: decimal128
+  lo_partkey: int32
+  lo_suppkey: decimal128
+  lo_orderdate: int32
+  lo_orderpriority: object
+  lo_shippriority: object
+  lo_quantity: decimal128
+  lo_extendedprice: decimal128
+  lo_ordertotalprice: decimal128
+  lo_discount: decimal128
+  lo_revenue: decimal128
+  lo_supplycost: decimal128
+  lo_tax: decimal128
+  lo_commit_date: object
+  lo_shipmode: object
+
+--- cuDF DataFrame Head (全列表示) ---
+cuDF Head (列別表示):
+  列 1 lo_orderkey         : [Decimal('91734371'), Decimal('0'), Decimal('91734372')]
+  列 2 lo_linenumber       : [4, -1576945664, 1]
+  列 3 lo_custkey          : [Decimal('1247'), Decimal('0'), Decimal('39778')]
+  列 4 lo_partkey          : [637836, 16777216, 320496]
+  列 5 lo_suppkey          : [Decimal('77377'), Decimal('0'), Decimal('164129')]
+
+基本統計:
+  lo_linenumber: 平均=60625083.42, 最小=-2147483648.00, 最大=2147418112.00
+  lo_partkey: 平均=61460748.29, 最小=-2147483648.00, 最大=2147418112.00
+  lo_orderdate: 平均=73980975.56, 最小=-2147483648.00, 最大=2147352576.00
+
+文字列列の検証:
+  lo_orderpriority: サンプル値 = ['2-HIGH         ', '\x01\x00\x00\x00\x00\x00\n\x19\x1c\x00\x00\x00\n\x00\x01', '5-LOW          ']
+  lo_shippriority: サンプル値 = ['0', '\x00', '0']
+  lo_commit_date: サンプル値 = ['19970330', 'OW      ', '19980806']
+
+-------------------------
+検証結果: 成功

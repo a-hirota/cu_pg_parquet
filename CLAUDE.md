@@ -121,6 +121,10 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
   - https://github.com/Rust-GPU/Rust-CUDA/blob/main/README.md
   - https://github.com/Rust-GPU/Rust-CUDA/blob/main/guide/src/guide/getting_started.md
   - https://github.com/Rust-GPU/Rust-CUDA/blob/main/guide/src/features.md
+##### 参考
+アルゴリズムの参考になるサイトは以下。
+- **arrow-adbc**:CPUによるPostgresからArrow変換。Postgresのメタデータ転送が参考になる。
+  - https://github.com/apache/arrow-adbc
 
 
 ## Memories

@@ -18,12 +18,14 @@ from .types import (
 def _decode_numeric_pg_typmod(pg_typmod: int) -> Tuple[int, int]:
     """PostgreSQL numeric(p,s) pg_typmod 値から (precision, scale) を返す"""
     if pg_typmod <= 0:
-        if pg_typmod == -1:
-            return (38, 0)
-        return (0, 0)
+        # 精度が指定されていない場合は最大精度を使用
+        return (38, 0)
     mod = pg_typmod - 4
     precision = (mod >> 16) & 0xFFFF
     scale = mod & 0xFFFF
+    # 無効な値の場合はデフォルトに戻す
+    if precision == 0:
+        precision = 38
     return precision, scale
 
 class CursorDescription(Protocol):
