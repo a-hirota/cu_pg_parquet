@@ -1,0 +1,341 @@
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 64 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py:387: UserWarning: 固定長列 lo_extendedprice のゼロコピー処理に失敗: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 237023488 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"固定長列 {col.name} のゼロコピー処理に失敗: {e}")
+/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py:387: UserWarning: 固定長列 lo_ordertotalprice のゼロコピー処理に失敗: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 237023488 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"固定長列 {col.name} のゼロコピー処理に失敗: {e}")
+/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py:175: UserWarning: 列 lo_ordertotalprice の処理でエラー: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"列 {col.name} の処理でエラー: {e}")
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 360, in _create_fixed_series_zero_copy
+    column_buffer = self._extract_column_zero_copy(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 401, in _extract_column_zero_copy
+    column_buffer = cuda.device_array(rows * col_size, dtype=np.uint8)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 237023488 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 168, in create_cudf_from_gpu_buffers_zero_copy
+    series = self._create_fixed_series_zero_copy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 388, in _create_fixed_series_zero_copy
+    return cudf.Series([None] * rows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 357, in decode_and_export
+    cudf_df = self.cudf_processor.create_cudf_from_gpu_buffers_zero_copy(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 177, in create_cudf_from_gpu_buffers_zero_copy
+    cudf_series_dict[col.name] = cudf.Series([None] * rows)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 360, in _create_fixed_series_zero_copy
+    column_buffer = self._extract_column_zero_copy(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 401, in _extract_column_zero_copy
+    column_buffer = cuda.device_array(rows * col_size, dtype=np.uint8)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 237023488 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 168, in create_cudf_from_gpu_buffers_zero_copy
+    series = self._create_fixed_series_zero_copy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 388, in _create_fixed_series_zero_copy
+    return cudf.Series([None] * rows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 257, in main
+    gpu_time, _, rows, timing = process_chunk_unified(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 357, in decode_and_export
+    cudf_df = self.cudf_processor.create_cudf_from_gpu_buffers_zero_copy(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 177, in create_cudf_from_gpu_buffers_zero_copy
+    cudf_series_dict[col.name] = cudf.Series([None] * rows)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+=== PostgreSQL → Rust → GPU 統一処理版 ===
+チャンク数: 8
+各チャンクサイズ: 約6.6 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - cuda.to_device()で直接GPU転送
+  - postgresql_to_cudf_parquet()で一括処理
+  - cuDF DataFrame作成のCPUシングルスレッド問題を解決
+RMM既に初期化済み
+
+✅ CUDA context OK
+
+[Rust] チャンク 1/8 転送開始
+[Rust] チャンク 1 転送完了: 6.59 GB, 4.87秒 (1.35 GB/秒)
+カラム数: 17
+
+[GPU] チャンク 1 統一処理開始
+  ファイル読み込み: 3.65秒 (1.81 GB/秒)
+  GPU転送: 0.54秒 (12.21 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14813968 行 (3.0110秒)
+=== 文字列最適化デコード開始 ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (222209520 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14813968 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (118511744 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (148139680 bytes)
+統合カーネル実行（固定長データのみ）: 57868 blocks × 256 threads
+❌ GPU処理エラー: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+❌ エラー: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 360, in _create_fixed_series_zero_copy
+    column_buffer = self._extract_column_zero_copy(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 401, in _extract_column_zero_copy
+    column_buffer = cuda.device_array(rows * col_size, dtype=np.uint8)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 237023488 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 168, in create_cudf_from_gpu_buffers_zero_copy
+    series = self._create_fixed_series_zero_copy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 388, in _create_fixed_series_zero_copy
+    return cudf.Series([None] * rows)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 292, in <module>
+    main()
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 257, in main
+    gpu_time, _, rows, timing = process_chunk_unified(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 357, in decode_and_export
+    cudf_df = self.cudf_processor.create_cudf_from_gpu_buffers_zero_copy(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/build_cudf_from_buf.py", line 177, in create_cudf_from_gpu_buffers_zero_copy
+    cudf_series_dict[col.name] = cudf.Series([None] * rows)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 683, in __init__
+    column = as_column(
+             ^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 3005, in as_column
+    return as_column(arbitrary, nan_as_null=nan_as_null, dtype=dtype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 2597, in as_column
+    col = col.astype(dtype)
+          ^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 1638, in astype
+    result = self.as_string_column()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/numerical.py", line 358, in as_string_column
+    conv_func(self.to_pylibcudf(mode="read"))
+  File "convert_integers.pyx", line 54, in pylibcudf.strings.convert.convert_integers.from_integers
+  File "convert_integers.pyx", line 75, in pylibcudf.strings.convert.convert_integers.from_integers
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 59255888 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp

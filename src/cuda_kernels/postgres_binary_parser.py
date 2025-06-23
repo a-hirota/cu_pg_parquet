@@ -339,7 +339,11 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
 
-    max_rows = min(2_000_000, (data_size // estimated_row_size) * 2)
+    # 最大行数を実際のデータサイズに基づいて計算（1.2倍のマージンを持たせる）
+    max_rows = int((data_size // estimated_row_size) * 1.2)
+    # 上限を設定（GPUメモリ制限のため）
+    # 17列 × 4バイト × 5000万行 = 約3.4GB
+    max_rows = min(max_rows, 50_000_000)  # 5000万行まで
 
     # 統合出力配列の準備
     row_positions = cuda.device_array(max_rows, np.int32)

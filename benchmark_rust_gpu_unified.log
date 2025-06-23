@@ -1,0 +1,161 @@
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 298, in decode_and_export
+    buffer_info = self.gmm.initialize_buffers(columns, rows)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 228, in initialize_buffers
+    var_data_buffer, var_offset_arrays = self.create_variable_buffers(var_layouts, rows)
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 194, in create_variable_buffers
+    var_data_buffer = cuda.device_array(total_size, dtype=np.uint8)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 7436376000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 257, in main
+    gpu_time, _, rows, timing = process_chunk_unified(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 298, in decode_and_export
+    buffer_info = self.gmm.initialize_buffers(columns, rows)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 228, in initialize_buffers
+    var_data_buffer, var_offset_arrays = self.create_variable_buffers(var_layouts, rows)
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 194, in create_variable_buffers
+    var_data_buffer = cuda.device_array(total_size, dtype=np.uint8)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 7436376000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+=== PostgreSQL → Rust → GPU 統一処理版 ===
+チャンク数: 6
+各チャンクサイズ: 約8.8 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - cuda.to_device()で直接GPU転送
+  - postgresql_to_cudf_parquet()で一括処理
+  - cuDF DataFrame作成のCPUシングルスレッド問題を解決
+RMM既に初期化済み
+
+✅ CUDA context OK
+
+[Rust] チャンク 1/6 転送開始
+[Rust] チャンク 1 転送完了: 8.75 GB, 6.22秒 (1.41 GB/秒)
+カラム数: 17
+
+[GPU] チャンク 1 統一処理開始
+  ファイル読み込み: 4.61秒 (1.90 GB/秒)
+  GPU転送: 0.70秒 (12.42 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18590940 行 (6.7340秒)
+=== 文字列最適化デコード開始 ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (278864100 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18590940 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (148727520 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (185909400 bytes)
+❌ GPU処理エラー: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 7436376000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+
+❌ エラー: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 7436376000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 292, in <module>
+    main()
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 257, in main
+    gpu_time, _, rows, timing = process_chunk_unified(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_unified.py", line 147, in process_chunk_unified
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 560, in postgresql_to_cudf_parquet
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 420, in process_postgresql_to_parquet
+    cudf_df, decode_timing = self.decode_and_export(
+                             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 298, in decode_and_export
+    buffer_info = self.gmm.initialize_buffers(columns, rows)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 228, in initialize_buffers
+    var_data_buffer, var_offset_arrays = self.create_variable_buffers(var_layouts, rows)
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/memory_manager.py", line 194, in create_variable_buffers
+    var_data_buffer = cuda.device_array(total_size, dtype=np.uint8)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devices.py", line 232, in _require_cuda_context
+    return fn(*args, **kws)
+           ^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/api.py", line 144, in device_array
+    return devicearray.DeviceNDArray(shape=shape, strides=strides, dtype=dtype,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/devicearray.py", line 103, in __init__
+    gpu_data = devices.get_context().memalloc(self.alloc_size)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 1372, in memalloc
+    return self.memory_manager.memalloc(bytesize)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/rmm/allocators/numba.py", line 73, in memalloc
+    buf = pylibrmm.DeviceBuffer(size=size)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "device_buffer.pyx", line 102, in rmm.pylibrmm.device_buffer.DeviceBuffer.__cinit__
+MemoryError: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 7436376000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp

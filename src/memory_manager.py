@@ -225,7 +225,16 @@ class GPUMemoryManager:
         d_var_mapping = self.create_var_column_mapping(columns, var_layouts)
         
         fixed_buffer, row_stride = self.create_fixed_buffer(fixed_layouts, rows)
-        var_data_buffer, var_offset_arrays = self.create_variable_buffers(var_layouts, rows)
+        
+        # 文字列最適化版では統合可変長バッファは不要
+        # create_string_buffersで既に処理されているため
+        if var_layouts:
+            # ダミーバッファを作成（メモリ節約）
+            var_data_buffer = cuda.device_array(1, dtype=np.uint8)
+            var_offset_arrays = cuda.device_array((len(var_layouts), 1), dtype=np.int32)
+        else:
+            var_data_buffer = cuda.device_array(1, dtype=np.uint8)
+            var_offset_arrays = cuda.device_array((1, 1), dtype=np.int32)
         
         self.buffer_info = BufferInfo(
             fixed_buffer=fixed_buffer,

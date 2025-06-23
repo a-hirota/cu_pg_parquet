@@ -351,7 +351,9 @@ def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size: int = No
         print(f"[DEBUG] grid: ({blocks_x}, {blocks_y}) × {threads_per_block}, SM効率: {(blocks_x * blocks_y) / sm_count:.1f}")
     
     # デバイス配列準備
-    max_rows = min(2_000_000, (data_size // estimated_row_size) * 2)
+    # 推定行数の1.5倍のマージンを持たせる（動的拡張対応）
+    estimated_rows = data_size // estimated_row_size
+    max_rows = min(int(estimated_rows * 1.5), 200_000_000)  # 最大2億行まで
     
     # 1回実行（シンプル化）
     row_positions = cuda.device_array(max_rows, np.int32)

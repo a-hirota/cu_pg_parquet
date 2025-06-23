@@ -12,15 +12,13 @@
 ## GPGPU開発哲学
 
 ### 開発スタンス
-このプロジェクトは**妥協なきGPGPU革新**を追求します：
+このプロジェクトは**妥協なきGPUによる最速処理**を追求します。どんなに実装難易度が高くても決してCPU速度に甘んじません：
 
 **1. 言語対応**
 - 日本語での開発・ドキュメント作成
 
 **2. GPGPU革新への妥協なき姿勢**
-- GPGPUでの実装を必ずやり遂げます
-- CPUのみの実装では絶対に妥協しません  
-- CPUはテストやメタデータ管理のみに限定使用
+- CPUはメタデータ管理やPostgres接続のみに限定使用です。
 
 **3. メモリ最適化への深い理解**
 - メモリコアレッシング（連続アクセス）を常に意識
@@ -29,6 +27,7 @@
 
 **4. 技術スタック専門知識**
 - **cuDF/pylibcudf/libcudf**: GPU DataFrameとApache Arrow統合
+- **rmm/librmm**: unified memoryとmanaged memory.
 - **Numba-cuda**: CUDAカーネル開発とGPU並列処理
 - **Rust-cudf**: Rustベースの高性能GPU処理（必要に応じて）
 
@@ -38,6 +37,7 @@
 - **ゼロコピー最適化**: メモリ転送を排除した超高速処理
 
 この哲学により、従来のCPU中心の処理を完全に刷新し、GPU本来の性能を100%引き出す革新的な実装を実現しています。
+
 
 ## 環境設定
 
@@ -64,28 +64,6 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 
 ## 開発体制とガバナンス
 
-### 役割と責任
-- **Claude（私）**: 優秀なGPUプログラマーとして実装を担当
-- **ユーザー（あなた）**: 上司として技術的方針の最終決定権を保持
-
-### 開発ルール
-1. **方針変更の制限**
-   - Claudeには方針変更の権限がありません
-   - 実装方針の変更には必ず上司の許可が必要です
-
-2. **報告義務**
-   - 指示された実装が困難な場合は、即座に状況報告を行います
-   - 技術的な制約、エラー内容、問題点を明確に説明します
-   - 複数の代替案を提示し、それぞれのメリット・デメリットを説明します
-
-3. **相談プロセス**
-   - 実装で行き詰まった場合：
-     1. 現状の詳細な技術的説明
-     2. 試みた解決方法とその結果
-     3. 考えられる代替案の提示
-     4. 推奨案とその理由
-     5. 上司の判断を仰ぐ
-
 ### コミュニケーション原則
 - 技術的な判断に迷った場合は、独断せずに必ず相談
 - エラーや問題は隠さず、透明性を持って報告
@@ -99,19 +77,55 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
    - ctid範囲分割による並列処理で全データを処理
    - 真の性能測定のため、常に完全なデータセットを使用
 
-2. **ストリーミング処理は使わないこと**
-   - データは一括でメモリに読み込む
-   - メモリ効率よりも処理速度を優先
-   - GPU処理の真の性能を測定するため
+2. **ストリーミング処理は極力避けること**
+   GPUのクロック数はCPUよりも低い。しかし並列度をCPUより上げられるので速くなる。
+   よって基本的にStream処理よりもBatch処理が速い。
 
 3. **標準ベンチマーク設定**
    - **並列数**: 16 (`--parallel 16`)
    - **チャンク数**: 4 (`--chunks 4`)
    - **総タスク数**: 64（16×4）
-   - この設定により真の高並列処理性能を測定
+   - この設定により真の高並列処理性能を測定。
+   - この設定を変更する場合はユーザの許可をとること。勝手に変更することは許されない。
+
+### 質問への回答方法
+- 必ずウェブ検索しURL根拠をつけてください。
+- 並列で考えられるところは、並列で考えること。
+- 既存PGMを参考にする際は参照しているPGMも再帰的に調査し、深く理解すること。
+- PGM構造に関する質問の場合、処理フローを記載してください。
+- PGM構造に関する質問の場合、処理フロー全体が最速になるか確認すること。局所最適ではなく全体最適です。
+- 回答を答える際に回答が問題を解決するか確認すること。
+- 常にultrathinkすること。
+
+
+#### ウェブ検索先
+各サイトに検索ボックスがあれば有用。
+該当ページから再帰的に調べること。
+- **cuDF**:
+  - https://docs.rapids.ai/api/cudf/stable/developer_guide/index.html
+  - https://docs.rapids.ai/api/cudf/stable/user_guide/api_docs/
+- **pylibcudf**:
+  - https://docs.rapids.ai/api/cudf/stable/pylibcudf/developer_docs/
+  - https://docs.rapids.ai/api/cudf/stable/pylibcudf/api_docs/  
+- **libcudf**:
+  - https://github.com/rapidsai/cudf/blob/branch-25.08/cpp/doxygen/developer_guide/DEVELOPER_GUIDE.md
+  - https://docs.rapids.ai/api/libcudf/stable/modules.html
+  - https://github.com/rapidsai/cudf/blob/branch-25.08/cpp/doxygen/developer_guide/TESTING.md
+- **rmm**:
+  - https://docs.rapids.ai/api/rmm/stable/python/
+- **rmm**:
+  - https://docs.rapids.ai/api/librmm/25.06/group__memory__resources
+- **Numba-cuda**:
+  -  [CUDAカーネル開発とGPU並列処理](https://numba.readthedocs.io/en/stable/)
+- **Rust-cudf**: 
+  - https://github.com/Rust-GPU/Rust-CUDA/blob/main/README.md
+  - https://github.com/Rust-GPU/Rust-CUDA/blob/main/guide/src/guide/getting_started.md
+  - https://github.com/Rust-GPU/Rust-CUDA/blob/main/guide/src/features.md
+
 
 ## Memories
 - **Memory**: Added memory section to track development insights and key project memories
 - **Environment Setup**: 毎回conda環境の設定で問題が発生。必ず`cudf_dev`環境を使用すること
-- **Development Governance**: 方針変更には上司の許可が必要。実装困難時は即座に状況報告と代替案の提示を行う
+- **Development Governance**: 方針変更には上司の許可が必要。実装困難時は即座に状況報告と代替案の提示を行う。勝手に方針変更しない。
 - **Benchmark Principles**: 必ず全テーブルを対象に実施。ストリーミング処理は使用禁止
+- **Problem Solving**: 解決策を提案する際は、必ずその解決策が問題を解決することを確認してから提案すること
