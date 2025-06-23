@@ -1,0 +1,210 @@
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+=== PostgreSQL → Rust → GPU 直接抽出版（統合バッファ削除） ===
+チャンク数: 8
+各チャンクサイズ: 約6.6 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - 統合バッファを完全に削除
+  - RMM DeviceBufferで全ての列を処理
+  - メモリ使用量を大幅削減
+  - チャンク数8で安定動作（各約6.6GB）
+RMM既に初期化済み
+
+✅ CUDA context OK
+PostgreSQLメタデータを取得中...
+✅ メタデータ取得完了: 17 列
+  Decimal列 lo_orderkey: arrow_param=(0, 0)
+  Decimal列 lo_custkey: arrow_param=(0, 0)
+  Decimal列 lo_suppkey: arrow_param=(0, 0)
+  Decimal列 lo_quantity: arrow_param=(0, 0)
+  Decimal列 lo_extendedprice: arrow_param=(0, 0)
+  Decimal列 lo_ordertotalprice: arrow_param=(0, 0)
+  Decimal列 lo_discount: arrow_param=(0, 0)
+  Decimal列 lo_revenue: arrow_param=(0, 0)
+  Decimal列 lo_supplycost: arrow_param=(0, 0)
+  Decimal列 lo_tax: arrow_param=(0, 0)
+
+[Rust] チャンク 1/8 転送開始
+[Rust] チャンク 1 転送完了: 6.59 GB, 4.91秒 (1.34 GB/秒)
+
+[GPU] チャンク 1 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.70秒 (1.78 GB/秒)
+  GPU転送: 0.54秒 (12.30 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14814370 行 (2.9809秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (222215550 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14814370 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (118514960 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (148143700 bytes)
+直接列抽出開始（統合バッファ不使用）: 14814370 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,814,370 行 × 17 列
+データサイズ: 6745.30 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 2.9809 秒
+  process_and_export  : 2.2056 秒
+    ├─ string_buffers  : 0.3782 秒
+    ├─ direct_extract  : 0.4600 秒
+    └─ parquet_export  : 1.3673 秒
+  total               : 2.2056 秒
+  overall_total       : 5.1865 秒
+
+--- スループット ---
+  セル処理速度: 48,557,831 cells/sec
+  データ処理速度: 1300.55 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1412.8 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 1 処理完了:
+  - 処理行数: 14,814,370 行
+  - GPU全体時間: 9.43秒
+  - 内訳:
+    - ファイル読込: 3.70秒
+    - GPU転送: 0.54秒
+    - GPUパース: 2.98秒
+    - 直接抽出処理: 2.21秒
+      - 文字列バッファ: 0.38秒
+      - 直接列抽出: 0.46秒
+      - Parquet書込: 1.37秒
+  - スループット: 0.70 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 2/8 転送開始
+[Rust] チャンク 2 転送完了: 6.49 GB, 5.17秒 (1.26 GB/秒)
+
+[GPU] チャンク 2 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.54秒 (1.84 GB/秒)
+  GPU転送: 0.52秒 (12.51 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14496484 行 (2.4738秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217447260 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496484 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115971872 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144964840 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496484 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,484 行 × 17 列
+データサイズ: 6650.02 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 2.4738 秒
+  process_and_export  : 1.5769 秒
+    ├─ string_buffers  : 0.3232 秒
+    ├─ direct_extract  : 0.0476 秒
+    └─ parquet_export  : 1.2061 秒
+  total               : 1.5769 秒
+  overall_total       : 4.0507 秒
+
+--- スループット ---
+  セル処理速度: 60,838,838 cells/sec
+  データ処理速度: 1641.69 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 2 処理完了:
+  - 処理行数: 14,496,484 行
+  - GPU全体時間: 8.11秒
+  - 内訳:
+    - ファイル読込: 3.54秒
+    - GPU転送: 0.52秒
+    - GPUパース: 2.47秒
+    - 直接抽出処理: 1.58秒
+      - 文字列バッファ: 0.32秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.21秒
+  - スループット: 0.80 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 3/8 転送開始
+[Rust] チャンク 3 転送完了: 6.49 GB, 4.88秒 (1.33 GB/秒)
+
+[GPU] チャンク 3 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.64秒 (1.79 GB/秒)
+  GPU転送: 0.52秒 (12.54 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14496508 行 (5.7073秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217447620 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496508 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115972064 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144965080 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496508 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,508 行 × 17 列
+データサイズ: 6650.02 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 5.7073 秒
+  process_and_export  : 1.6277 秒
+    ├─ string_buffers  : 0.3287 秒
+    ├─ direct_extract  : 0.0478 秒
+    └─ parquet_export  : 1.2512 秒
+  total               : 1.6277 秒
+  overall_total       : 7.3350 秒
+
+--- スループット ---
+  セル処理速度: 33,597,919 cells/sec
+  データ処理速度: 906.62 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 3 処理完了:
+  - 処理行数: 14,496,508 行
+  - GPU全体時間: 11.50秒
+  - 内訳:
+    - ファイル読込: 3.64秒
+    - GPU転送: 0.52秒
+    - GPUパース: 5.71秒
+    - 直接抽出処理: 1.63秒
+      - 文字列バッファ: 0.33秒
+      - 直接列抽出: 0.05秒
+      - Parquet書込: 1.25秒
+  - スループット: 0.56 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 4/8 転送開始
+[Rust] チャンク 4 転送完了: 6.49 GB, 4.78秒 (1.36 GB/秒)
+
+[GPU] チャンク 4 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.42秒 (1.90 GB/秒)
+  GPU転送: 0.52秒 (12.56 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）

@@ -1,0 +1,624 @@
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+=== PostgreSQL → Rust → GPU 直接抽出版（統合バッファ削除） ===
+チャンク数: 8
+各チャンクサイズ: 約6.6 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - 統合バッファを完全に削除
+  - 入力データから直接cuDF列を作成
+  - メモリ使用量を大幅削減
+  - GPUメモリ不足エラーを解決
+RMM既に初期化済み
+
+✅ CUDA context OK
+
+[Rust] チャンク 1/8 転送開始
+[Rust] チャンク 1 転送完了: 6.59 GB, 5.00秒 (1.32 GB/秒)
+カラム数: 17
+
+[GPU] チャンク 1 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.67秒 (1.80 GB/秒)
+  GPU転送: 0.53秒 (12.33 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14811820 行 (4.2057秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (222177300 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14811820 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (118494560 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (148118200 bytes)
+直接列抽出開始（統合バッファ不使用）: 14811820 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,811,820 行 × 17 列
+データサイズ: 6745.30 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 4.2057 秒
+  process_and_export  : 11.6483 秒
+    ├─ string_buffers  : 0.4694 秒
+    ├─ direct_extract  : 10.1447 秒
+    └─ parquet_export  : 1.0262 秒
+  total               : 11.6402 秒
+  overall_total       : 15.8540 秒
+
+--- スループット ---
+  セル処理速度: 15,882,437 cells/sec
+  データ処理速度: 425.46 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1412.6 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 1 処理完了:
+  - 処理行数: 14,811,820 行
+  - GPU全体時間: 20.06秒
+  - 内訳:
+    - ファイル読込: 3.67秒
+    - GPU転送: 0.53秒
+    - GPUパース: 4.21秒
+    - 直接抽出処理: 11.65秒
+      - 文字列バッファ: 0.47秒
+      - 直接列抽出: 10.14秒
+      - Parquet書込: 1.03秒
+  - スループット: 0.33 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 2/8 転送開始
+[Rust] チャンク 2 転送完了: 6.49 GB, 4.60秒 (1.41 GB/秒)
+
+[GPU] チャンク 2 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.52秒 (1.84 GB/秒)
+  GPU転送: 0.51秒 (12.63 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14496482 行 (3.0612秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217447230 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496482 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115971856 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144964820 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496482 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,482 行 × 17 列
+データサイズ: 6650.02 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 3.0612 秒
+  process_and_export  : 10.6251 秒
+    ├─ string_buffers  : 0.5251 秒
+    ├─ direct_extract  : 9.2887 秒
+    └─ parquet_export  : 0.8033 秒
+  total               : 10.6170 秒
+  overall_total       : 13.6863 秒
+
+--- スループット ---
+  セル処理速度: 18,006,305 cells/sec
+  データ処理速度: 485.89 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 2 処理完了:
+  - 処理行数: 14,496,482 行
+  - GPU全体時間: 17.73秒
+  - 内訳:
+    - ファイル読込: 3.52秒
+    - GPU転送: 0.51秒
+    - GPUパース: 3.06秒
+    - 直接抽出処理: 10.63秒
+      - 文字列バッファ: 0.53秒
+      - 直接列抽出: 9.29秒
+      - Parquet書込: 0.80秒
+  - スループット: 0.37 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 3/8 転送開始
+[Rust] チャンク 3 転送完了: 6.49 GB, 4.67秒 (1.39 GB/秒)
+
+[GPU] チャンク 3 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.63秒 (1.79 GB/秒)
+  GPU転送: 0.52秒 (12.52 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14496506 行 (4.7988秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217447590 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496506 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115972048 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144965060 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496506 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,506 行 × 17 列
+データサイズ: 6650.02 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 4.7988 秒
+  process_and_export  : 10.9460 秒
+    ├─ string_buffers  : 0.5309 秒
+    ├─ direct_extract  : 9.5192 秒
+    └─ parquet_export  : 0.8878 秒
+  total               : 10.9380 秒
+  overall_total       : 15.7449 秒
+
+--- スループット ---
+  セル処理速度: 15,652,104 cells/sec
+  データ処理速度: 422.36 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 3 処理完了:
+  - 処理行数: 14,496,506 行
+  - GPU全体時間: 19.90秒
+  - 内訳:
+    - ファイル読込: 3.63秒
+    - GPU転送: 0.52秒
+    - GPUパース: 4.80秒
+    - 直接抽出処理: 10.95秒
+      - 文字列バッファ: 0.53秒
+      - 直接列抽出: 9.52秒
+      - Parquet書込: 0.89秒
+  - スループット: 0.33 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 4/8 転送開始
+[Rust] チャンク 4 転送完了: 6.49 GB, 4.97秒 (1.31 GB/秒)
+
+[GPU] チャンク 4 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.62秒 (1.80 GB/秒)
+  GPU転送: 0.52秒 (12.50 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14496745 行 (9.6021秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217451175 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14496745 bytes)/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115973960 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144967450 bytes)
+直接列抽出開始（統合バッファ不使用）: 14496745 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,496,745 行 × 17 列
+データサイズ: 6650.09 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.6021 秒
+  process_and_export  : 11.0258 秒
+    ├─ string_buffers  : 0.4772 秒
+    ├─ direct_extract  : 9.6525 秒
+    └─ parquet_export  : 0.8880 秒
+  total               : 11.0177 秒
+  overall_total       : 20.6279 秒
+
+--- スループット ---
+  セル処理速度: 11,947,132 cells/sec
+  データ処理速度: 322.38 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 4 処理完了:
+  - 処理行数: 14,496,745 行
+  - GPU全体時間: 24.77秒
+  - 内訳:
+    - ファイル読込: 3.62秒
+    - GPU転送: 0.52秒
+    - GPUパース: 9.60秒
+    - 直接抽出処理: 11.03秒
+      - 文字列バッファ: 0.48秒
+      - 直接列抽出: 9.65秒
+      - Parquet書込: 0.89秒
+  - スループット: 0.26 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 5/8 転送開始
+[Rust] チャンク 5 転送完了: 6.49 GB, 4.95秒 (1.31 GB/秒)
+
+[GPU] チャンク 5 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.56秒 (1.83 GB/秒)
+  GPU転送: 0.52秒 (12.60 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 14495905 行 (9.7184秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (217438575 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (14495905 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (115967240 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (144959050 bytes)
+直接列抽出開始（統合バッファ不使用）: 14495905 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 14,495,905 行 × 17 列
+データサイズ: 6649.85 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.7184 秒
+  process_and_export  : 10.9392 秒
+    ├─ string_buffers  : 0.4291 秒
+    ├─ direct_extract  : 9.6297 秒
+    └─ parquet_export  : 0.8722 秒
+  total               : 10.9310 秒
+  overall_total       : 20.6576 秒
+
+--- スループット ---
+  セル処理速度: 11,929,271 cells/sec
+  データ処理速度: 321.91 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1382.4 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 5 処理完了:
+  - 処理行数: 14,495,905 行
+  - GPU全体時間: 24.73秒
+  - 内訳:
+    - ファイル読込: 3.56秒
+    - GPU転送: 0.52秒
+    - GPUパース: 9.72秒
+    - 直接抽出処理: 10.94秒
+      - 文字列バッファ: 0.43秒
+      - 直接列抽出: 9.63秒
+      - Parquet書込: 0.87秒
+  - スループット: 0.26 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 6/8 転送開始
+[Rust] チャンク 6 転送完了: 6.73 GB, 4.97秒 (1.35 GB/秒)
+
+[GPU] チャンク 6 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.75秒 (1.79 GB/秒)
+  GPU転送: 0.54秒 (12.50 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15306836 行 (9.7407秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (229602540 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15306836 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (122454688 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (153068360 bytes)
+直接列抽出開始（統合バッファ不使用）: 15306836 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,306,836 行 × 17 列
+データサイズ: 6894.37 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 9.7407 秒
+  process_and_export  : 11.4165 秒
+    ├─ string_buffers  : 0.4164 秒
+    ├─ direct_extract  : 10.0247 秒
+    └─ parquet_export  : 0.9674 秒
+  total               : 11.4085 秒
+  overall_total       : 21.1572 秒
+
+--- スループット ---
+  セル処理速度: 12,299,189 cells/sec
+  データ処理速度: 325.86 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1459.8 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 6 処理完了:
+  - 処理行数: 15,306,836 行
+  - GPU全体時間: 25.46秒
+  - 内訳:
+    - ファイル読込: 3.75秒
+    - GPU転送: 0.54秒
+    - GPUパース: 9.74秒
+    - 直接抽出処理: 11.42秒
+      - 文字列バッファ: 0.42秒
+      - 直接列抽出: 10.02秒
+      - Parquet書込: 0.97秒
+  - スループット: 0.26 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 7/8 転送開始
+[Rust] チャンク 7 転送完了: 6.78 GB, 5.01秒 (1.35 GB/秒)
+
+[GPU] チャンク 7 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.63秒 (1.87 GB/秒)
+  GPU転送: 0.54秒 (12.55 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15470151 行 (11.8059秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (232052265 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15470151 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (123761208 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (154701510 bytes)
+直接列抽出開始（統合バッファ不使用）: 15470151 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,470,151 行 × 17 列
+データサイズ: 6945.00 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 11.8059 秒
+  process_and_export  : 11.5737 秒
+    ├─ string_buffers  : 0.4672 秒
+    ├─ direct_extract  : 10.0846 秒
+    └─ parquet_export  : 1.0140 秒
+  total               : 11.5658 秒
+  overall_total       : 23.3796 秒
+
+--- スループット ---
+  セル処理速度: 11,248,801 cells/sec
+  データ処理速度: 297.05 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1475.3 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 7 処理完了:
+  - 処理行数: 15,470,151 行/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+/home/ubuntu/gpupgparser/src/direct_column_extractor.py:425: UserWarning: 文字列Series作成失敗: dtype must be a floating, integer or boolean numpy dtype.
+  warnings.warn(f"文字列Series作成失敗: {e}")
+
+  - GPU全体時間: 27.56秒
+  - 内訳:
+    - ファイル読込: 3.63秒
+    - GPU転送: 0.54秒
+    - GPUパース: 11.81秒
+    - 直接抽出処理: 11.57秒
+      - 文字列バッファ: 0.47秒
+      - 直接列抽出: 10.08秒
+      - Parquet書込: 1.01秒
+  - スループット: 0.25 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 8/8 転送開始
+[Rust] チャンク 8 転送完了: 6.78 GB, 5.14秒 (1.32 GB/秒)
+
+[GPU] チャンク 8 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 3.77秒 (1.80 GB/秒)
+  GPU転送: 0.54秒 (12.49 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 15469083 行 (11.4334秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (232036245 bytes)
+文字列列 lo_shippriority: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (15469083 bytes)
+文字列列 lo_commit_date: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (123752664 bytes)
+文字列列 lo_shipmode: 直接コピー最適化カーネル実行
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (154690830 bytes)
+直接列抽出開始（統合バッファ不使用）: 15469083 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 15,469,083 行 × 17 列
+データサイズ: 6944.70 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 11.4334 秒
+  process_and_export  : 11.9085 秒
+    ├─ string_buffers  : 0.5189 秒
+    ├─ direct_extract  : 10.3615 秒
+    └─ parquet_export  : 1.0202 秒
+  total               : 11.9006 秒
+  overall_total       : 23.3419 秒
+
+--- スループット ---
+  セル処理速度: 11,266,180 cells/sec
+  データ処理速度: 297.52 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1475.2 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 8 処理完了:
+  - 処理行数: 15,469,083 行
+  - GPU全体時間: 27.66秒
+  - 内訳:
+    - ファイル読込: 3.77秒
+    - GPU転送: 0.54秒
+    - GPUパース: 11.43秒
+    - 直接抽出処理: 11.91秒
+      - 文字列バッファ: 0.52秒
+      - 直接列抽出: 10.36秒
+      - Parquet書込: 1.02秒
+  - スループット: 0.25 GB/秒
+  - 統合バッファ: 【削除済み】
+
+============================================================
+✅ 全チャンク処理完了!
+============================================================
+総実行時間: 242.01秒
+  - Rust転送合計: 39.31秒
+  - GPU処理合計: 187.87秒
+総データサイズ: 52.86 GB
+総行数: 119,043,528 行
+全体スループット: 0.22 GB/秒
+Rust平均速度: 1.34 GB/秒
+GPU平均速度: 0.28 GB/秒
+
+改善率: 1.1倍（4チャンクベースライン比）
+
+メモリ効率改善:
+  - 統合バッファ削除: 約11.1 GB節約
+  - ピークメモリ使用量: 大幅削減

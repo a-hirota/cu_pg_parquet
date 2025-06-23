@@ -127,9 +127,9 @@ class ZeroCopyProcessor:
         field_lengths_dev
     ) -> Dict[str, Any]:
         """
-        文字列バッファ作成（最適化版 - 共有メモリ不使用）
+        文字列バッファ作成（RMM DeviceBuffer版 - ゼロコピー実現）
         
-        直接グローバルメモリコピーによる高速化
+        RMM DeviceBufferを使用してpylibcudfとの完全な互換性を実現
         """
         
         string_buffers = {}
@@ -150,8 +150,21 @@ class ZeroCopyProcessor:
                 continue
             
             try:
-                # === 1. 長さ配列の並列抽出 ===
-                d_lengths = cuda.device_array(rows, dtype=np.int32)
+                # === 1. RMM DeviceBufferで長さ配列を作成 ===
+                lengths_buffer = rmm.DeviceBuffer(size=rows * 4)  # int32は4バイト
+                
+                # CuPy配列としてビュー作成（ゼロコピー）
+                lengths_cupy = cp.ndarray(
+                    shape=(rows,),
+                    dtype=cp.int32,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(lengths_buffer.ptr, lengths_buffer.size, lengths_buffer),
+                        0
+                    )
+                )
+                
+                # Numbaカーネル用に変換
+                d_lengths_numba = cuda.as_cuda_array(lengths_cupy)
                 
                 # グリッドサイズの計算
                 blocks, threads = optimize_grid_size(0, rows, self.device_props)
@@ -164,44 +177,50 @@ class ZeroCopyProcessor:
                         lengths_out[row] = field_lengths[row, col_idx]
                 
                 extract_lengths_coalesced[blocks, threads](
-                    field_lengths_dev, actual_col_idx, d_lengths, rows
+                    field_lengths_dev, actual_col_idx, d_lengths_numba, rows
                 )
                 cuda.synchronize()
                 
-                # === 2. GPU上でのオフセット計算（CuPy使用版） ===
-                # 文字列長配列をCuPyに変換
-                lengths_cupy = cp.asarray(d_lengths)
-                
-                # CuPyのcumsum使用（GPU実行）
+                # === 2. GPU上でのオフセット計算（CuPy使用） ===
+                # CuPyのcumsum使用（既にCuPy配列なので変換不要）
                 offsets_cumsum = cp.cumsum(lengths_cupy, dtype=cp.int32)
                 
-                # オフセット配列を作成（0を先頭に追加）
-                d_offsets = cuda.device_array(rows + 1, dtype=np.int32)
-                d_offsets[0] = 0  # 最初のオフセットは0
-                
-                # CuPyの結果をNumba配列にコピー
-                @cuda.jit
-                def copy_cumsum_to_offsets(cumsum_data, offsets_out, num_rows):
-                    """CuPy cumsum結果をオフセット配列にコピー"""
-                    idx = cuda.grid(1)
-                    if idx < num_rows:
-                        offsets_out[idx + 1] = cumsum_data[idx]
-                
-                copy_cumsum_to_offsets[blocks, threads](
-                    cp.asarray(offsets_cumsum), d_offsets, rows
+                # RMM DeviceBufferでオフセット配列作成
+                offsets_buffer = rmm.DeviceBuffer(size=(rows + 1) * 4)  # int32
+                offsets_cupy = cp.ndarray(
+                    shape=(rows + 1,),
+                    dtype=cp.int32,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(offsets_buffer.ptr, offsets_buffer.size, offsets_buffer),
+                        0
+                    )
                 )
-                cuda.synchronize()
+                offsets_cupy[0] = 0
+                offsets_cupy[1:] = offsets_cumsum
                 
                 # 総データサイズを取得
-                total_size_array = d_offsets[rows:rows+1].copy_to_host()
-                total_size = int(total_size_array[0]) if len(total_size_array) > 0 else rows * 50
+                total_size = int(offsets_cupy[-1])
                 
                 if total_size == 0:
                     string_buffers[col.name] = {'data': None, 'offsets': None, 'actual_size': 0}
                     continue
                 
-                # === 3. 最適化データバッファの並列コピー（共有メモリ不使用） ===
-                d_data = cuda.device_array(total_size, dtype=np.uint8)
+                # === 3. RMM DeviceBufferでデータバッファ作成 ===
+                data_buffer = rmm.DeviceBuffer(size=total_size)
+                
+                # CuPy配列としてビュー作成（ゼロコピー）
+                data_cupy = cp.ndarray(
+                    shape=(total_size,),
+                    dtype=cp.uint8,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(data_buffer.ptr, data_buffer.size, data_buffer),
+                        0
+                    )
+                )
+                
+                # Numbaカーネル用に変換
+                d_data_numba = cuda.as_cuda_array(data_cupy)
+                d_offsets_numba = cuda.as_cuda_array(offsets_cupy)
                 
                 @cuda.jit
                 def copy_string_data_direct_optimized(
@@ -210,7 +229,7 @@ class ZeroCopyProcessor:
                 ):
                     """
                     最適化された直接グローバルメモリコピー
-                    共有メモリを使用せず、メモリコアレッシングを考慮
+                    RMM DeviceBufferに直接書き込み
                     """
                     row = cuda.grid(1)
                     if row >= num_rows:
@@ -224,8 +243,7 @@ class ZeroCopyProcessor:
                     if field_length <= 0:
                         return
                     
-                    # ワープ協調的な直接コピー（共有メモリ経由なし）
-                    # 各スレッドが連続したメモリ領域を効率的にコピー
+                    # ワープ協調的な直接コピー
                     for i in range(field_length):
                         src_idx = field_offset + i
                         dst_idx = output_offset + i
@@ -233,19 +251,20 @@ class ZeroCopyProcessor:
                         # 境界チェック
                         if (src_idx < raw_data.size and 
                             dst_idx < data_out.size):
-                            # 直接グローバルメモリ間コピー
+                            # RMM DeviceBufferに直接書き込み
                             data_out[dst_idx] = raw_data[src_idx]
                 
-                print(f"文字列列 {col.name}: 直接コピー最適化カーネル実行")
+                print(f"文字列列 {col.name}: RMM DeviceBuffer直接書き込み")
                 copy_string_data_direct_optimized[blocks, threads](
                     raw_dev, field_offsets_dev, field_lengths_dev,
-                    actual_col_idx, d_data, d_offsets, rows
+                    actual_col_idx, d_data_numba, d_offsets_numba, rows
                 )
                 cuda.synchronize()
                 
+                # RMM DeviceBufferをそのまま返す（pylibcudf互換）
                 string_buffers[col.name] = {
-                    'data': d_data,
-                    'offsets': d_offsets,
+                    'data': data_buffer,      # RMM DeviceBuffer
+                    'offsets': offsets_buffer, # RMM DeviceBuffer
                     'actual_size': total_size
                 }
                 print(f"✅ 文字列列 {col.name}: 最適化バッファ作成完了 ({total_size} bytes)")

@@ -1,0 +1,122 @@
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 157, in process_chunk_direct
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 338, in postgresql_to_cudf_parquet_direct
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 210, in process_postgresql_to_parquet
+    field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 415, in parse_binary_chunk_gpu_ultra_fast_v2
+    return parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size, debug)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 362, in parse_binary_chunk_gpu_ultra_fast_v2_lite
+    parse_rows_and_fields_lite[grid_2d, threads_per_block](
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 608, in __call__
+    return self.dispatcher.call(args, self.griddim, self.blockdim,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 752, in call
+    kernel.launch(args, griddim, blockdim, stream, sharedmem)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 394, in launch
+    driver.launch_kernel(cufunc.handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 2563, in launch_kernel
+    driver.cuLaunchKernel(cufunc_handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 327, in safe_cuda_api_call
+    self._check_ctypes_error(fname, retcode)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 395, in _check_ctypes_error
+    raise CudaAPIError(retcode, msg)
+numba.cuda.cudadrv.driver.CudaAPIError: [2] Call to cuLaunchKernel results in CUDA_ERROR_OUT_OF_MEMORY
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 281, in main
+    gpu_time, _, rows, timing = process_chunk_direct(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 157, in process_chunk_direct
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 338, in postgresql_to_cudf_parquet_direct
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 210, in process_postgresql_to_parquet
+    field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 415, in parse_binary_chunk_gpu_ultra_fast_v2
+    return parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size, debug)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 362, in parse_binary_chunk_gpu_ultra_fast_v2_lite
+    parse_rows_and_fields_lite[grid_2d, threads_per_block](
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 608, in __call__
+    return self.dispatcher.call(args, self.griddim, self.blockdim,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 752, in call
+    kernel.launch(args, griddim, blockdim, stream, sharedmem)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 394, in launch
+    driver.launch_kernel(cufunc.handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 2563, in launch_kernel
+    driver.cuLaunchKernel(cufunc_handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 327, in safe_cuda_api_call
+    self._check_ctypes_error(fname, retcode)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 395, in _check_ctypes_error
+    raise CudaAPIError(retcode, msg)
+numba.cuda.cudadrv.driver.CudaAPIError: [2] Call to cuLaunchKernel results in CUDA_ERROR_OUT_OF_MEMORY
+=== PostgreSQL → Rust → GPU 直接抽出版（統合バッファ削除） ===
+チャンク数: 4
+各チャンクサイズ: 約13.2 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - 統合バッファを完全に削除
+  - RMM DeviceBufferで全ての列を処理
+  - メモリ使用量を大幅削減
+  - チャンク数を4に削減（各約13.2GB）
+RMM既に初期化済み
+
+✅ CUDA context OK
+
+[Rust] チャンク 1/4 転送開始
+[Rust] チャンク 1 転送完了: 13.08 GB, 9.15秒 (1.43 GB/秒)
+カラム数: 17
+
+[GPU] チャンク 1 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 7.21秒 (1.81 GB/秒)
+  GPU転送: 1.49秒 (8.78 GB/秒)
+=== GPU並列パース開始 ===
+❌ GPU処理エラー: [2] Call to cuLaunchKernel results in CUDA_ERROR_OUT_OF_MEMORY
+
+❌ エラー: [2] Call to cuLaunchKernel results in CUDA_ERROR_OUT_OF_MEMORY
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 407, in <module>
+    main()
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 281, in main
+    gpu_time, _, rows, timing = process_chunk_direct(chunk_info, columns)
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 157, in process_chunk_direct
+    cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 338, in postgresql_to_cudf_parquet_direct
+    return processor.process_postgresql_to_parquet(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet_direct.py", line 210, in process_postgresql_to_parquet
+    field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 415, in parse_binary_chunk_gpu_ultra_fast_v2
+    return parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size, debug)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/postgres_binary_parser.py", line 362, in parse_binary_chunk_gpu_ultra_fast_v2_lite
+    parse_rows_and_fields_lite[grid_2d, threads_per_block](
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 608, in __call__
+    return self.dispatcher.call(args, self.griddim, self.blockdim,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 752, in call
+    kernel.launch(args, griddim, blockdim, stream, sharedmem)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py", line 394, in launch
+    driver.launch_kernel(cufunc.handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 2563, in launch_kernel
+    driver.cuLaunchKernel(cufunc_handle,
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 327, in safe_cuda_api_call
+    self._check_ctypes_error(fname, retcode)
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/cudadrv/driver.py", line 395, in _check_ctypes_error
+    raise CudaAPIError(retcode, msg)
+numba.cuda.cudadrv.driver.CudaAPIError: [2] Call to cuLaunchKernel results in CUDA_ERROR_OUT_OF_MEMORY

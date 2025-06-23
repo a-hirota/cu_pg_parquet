@@ -1,2 +1,508 @@
 /home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
   warn(NumbaPerformanceWarning(msg))
+[3444596][06:41:10:198692][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:41:10:355493][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+[3444596][06:41:38:906543][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:41:39:065465][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+[3444596][06:42:10:231880][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:42:10:391826][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+=== PostgreSQL → Rust → GPU 直接抽出版（統合バッファ削除） ===
+チャンク数: 6
+各チャンクサイズ: 約8.8 GB
+出力ディレクトリ: /dev/shm
+
+改善内容:
+  - 統合バッファを完全に削除
+  - RMM DeviceBufferで全ての列を処理
+  - メモリ使用量を大幅削減
+  - チャンク数を6に削減（各約8.8GB）
+RMM既に初期化済み
+
+✅ CUDA context OK
+
+[Rust] チャンク 1/6 転送開始
+[Rust] チャンク 1 転送完了: 8.75 GB, 6.29秒 (1.39 GB/秒)
+カラム数: 17
+
+[GPU] チャンク 1 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 4.81秒 (1.82 GB/秒)
+  GPU転送: 0.71秒 (12.38 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18593470 行 (4.8748秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (278902050 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18593470 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (148747760 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (185934700 bytes)
+直接列抽出開始（統合バッファ不使用）: 18593470 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,593,470 行 × 17 列
+データサイズ: 8961.99 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 4.8748 秒
+  process_and_export  : 12.0415 秒
+    ├─ string_buffers  : 0.4582 秒
+    ├─ direct_extract  : 0.4816 秒
+    └─ parquet_export  : 11.1016 秒
+  total               : 12.0415 秒
+  overall_total       : 16.9163 秒
+
+--- スループット ---
+  セル処理速度: 18,685,504 cells/sec
+  データ処理速度: 529.79 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1773.2 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 1 処理完了:
+  - 処理行数: 18,593,470 行
+  - GPU全体時間: 22.43秒
+  - 内訳:
+    - ファイル読込: 4.81秒
+    - GPU転送: 0.71秒
+    - GPUパース: 4.87秒
+    - 直接抽出処理: 12.04秒
+      - 文字列バッファ: 0.46秒
+      - 直接列抽出: 0.48秒
+      - Parquet書込: 11.10秒
+  - スループット: 0.39 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 2/6 転送開始
+[Rust] チャンク 2 転送完了: 8.66 GB, 6.14秒 (1.41 GB/秒)
+
+[GPU] チャンク 2 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 4.59秒 (1.89 GB/秒)
+  GPU転送: 0.70秒 (12.36 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18550533 行 (3.5271秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (278257995 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18550533 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (148404264 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (185505330 bytes)
+直接列抽出開始（統合バッファ不使用）: 18550533 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,550,533 行 × 17 列
+データサイズ: 8866.70 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 3.5271 秒
+  process_and_export  : 11.2190 秒
+    ├─ string_buffers  : 0.3255 秒
+    ├─ direct_extract  : 0.0564 秒
+    └─ parquet_export  : 10.8370 秒
+  total               : 11.2190 秒
+  overall_total       : 14.7461 秒
+
+--- スループット ---
+  セル処理速度: 21,385,869 cells/sec
+  データ処理速度: 601.29 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1769.1 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 2 処理完了:
+  - 処理行数: 18,550,533 行
+  - GPU全体時間: 20.04秒
+  - 内訳:
+    - ファイル読込: 4.59秒
+    - GPU転送: 0.70秒
+    - GPUパース: 3.53秒
+    - 直接抽出処理: 11.22秒
+      - 文字列バッファ: 0.33秒
+      - 直接列抽出: 0.06秒
+      - Parquet書込: 10.84秒
+  - スループット: 0.43 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 3/6 転送開始
+[Rust] チャンク 3 転送完了: 8.66 GB, 6.14秒 (1.41 GB/秒)
+
+[GPU] チャンク 3 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 4.83秒 (1.79 GB/秒)
+  GPU転送: 0.71秒 (12.21 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18550551 行 (6.0262秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (278258265 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18550551 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (148404408 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (185505510 bytes)
+直接列抽出開始（統合バッファ不使用）: 18550551 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,550,551 行 × 17 列
+データサイズ: 8866.74 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 6.0262 秒
+  process_and_export  : 11.3262 秒
+    ├─ string_buffers  : 0.3358 秒
+    ├─ direct_extract  : 0.0565 秒
+    └─ parquet_export  : 10.9339 秒
+  total               : 11.3262 秒
+  overall_total       : 17.3525 秒
+
+--- スループット ---
+  セル処理速度: 18,173,729 cells/sec
+  データ処理速度: 510.98 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1769.1 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 3 処理完了:
+  - 処理行数: 18,550,551 行
+  - GPU全体時間: 22.90秒
+  - 内訳:
+    - ファイル読込: 4.83秒
+    - GPU転送: 0.71秒
+    - GPUパース: 6.03秒
+    - 直接抽出処理: 11.33秒
+      - 文字列バッファ: 0.34秒
+      - 直接列抽出: 0.06秒
+      - Parquet書込: 10.93秒
+  - スループット: 0.38 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 4/6 転送開始
+[Rust] チャンク 4 転送完了: 8.71 GB, 6.69秒 (1.30 GB/秒)
+
+[GPU] チャンク 4 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 4.78秒 (1.82 GB/秒)
+  GPU転送: 0.71秒 (12.21 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18567010 行 (16.0500秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (278505150 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18567010 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (148536080 bytes)[3444596][06:42:52:185541][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 4000000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:42:52:342922][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 4000000 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+[3444596][06:43:31:057171][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:43:31:192813][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/numba_cuda/numba/cuda/dispatcher.py:605: NumbaPerformanceWarning: [1mGrid size 1 will likely result in GPU under-utilization due to low occupancy.[0m
+  warn(NumbaPerformanceWarning(msg))
+[3444596][06:44:10:443878][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:118: UserWarning: 拡張書き込み失敗, 標準方式にフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"拡張書き込み失敗, 標準方式にフォールバック: {e}")
+[3444596][06:44:10:580679][error ] Parquet writer encountered exception during processing. No data has been written to the sink.
+/home/ubuntu/gpupgparser/src/write_parquet_from_cudf.py:49: UserWarning: cuDF直接書き出し失敗, PyArrowにフォールバック: std::bad_alloc: out_of_memory: CUDA error (failed to allocate 5767728 bytes) at: /home/ubuntu/miniconda3/envs/cudf_dev/include/rmm/mr/device/cuda_memory_resource.hpp
+  warnings.warn(f"cuDF直接書き出し失敗, PyArrowにフォールバック: {e}")
+
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (185670100 bytes)
+直接列抽出開始（統合バッファ不使用）: 18567010 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,567,010 行 × 17 列
+データサイズ: 8914.23 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 16.0500 秒
+  process_and_export  : 11.2227 秒
+    ├─ string_buffers  : 0.3243 秒
+    ├─ direct_extract  : 0.0563 秒
+    └─ parquet_export  : 10.8422 秒
+  total               : 11.2227 秒
+  overall_total       : 27.2727 秒
+
+--- スループット ---
+  セル処理速度: 11,573,436 cells/sec
+  データ処理速度: 326.86 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1770.7 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 4 処理完了:
+  - 処理行数: 18,567,010 行
+  - GPU全体時間: 32.77秒
+  - 内訳:
+    - ファイル読込: 4.78秒
+    - GPU転送: 0.71秒
+    - GPUパース: 16.05秒
+    - 直接抽出処理: 11.22秒
+      - 文字列バッファ: 0.32秒
+      - 直接列抽出: 0.06秒
+      - Parquet書込: 10.84秒
+  - スループット: 0.27 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 5/6 転送開始
+[Rust] チャンク 5 転送完了: 9.04 GB, 6.51秒 (1.39 GB/秒)
+
+[GPU] チャンク 5 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 5.04秒 (1.79 GB/秒)
+  GPU転送: 0.74秒 (12.23 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18712162 行 (12.9237秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (280682430 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18712162 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (149697296 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (187121620 bytes)
+直接列抽出開始（統合バッファ不使用）: 18712162 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,712,162 行 × 17 列
+データサイズ: 9259.99 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 12.9237 秒
+  process_and_export  : 11.2031 秒
+    ├─ string_buffers  : 0.3381 秒
+    ├─ direct_extract  : 0.0571 秒
+    └─ parquet_export  : 10.8079 秒
+  total               : 11.2031 秒
+  overall_total       : 24.1268 秒
+
+--- スループット ---
+  セル処理速度: 13,184,776 cells/sec
+  データ処理速度: 383.80 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1784.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 5 処理完了:
+  - 処理行数: 18,712,162 行
+  - GPU全体時間: 29.91秒
+  - 内訳:
+    - ファイル読込: 5.04秒
+    - GPU転送: 0.74秒
+    - GPUパース: 12.92秒
+    - 直接抽出処理: 11.20秒
+      - 文字列バッファ: 0.34秒
+      - 直接列抽出: 0.06秒
+      - Parquet書込: 10.81秒
+  - スループット: 0.30 GB/秒
+  - 統合バッファ: 【削除済み】
+
+[Rust] チャンク 6/6 転送開始
+[Rust] チャンク 6 転送完了: 9.04 GB, 6.81秒 (1.33 GB/秒)
+
+[GPU] チャンク 6 直接抽出処理開始（統合バッファ削除）
+  ファイル読み込み: 5.02秒 (1.80 GB/秒)
+  GPU転送: 0.73秒 (12.32 GB/秒)
+=== GPU並列パース開始 ===
+✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）
+GPUパース完了: 18712134 行 (13.0578秒)
+=== 直接列抽出開始（統合バッファ不使用） ===
+文字列列 lo_orderpriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_orderpriority: 最適化バッファ作成完了 (280682010 bytes)
+文字列列 lo_shippriority: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shippriority: 最適化バッファ作成完了 (18712134 bytes)
+文字列列 lo_commit_date: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_commit_date: 最適化バッファ作成完了 (149697072 bytes)
+文字列列 lo_shipmode: RMM DeviceBuffer直接書き込み
+✅ 文字列列 lo_shipmode: 最適化バッファ作成完了 (187121340 bytes)
+直接列抽出開始（統合バッファ不使用）: 18712134 行
+
+=== パフォーマンス統計（直接抽出版） ===
+処理データ: 18,712,134 行 × 17 列
+データサイズ: 9259.70 MB
+統合バッファ: 【削除済み】
+
+--- 詳細タイミング ---
+  gpu_parsing         : 13.0578 秒
+  process_and_export  : 11.3224 秒
+    ├─ string_buffers  : 0.3372 秒
+    ├─ direct_extract  : 0.0572 秒
+    └─ parquet_export  : 10.9280 秒
+  total               : 11.3224 秒
+  overall_total       : 24.3802 秒
+
+--- スループット ---
+  セル処理速度: 13,047,709 cells/sec
+  データ処理速度: 379.80 MB/sec
+
+--- メモリ効率 ---
+  統合バッファ削除による節約: ~1784.5 MB
+  ゼロコピー率: 100%（文字列・固定長とも）
+==============================
+[GPU] チャンク 6 処理完了:
+  - 処理行数: 18,712,134 行
+  - GPU全体時間: 30.14秒
+  - 内訳:
+    - ファイル読込: 5.02秒
+    - GPU転送: 0.73秒
+    - GPUパース: 13.06秒
+    - 直接抽出処理: 11.32秒
+      - 文字列バッファ: 0.34秒
+      - 直接列抽出: 0.06秒
+      - Parquet書込: 10.93秒
+  - スループット: 0.30 GB/秒
+  - 統合バッファ: 【削除済み】
+
+============================================================
+✅ 全チャンク処理完了!
+============================================================
+総実行時間: 211.47秒
+  - Rust転送合計: 38.59秒
+  - GPU処理合計: 158.19秒
+総データサイズ: 52.86 GB
+総行数: 111,685,860 行
+全体スループット: 0.25 GB/秒
+Rust平均速度: 1.37 GB/秒
+GPU平均速度: 0.33 GB/秒
+
+改善率: 1.2倍（4チャンクベースライン比）
+
+メモリ効率改善:
+  - 統合バッファ削除: 約10.4 GB節約
+  - ピークメモリ使用量: 大幅削減
+
+============================================================
+処理結果の検証
+============================================================
+
+cuDFでParquetファイルを読み込み中: benchmark/chunk_0_direct.parquet
+cuDF読み込み完了 (0.4900秒)
+
+--- cuDF DataFrame Info ---
+<class 'cudf.core.dataframe.DataFrame'>
+RangeIndex: 18593470 entries, 0 to 18593469
+Data columns (total 17 columns):
+ #   Column              Dtype
+---  ------              -----
+ 0   lo_orderkey         decimal128
+ 1   lo_linenumber       int32
+ 2   lo_custkey          decimal128
+ 3   lo_partkey          int32
+ 4   lo_suppkey          decimal128
+ 5   lo_orderdate        int32
+ 6   lo_orderpriority    object
+ 7   lo_shippriority     object
+ 8   lo_quantity         decimal128
+ 9   lo_extendedprice    decimal128
+ 10  lo_ordertotalprice  decimal128
+ 11  lo_discount         decimal128
+ 12  lo_revenue          decimal128
+ 13  lo_supplycost       decimal128
+ 14  lo_tax              decimal128
+ 15  lo_commit_date      object
+ 16  lo_shipmode         object
+dtypes: decimal128(10), int32(3), object(4)
+memory usage: 3.8+ GB
+
+読み込み結果: 18,593,470 行 × 17 列
+
+データ型:
+  lo_orderkey: decimal128
+  lo_linenumber: int32
+  lo_custkey: decimal128
+  lo_partkey: int32
+  lo_suppkey: decimal128
+  lo_orderdate: int32
+  lo_orderpriority: object
+  lo_shippriority: object
+  lo_quantity: decimal128
+  lo_extendedprice: decimal128
+  lo_ordertotalprice: decimal128
+  lo_discount: decimal128
+  lo_revenue: decimal128
+  lo_supplycost: decimal128
+  lo_tax: decimal128
+  lo_commit_date: object
+  lo_shipmode: object
+
+--- cuDF DataFrame Head (全列表示) ---Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 377, in main
+    print(f"  {col}: サンプル値 = {verification_df[col].iloc[:3].to_pandas().tolist()}")
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/utils/performance_tracking.py", line 51, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/series.py", line 2089, in to_pandas
+    self._column.to_pandas(nullable=nullable, arrow_type=arrow_type),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/string.py", line 6137, in to_pandas
+    return super().to_pandas(nullable=nullable, arrow_type=arrow_type)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/miniconda3/envs/cudf_dev/lib/python3.12/site-packages/cudf/core/column/column.py", line 650, in to_pandas
+    return pd.Index(pa_array.to_pandas())
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "pyarrow/array.pxi", line 887, in pyarrow.lib._PandasConvertible.to_pandas
+  File "pyarrow/array.pxi", line 1558, in pyarrow.lib.Array._to_pandas
+  File "pyarrow/array.pxi", line 2111, in pyarrow.lib._array_like_to_pandas
+  File "pyarrow/error.pxi", line 92, in pyarrow.lib.check_status
+pyarrow.lib.ArrowException: Unknown error: Wrapping /�   2-HIGH   failed
+
+cuDF Head (列別表示):
+  列 1 lo_orderkey         : [Decimal('0.00'), Decimal('1128550.75'), Decimal('0.00')]
+  列 2 lo_linenumber       : [85185280, 2, 85185280]
+  列 3 lo_custkey          : [Decimal('0.00'), Decimal('8616.79'), Decimal('0.00')]
+  列 4 lo_partkey          : [1443270400, 783115, 1443270400]
+  列 5 lo_suppkey          : [Decimal('0.00'), Decimal('3867.94'), Decimal('0.00')]
+
+基本統計:
+  lo_linenumber: 平均=79962057.94, 最小=-2147483648.00, 最大=2147024896.00
+  lo_partkey: 平均=80062990.61, 最小=-2147483648.00, 最大=2147418112.00
+  lo_orderdate: 平均=90031819.73, 最小=-2147483648.00, 最大=2147418112.00
+
+文字列列の検証:
+
+検証失敗: Unknown error: Wrapping /�   2-HIGH   failed
