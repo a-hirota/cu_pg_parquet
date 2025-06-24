@@ -139,6 +139,115 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **Work Output Organization**: 作業実施後は必ずアウトプットを整理すること。実行したプログラム、設定、結果を明確に文書化
 - **16並列×8チャンク実装**: Rust側は`pg_fast_copy_single_chunk`を使用、環境変数`RUST_PARALLEL_CONNECTIONS=16`で16並列実行。各チャンク約8GB
 
+## プロジェクト構造
+
+### 現在のディレクトリ構成
+
+```
+gpupgparser/
+├── CLAUDE.md               # このファイル - プロジェクト開発ガイド
+├── check_lineorder_size.py # テーブルサイズ確認スクリプト
+├── measure_postgres_speed.py # PostgreSQL読み取り速度測定
+├── rust_fast_copy.py       # Rust実装ベンチマーク
+├── simple_rust_benchmark.py # Rust簡易ベンチマーク
+├── src/                    # メインソースコード
+│   ├── __init__.py
+│   ├── build_buf_from_postgres.py      # Postgres接続とバイナリデータ取得
+│   ├── build_cudf_from_buf.py          # バイナリ→cuDF変換
+│   ├── direct_column_extractor.py      # 直接カラム抽出（統合バッファなし）
+│   ├── main_postgres_to_parquet.py     # メインエントリポイント（旧版）
+│   ├── main_postgres_to_parquet_direct.py  # メインエントリポイント（直接抽出版）
+│   ├── write_parquet_from_cudf.py     # cuDF→Parquet出力
+│   ├── metadata.py         # メタデータ管理
+│   ├── memory_manager.py   # メモリ管理
+│   ├── types.py            # 型定義
+│   ├── heap_file_reader.py # HEAPファイル読み込み
+│   ├── cuda_kernels/       # CUDAカーネル実装
+│   │   ├── __init__.py
+│   │   ├── data_decoder.py             # GPUデータデコーダ
+│   │   ├── integrated_parser_lite.py   # 統合パーサー軽量版
+│   │   ├── postgres_binary_parser.py   # PostgreSQLバイナリパーサー
+│   │   ├── postgresql_binary_parser.py # PostgreSQLバイナリパーサー（別実装）
+│   │   ├── heap_page_parser.py         # HEAPページパーサー
+│   │   ├── decimal_tables.py           # Decimal型変換テーブル
+│   │   ├── gpu_config_utils.py         # GPU設定ユーティリティ
+│   │   ├── math_utils.py               # 数学関数ユーティリティ
+│   │   └── memory_utils.py             # メモリユーティリティ
+│   ├── rust_integration/   # Rust連携モジュール
+│   │   ├── __init__.py
+│   │   ├── postgres_gpu_reader.py      # Rust経由のGPU読み込み
+│   │   └── string_builder.py           # 文字列構築ヘルパー
+│   └── old/                # 旧版実装（アーカイブ）
+├── rust/                   # RustによるPostgres接続とGPU転送
+│   ├── Cargo.toml
+│   ├── Cargo.lock
+│   ├── README.md
+│   ├── build.rs
+│   ├── pyproject.toml
+│   ├── src/
+│   │   ├── lib.rs          # Python FFIインターフェース
+│   │   ├── postgres.rs     # PostgreSQL接続・COPY実装
+│   │   ├── arrow_builder.rs # Arrow形式構築
+│   │   ├── cuda.rs         # CUDA/GPU転送実装
+│   │   └── ffi.rs          # FFI定義
+│   └── target/             # ビルド成果物
+├── rust_bench/             # Rustベンチマーク（旧版）
+├── rust_bench_optimized/   # Rust最適化ベンチマーク
+│   └── src/
+│       ├── main.rs         # メインベンチマーク
+│       ├── main_single_chunk.rs  # 単一チャンク処理
+│       ├── main_sequential_chunks.rs  # シーケンシャルチャンク処理
+│       ├── main_sequential.rs      # シーケンシャル処理
+│       └── main_env.rs             # 環境変数ベース処理
+├── test/                   # テストコード
+│   ├── debug/              # デバッグ用テスト
+│   ├── expected_meta/      # テスト用期待値メタデータ
+│   ├── fixtures/           # テスト用入力データ（旧input/から移動）
+│   └── test_*.py           # 各種テストスクリプト
+├── benchmark/              # ベンチマークスクリプト群
+│   ├── benchmark_rust_gpu_direct.py    # 現在使用中のメインベンチマーク
+│   ├── benchmark_*.py      # 各種ベンチマーク実装
+│   └── *.parquet          # ベンチマーク出力（要整理）
+├── docs/                   # ドキュメント
+│   ├── guides/             # 使用ガイド
+│   ├── implementation/     # 実装詳細
+│   ├── ppt/                # プレゼンテーション資料
+│   └── *.md                # 各種ドキュメント
+├── examples/               # サンプルコード
+│   ├── multigpu/           # マルチGPUサンプル
+│   └── *.py                # 各種サンプル
+└── archive/                # アーカイブされたコード
+    └── old/                # 旧版コード（旧old/から移動）
+```
+
+### 主要ファイルの役割
+
+#### コアモジュール
+- `src/build_buf_from_postgres.py`: PostgreSQLからバイナリデータを取得
+- `src/build_cudf_from_buf.py`: GPUメモリ上のバイナリデータをcuDF DataFrameに変換
+- `src/direct_column_extractor.py`: 統合バッファを使わない直接カラム抽出（最新版）
+- `src/cuda_kernels/`: CUDA実装のコアロジック
+
+#### Rust連携
+- `rust/`: PostgreSQL接続とGPU転送の高速化実装
+- `rust_fast_copy.py`: Python側のRust連携インターフェース
+
+#### ベンチマーク
+- `benchmark/benchmark_rust_gpu_direct.py`: 現在の主要ベンチマーク（16並列×8チャンク）
+
+### 整理状況
+1. **完了した整理作業**:
+   - `old/` → `archive/old/` ✓
+   - `input/` → `test/fixtures/` ✓
+   - `output/` ディレクトリ削除 ✓
+   - `logs/` ディレクトリ削除 ✓
+   - `__pycache__/` ディレクトリ削除 ✓
+   - `.pytest_cache/` ディレクトリ削除 ✓
+
+2. **今後の整理予定**:
+   - benchmark/ディレクトリ内の多数の`.parquet`ファイルと`.bin`ファイルの削除
+   - 不要なベンチマークスクリプトの整理
+
 ## 開発哲学準拠チェックリスト
 解決策を提案する前に必ず確認：
 - [ ] CPU転送を使用していないか？
@@ -146,3 +255,60 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - [ ] GPU並列性を最大化しているか？
 - [ ] メモリコアレッシングを考慮しているか？
 - [ ] 局所最適ではなく全体最適か？
+
+## 開発計画と課題解決ロードマップ
+
+### 現状の課題（2025年1月）
+1. **GPUパース時間の不安定性**
+   - チャンク毎に4.01秒〜17.24秒と大きくバラつく
+   - 原因: GPU並列性が最適化されていない
+
+2. **逐次処理によるスループット低下**
+   - 8チャンクを順番に処理（並列化なし）
+   - 全体スループット: 0.27 GB/秒（目標: 1GB/秒以上）
+
+3. **16並列の恩恵を受けていない**
+   - Rust側は16並列で高速（1.34 GB/秒）
+   - GPU側がボトルネック
+
+### 開発ロードマップ
+
+#### Phase 1: 現状分析と最適化（即時対応）
+- [ ] GPUパース処理のプロファイリング
+  - Grid/Block sizeの最適化
+  - メモリアクセスパターンの分析
+- [ ] チャンク並列処理の実装
+  - 複数チャンクの同時GPU処理
+  - パイプライン化（転送と処理の並列化）
+
+#### Phase 2: アーキテクチャ改善（1週間）
+- [ ] 全データ一括処理の実装
+  - 8チャンクを1つのGPU処理で実行
+  - メモリ効率の向上
+- [ ] カーネル最適化
+  - ワープ効率の改善
+  - 共有メモリの活用
+
+#### Phase 3: 次世代実装（2週間）
+- [ ] CUDA Graphsの導入
+  - カーネル起動オーバーヘッドの削減
+- [ ] マルチGPU対応
+  - データ並列処理の実装
+
+### 開発ループ防止策
+1. **明確な目標設定**
+   - 全体スループット: 1GB/秒以上
+   - GPUパース時間: 安定して5秒以内
+
+2. **段階的実装**
+   - 各Phaseで測定可能な改善を確認
+   - 改善が見られない場合は方針転換
+
+3. **定期的な性能測定**
+   - 各実装後にベンチマーク実行
+   - 結果を文書化
+
+### 次のアクション
+1. GPUパース処理のGrid/Block size最適化
+2. チャンク並列処理の実装
+3. 全データ一括処理への移行
