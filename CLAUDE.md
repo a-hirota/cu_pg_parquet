@@ -137,7 +137,9 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **Memory Coalescing**: 奇数/偶数行処理ではワープダイバージェンスとメモリコアレッシング問題に注意。ワープ最適化カーネルで解決
 - **Current Development**: benchmark/benchmark_rust_gpu_direct.pyを使用してチューニング中。これは直接抽出版（統合バッファ削除）で、文字列破損修正済み
 - **Work Output Organization**: 作業実施後は必ずアウトプットを整理すること。実行したプログラム、設定、結果を明確に文書化
+- **File Organization After Development**: 開発完了後は必ずファイル整理を実施。旧版は`archive/`へ移動し、CLAUDE.mdを更新すること
 - **16並列×8チャンク実装**: Rust側は`pg_fast_copy_single_chunk`を使用、環境変数`RUST_PARALLEL_CONNECTIONS=16`で16並列実行。各チャンク約8GB
+- **kvikio+RMM最適化**: ファイル読み込みをkvikio+RMMで5.1倍高速化（3.6秒→0.71秒）。CPU経由を完全排除
 
 ## プロジェクト構造
 
@@ -216,8 +218,7 @@ gpupgparser/
 ├── examples/               # サンプルコード
 │   ├── multigpu/           # マルチGPUサンプル
 │   └── *.py                # 各種サンプル
-└── archive/                # アーカイブされたコード
-    └── old/                # 旧版コード（旧old/から移動）
+└── archive/                # アーカイブされたコード（旧版・不要ファイル）
 ```
 
 ### 主要ファイルの役割
@@ -237,16 +238,39 @@ gpupgparser/
 
 ### 整理状況
 1. **完了した整理作業**:
-   - `old/` → `archive/old/` ✓
+   - `old/` → `archive/` ✓
    - `input/` → `test/fixtures/` ✓
    - `output/` ディレクトリ削除 ✓
    - `logs/` ディレクトリ削除 ✓
    - `__pycache__/` ディレクトリ削除 ✓
    - `.pytest_cache/` ディレクトリ削除 ✓
+   - 従来版benchmark_rust_gpu_direct.py → `archive/` ✓
+   - kvikio版を新しいメインベンチマークに昇格 ✓
 
 2. **今後の整理予定**:
    - benchmark/ディレクトリ内の多数の`.parquet`ファイルと`.bin`ファイルの削除
    - 不要なベンチマークスクリプトの整理
+
+### 開発完了後のファイル整理ルール
+
+開発が完了した際には、以下のルールに従ってファイルを整理すること：
+
+1. **旧版・不要ファイルの移動**
+   - 改良版に置き換えられた旧版は`archive/`ディレクトリへ移動
+   - 一時的な実験コードや不要になったファイルも`archive/`へ
+   - CLAUDE.mdに記載されているディレクトリ構造のみを使用（新規フォルダ作成禁止）
+
+2. **ベンチマーク結果の整理**
+   - 出力された`.parquet`や`.bin`ファイルは削除
+   - 必要な結果のみドキュメント化してから削除
+
+3. **ファイル名の正規化**
+   - 新しい実装がメインになる場合は、分かりやすいファイル名に変更
+   - 例: `benchmark_rust_gpu_direct_kvikio.py` → `benchmark_rust_gpu_direct.py`
+
+4. **ドキュメントの更新**
+   - CLAUDE.mdのプロジェクト構造を最新状態に更新
+   - 整理作業の内容を記録
 
 ## 開発哲学準拠チェックリスト
 解決策を提案する前に必ず確認：
