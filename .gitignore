@@ -1,23 +1,100 @@
-# pycache is a common directory for Python bytecode files
-__pycache__
-gpupaser/__pycache__/
-gpupaser/cuda_kernels/__pycache__/
-gpupaser/data_processors/__pycache__/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# output directories for various configurations
-lineorder_keyset_output/
-lineorder_multigpu_output/
-lineorder_offset_output/
-output/
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# old directories for previous runs
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific - Archive and backup
+archive/
 old/
+backup/
 
-# memory-bank
-
-cufile.log
+# Project specific - Generated data and logs  
 *.parquet
-benchmark/*.parquet
-benchmark/*.output_*.parquet
 *.bin
+*.log
 *.txt
+benchmark/*.parquet
+benchmark/*.bin
+benchmark/*.log
+benchmark/comparison_*
+benchmark/output/
+benchmark/psycopg3_analysis/
+benchmark/comparison_results/
+cufile.log
+
+# Project specific - Development artifacts
+rust_bench/
+rust_bench_optimized/target/
+test/fixtures/large_*
+test/debug/
+examples/multigpu/output/
+
+# Project specific - Output directories
+lineorder_*_output/
+output/
+comparison_*
+metrics_*
+
+# Project specific - Large dependencies (optional download)
+docs/ppt/
+examples/large_datasets/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# CUDA
+*.o
+*.a
+*.cubin
+*.fatbin
+*.ptx
