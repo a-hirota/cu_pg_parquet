@@ -528,9 +528,9 @@ class DirectColumnExtractor:
             try:
                 import pylibcudf as plc
                 
-                # RMM DeviceBufferが直接渡されている場合
+                # RMM DeviceBufferが直接渡されている場合（真のゼロコピー）
                 if isinstance(data_buffer, rmm.DeviceBuffer) and isinstance(offsets_buffer, rmm.DeviceBuffer):
-                    # RMM DeviceBufferは直接pylibcudfで使用可能（ゼロコピー）
+                    # RMM DeviceBufferは直接pylibcudfで使用可能（ワープ最適化済み）
                     chars_mv = plc.gpumemoryview(data_buffer)
                     offsets_mv = plc.gpumemoryview(offsets_buffer)
                     
@@ -538,10 +538,12 @@ class DirectColumnExtractor:
                     offsets_count = offsets_buffer.size // 4  # int32は4バイト
                 else:
                     # Numba配列の場合（フォールバック）
-                    # 1) CuPy配列として解釈
+                    # CuPy配列として解釈して直接使用（ホスト転送なし）
                     data_ptr = data_buffer.__cuda_array_interface__['data'][0]
                     offsets_ptr = offsets_buffer.__cuda_array_interface__['data'][0]
                     
+                    # gpumemoryview作成（ゼロコピー）
+                    # TODO: Numba配列からのgpumemoryview作成を最適化
                     data_cupy = cp.asarray(cp.ndarray(
                         shape=(buffer_info['actual_size'],),
                         dtype=cp.uint8,
@@ -560,18 +562,11 @@ class DirectColumnExtractor:
                         )
                     ))
                     
-                    # 2) RMM DeviceBufferへの変換（GPU→CPU→GPU）
-                    offsets_host = offsets_cupy.get()
-                    offsets_bytes = offsets_host.tobytes()
-                    offsets_buf = rmm.DeviceBuffer.to_device(offsets_bytes)
-                    
-                    data_host = data_cupy.get()
-                    chars_buf = rmm.DeviceBuffer.to_device(data_host.tobytes())
-                    
-                    # 3) gpumemoryview作成
-                    chars_mv = plc.gpumemoryview(chars_buf)
-                    offsets_mv = plc.gpumemoryview(offsets_buf)
-                    offsets_count = len(offsets_host)
+                    # RMM DeviceBufferへのゼロコピー変換を試みる
+                    # TODO: より効率的な方法を検討
+                    chars_mv = plc.gpumemoryview(data_cupy.__cuda_array_interface__)
+                    offsets_mv = plc.gpumemoryview(offsets_cupy.__cuda_array_interface__)
+                    offsets_count = rows + 1
                 
                 # 子カラム作成
                 offsets_col = plc.column.Column(

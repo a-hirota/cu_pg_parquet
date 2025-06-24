@@ -9,7 +9,7 @@ use serde::{Serialize, Deserialize};
 use serde_json;
 use std::os::unix::fs::FileExt;
 
-const PARALLEL_CONNECTIONS: usize = 16;  // 並列接続数
+const PARALLEL_CONNECTIONS: usize = 1;  // 並列接続数を1に変更（データ整合性のため）
 const BUFFER_SIZE: usize = 64 * 1024 * 1024;  // 64MBバッファ
 const OUTPUT_DIR: &str = "/dev/shm";  // 出力ディレクトリ（高速RAMディスク）
 

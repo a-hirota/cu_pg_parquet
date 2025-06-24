@@ -223,13 +223,13 @@ class ZeroCopyProcessor:
                 d_offsets_numba = cuda.as_cuda_array(offsets_cupy)
                 
                 @cuda.jit
-                def copy_string_data_direct_optimized(
+                def copy_string_data_direct(
                     raw_data, field_offsets, field_lengths,
                     col_idx, data_out, offsets, num_rows
                 ):
                     """
-                    最適化された直接グローバルメモリコピー
-                    RMM DeviceBufferに直接書き込み
+                    シンプルな直接コピーカーネル
+                    デバッグ用に最もシンプルな実装
                     """
                     row = cuda.grid(1)
                     if row >= num_rows:
@@ -243,7 +243,7 @@ class ZeroCopyProcessor:
                     if field_length <= 0:
                         return
                     
-                    # ワープ協調的な直接コピー
+                    # シンプルな直接コピー
                     for i in range(field_length):
                         src_idx = field_offset + i
                         dst_idx = output_offset + i
@@ -251,11 +251,10 @@ class ZeroCopyProcessor:
                         # 境界チェック
                         if (src_idx < raw_data.size and 
                             dst_idx < data_out.size):
-                            # RMM DeviceBufferに直接書き込み
                             data_out[dst_idx] = raw_data[src_idx]
                 
                 print(f"文字列列 {col.name}: RMM DeviceBuffer直接書き込み")
-                copy_string_data_direct_optimized[blocks, threads](
+                copy_string_data_direct[blocks, threads](
                     raw_dev, field_offsets_dev, field_lengths_dev,
                     actual_col_idx, d_data_numba, d_offsets_numba, rows
                 )

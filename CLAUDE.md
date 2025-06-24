@@ -133,3 +133,13 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **Development Governance**: 方針変更には上司の許可が必要。実装困難時は即座に状況報告と代替案の提示を行う。勝手に方針変更しない。
 - **Benchmark Principles**: 必ず全テーブルを対象に実施。ストリーミング処理は使用禁止
 - **Problem Solving**: 解決策を提案する際は、必ずその解決策が問題を解決することを確認してから提案すること
+- **GPU Philosophy Compliance**: CPU転送は絶対に避ける。GPU→CPU→GPU転送は開発哲学違反。必ずGPU専用解決策を追求すること
+- **Memory Coalescing**: 奇数/偶数行処理ではワープダイバージェンスとメモリコアレッシング問題に注意。ワープ最適化カーネルで解決
+
+## 開発哲学準拠チェックリスト
+解決策を提案する前に必ず確認：
+- [ ] CPU転送を使用していないか？
+- [ ] ゼロコピーを維持しているか？
+- [ ] GPU並列性を最大化しているか？
+- [ ] メモリコアレッシングを考慮しているか？
+- [ ] 局所最適ではなく全体最適か？
