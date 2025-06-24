@@ -135,6 +135,7 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **Problem Solving**: 解決策を提案する際は、必ずその解決策が問題を解決することを確認してから提案すること
 - **GPU Philosophy Compliance**: CPU転送は絶対に避ける。GPU→CPU→GPU転送は開発哲学違反。必ずGPU専用解決策を追求すること
 - **Memory Coalescing**: 奇数/偶数行処理ではワープダイバージェンスとメモリコアレッシング問題に注意。ワープ最適化カーネルで解決
+- **Current Development**: benchmark/benchmark_rust_gpu_direct.pyを使用してチューニング中。これは直接抽出版（統合バッファ削除）で、文字列破損修正済み
 
 ## 開発哲学準拠チェックリスト
 解決策を提案する前に必ず確認：

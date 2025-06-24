@@ -528,14 +528,35 @@ class DirectColumnExtractor:
             try:
                 import pylibcudf as plc
                 
-                # RMM DeviceBufferが直接渡されている場合（真のゼロコピー）
+                # RMM DeviceBufferが直接渡されている場合
                 if isinstance(data_buffer, rmm.DeviceBuffer) and isinstance(offsets_buffer, rmm.DeviceBuffer):
-                    # RMM DeviceBufferは直接pylibcudfで使用可能（ワープ最適化済み）
-                    chars_mv = plc.gpumemoryview(data_buffer)
+                    # 基本ベンチマークと同じ子カラム構造を使用
+                    # オフセット子カラムの作成
                     offsets_mv = plc.gpumemoryview(offsets_buffer)
+                    offsets_col = plc.column.Column(
+                        plc.types.DataType(plc.types.TypeId.INT32),
+                        rows + 1,  # オフセット配列のサイズ
+                        offsets_mv,
+                        None,  # mask
+                        0,     # null_count
+                        0,     # offset
+                        []     # children
+                    )
                     
-                    # オフセット数を取得（RMM DeviceBufferのサイズから計算）
-                    offsets_count = offsets_buffer.size // 4  # int32は4バイト
+                    # STRING親カラムの作成
+                    chars_mv = plc.gpumemoryview(data_buffer)
+                    parent = plc.column.Column(
+                        plc.types.DataType(plc.types.TypeId.STRING),
+                        rows,           # 文字列の本数
+                        chars_mv,       # chars buffer
+                        None,           # mask
+                        0,              # null_count
+                        0,              # offset
+                        [offsets_col]   # offset column
+                    )
+                    
+                    # Series作成
+                    return cudf.Series.from_pylibcudf(parent)
                 else:
                     # Numba配列の場合（フォールバック）
                     # CuPy配列として解釈して直接使用（ホスト転送なし）

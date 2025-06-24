@@ -28,7 +28,7 @@ from src.metadata import fetch_column_meta
 
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
-RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_fixed"
+RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_optimized"
 TOTAL_CHUNKS = 8  # 8チャンク（各約6.6GB）
 
 
