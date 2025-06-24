@@ -136,6 +136,8 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **GPU Philosophy Compliance**: CPU転送は絶対に避ける。GPU→CPU→GPU転送は開発哲学違反。必ずGPU専用解決策を追求すること
 - **Memory Coalescing**: 奇数/偶数行処理ではワープダイバージェンスとメモリコアレッシング問題に注意。ワープ最適化カーネルで解決
 - **Current Development**: benchmark/benchmark_rust_gpu_direct.pyを使用してチューニング中。これは直接抽出版（統合バッファ削除）で、文字列破損修正済み
+- **Work Output Organization**: 作業実施後は必ずアウトプットを整理すること。実行したプログラム、設定、結果を明確に文書化
+- **16並列×8チャンク実装**: Rust側は`pg_fast_copy_single_chunk`を使用、環境変数`RUST_PARALLEL_CONNECTIONS=16`で16並列実行。各チャンク約8GB
 
 ## 開発哲学準拠チェックリスト
 解決策を提案する前に必ず確認：

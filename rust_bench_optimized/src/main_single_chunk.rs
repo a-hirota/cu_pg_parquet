@@ -9,7 +9,8 @@ use serde::{Serialize, Deserialize};
 use serde_json;
 use std::os::unix::fs::FileExt;
 
-const PARALLEL_CONNECTIONS: usize = 1;  // 並列接続数を1に変更（データ整合性のため）
+// 環境変数から並列数を取得、デフォルトは16
+const DEFAULT_PARALLEL_CONNECTIONS: usize = 16;
 const BUFFER_SIZE: usize = 64 * 1024 * 1024;  // 64MBバッファ
 const OUTPUT_DIR: &str = "/dev/shm";  // 出力ディレクトリ（高速RAMディスク）
 
@@ -44,9 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chunk_id: usize = std::env::var("CHUNK_ID")?.parse()?;
     let total_chunks: usize = std::env::var("TOTAL_CHUNKS")?.parse()?;
     
+    // 環境変数から並列数を取得
+    let parallel_connections = std::env::var("RUST_PARALLEL_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PARALLEL_CONNECTIONS);
+    
     println!("=== PostgreSQL → /dev/shm 単一チャンク転送 ===");
     println!("チャンク: {} / {}", chunk_id + 1, total_chunks);
-    println!("並列接続数: {}", PARALLEL_CONNECTIONS);
+    println!("並列接続数: {}", parallel_connections);
     println!("バッファサイズ: {} MB", BUFFER_SIZE / 1024 / 1024);
     
     // コンフィグを作成
@@ -140,11 +147,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 並列タスクを作成
     let mut tasks = JoinSet::new();
-    let pages_per_task = (chunk_end_page - chunk_start_page) / PARALLEL_CONNECTIONS as u32;
+    let pages_per_task = (chunk_end_page - chunk_start_page) / parallel_connections as u32;
     
-    for worker_id in 0..PARALLEL_CONNECTIONS {
+    for worker_id in 0..parallel_connections {
         let start_page = chunk_start_page + (worker_id as u32 * pages_per_task);
-        let end_page = if worker_id == PARALLEL_CONNECTIONS - 1 {
+        let end_page = if worker_id == parallel_connections - 1 {
             chunk_end_page
         } else {
             chunk_start_page + ((worker_id + 1) as u32 * pages_per_task)
@@ -176,8 +183,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match result {
             Ok(Ok(())) => {
                 completed += 1;
-                if completed % 4 == 0 || completed == PARALLEL_CONNECTIONS {
-                    println!("タスク完了: {}/{}", completed, PARALLEL_CONNECTIONS);
+                if completed % 4 == 0 || completed == parallel_connections {
+                    println!("タスク完了: {}/{}", completed, parallel_connections);
                 }
             }
             Ok(Err(e)) => eprintln!("タスクエラー: {}", e),

@@ -27,6 +27,10 @@ path = "src/main_single_chunk.rs"
 name = "pg_fast_copy_fixed"
 path = "src/main_sequential.rs"
 
+[[bin]]
+name = "pg_fast_copy_env"
+path = "src/main_env.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
