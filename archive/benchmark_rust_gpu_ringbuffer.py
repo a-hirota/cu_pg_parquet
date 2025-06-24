@@ -1,12 +1,12 @@
 """
-PostgreSQL → Rust → GPU キューベース並列処理版
-Producer-Consumerパターンで真の並列処理を実現
+PostgreSQL → Rust → GPU リングバッファ版
+並列処理によりRust転送とGPU処理を同時実行
 
 改善内容:
-1. キューベースで明確な実装
-2. Producerは連続的にチャンクを生成
-3. Consumerは利用可能なチャンクを即座に処理
-4. 真の並列実行
+1. リングバッファ方式で/dev/shmを利用
+2. Rust転送とGPU処理の並列実行
+3. プロデューサー・コンシューマーパターン
+4. CPU待機時間の削減
 """
 
 import os
@@ -36,7 +36,7 @@ from src.metadata import fetch_column_meta
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
 RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk"
-MAX_QUEUE_SIZE = 3  # キューの最大サイズ
+RING_BUFFER_SIZE = 2  # 同時に保持する最大チャンク数（メモリ制約）
 
 # グローバル変数
 chunk_stats = []
@@ -108,18 +108,35 @@ def cleanup_files(total_chunks=8):
             os.remove(f)
 
 
-def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue):
-    """Rust転送を実行するProducerスレッド"""
-    for chunk_id in range(total_chunks):
+class RustProducer:
+    """Rust転送を管理するプロデューサー"""
+    
+    def __init__(self, total_chunks: int, ring_buffer_size: int):
+        self.total_chunks = total_chunks
+        self.ring_buffer_size = ring_buffer_size
+        self.completed_chunks = queue.Queue()
+        self.active_chunks = set()
+        self.lock = threading.Lock()
+        
+    def can_produce(self) -> bool:
+        """新しいチャンクを生成可能か確認"""
+        with self.lock:
+            return len(self.active_chunks) < self.ring_buffer_size
+    
+    def produce_chunk(self, chunk_id: int) -> Optional[dict]:
+        """1つのチャンクをRust転送"""
         if shutdown_flag.is_set():
-            break
+            return None
             
+        with self.lock:
+            self.active_chunks.add(chunk_id)
+        
         try:
-            print(f"\n[Producer] チャンク {chunk_id + 1}/{total_chunks} Rust転送開始...")
+            print(f"\n[Producer] チャンク {chunk_id + 1}/{self.total_chunks} Rust転送開始...", flush=True)
             
             env = os.environ.copy()
             env['CHUNK_ID'] = str(chunk_id)
-            env['TOTAL_CHUNKS'] = str(total_chunks)
+            env['TOTAL_CHUNKS'] = str(self.total_chunks)
             
             rust_start = time.time()
             process = subprocess.run(
@@ -131,7 +148,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
             
             if process.returncode != 0:
                 print(f"❌ Rustエラー: {process.stderr}")
-                continue
+                raise RuntimeError(f"チャンク{chunk_id}の転送失敗")
             
             # JSON結果を抽出
             output = process.stdout
@@ -144,58 +161,71 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 rust_time = result['elapsed_seconds']
                 file_size = result['total_bytes']
                 chunk_file = result['chunk_file']
+                columns_data = result.get('columns')
             else:
                 rust_time = time.time() - rust_start
                 chunk_file = f"{OUTPUT_DIR}/chunk_{chunk_id}.bin"
                 file_size = os.path.getsize(chunk_file)
+                columns_data = None
             
             chunk_info = {
                 'chunk_id': chunk_id,
                 'chunk_file': chunk_file,
                 'file_size': file_size,
-                'rust_time': rust_time
+                'rust_time': rust_time,
+                'columns': columns_data
             }
             
             print(f"[Producer] チャンク {chunk_id + 1} 転送完了 ({rust_time:.1f}秒, {file_size / 1024**3:.1f}GB)")
             
-            # キューに追加（ブロッキング）
-            chunk_queue.put(chunk_info)
-            stats_queue.put(('rust_time', rust_time))
+            # 完了キューに追加
+            self.completed_chunks.put(chunk_info)
+            return chunk_info
             
         except Exception as e:
             print(f"[Producer] エラー: {e}")
-            import traceback
-            traceback.print_exc()
+            with self.lock:
+                self.active_chunks.discard(chunk_id)
+            return None
     
-    # 終了シグナル
-    chunk_queue.put(None)
-    print("[Producer] 全チャンク転送完了")
+    def mark_consumed(self, chunk_id: int):
+        """チャンクが消費されたことをマーク"""
+        with self.lock:
+            self.active_chunks.discard(chunk_id)
 
 
-def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue):
-    """GPU処理を実行するConsumerスレッド"""
-    while not shutdown_flag.is_set():
+class GPUConsumer:
+    """GPU処理を管理するコンシューマー"""
+    
+    def __init__(self, columns: List[ColumnMeta], producer: RustProducer):
+        self.columns = columns
+        self.producer = producer
+        self.processed_count = 0
+        self.total_gpu_time = 0
+        self.total_transfer_time = 0
+        self.total_rows = 0
+        self.total_size = 0
+        
+    def consume_chunk(self, chunk_info: dict) -> Optional[tuple]:
+        """1つのチャンクをGPU処理"""
+        if shutdown_flag.is_set():
+            return None
+            
+        chunk_id = chunk_info['chunk_id']
+        chunk_file = chunk_info['chunk_file']
+        file_size = chunk_info['file_size']
+        
+        print(f"[Consumer] チャンク {chunk_id + 1} GPU処理開始...", flush=True)
+        
+        # GPUメモリクリア
+        mempool = cp.get_default_memory_pool()
+        pinned_mempool = cp.get_default_pinned_memory_pool()
+        mempool.free_all_blocks()
+        pinned_mempool.free_all_blocks()
+        
+        gpu_start = time.time()
+        
         try:
-            # キューからチャンクを取得（ブロッキング）
-            chunk_info = chunk_queue.get(timeout=1)
-            
-            if chunk_info is None:  # 終了シグナル
-                break
-                
-            chunk_id = chunk_info['chunk_id']
-            chunk_file = chunk_info['chunk_file']
-            file_size = chunk_info['file_size']
-            
-            print(f"[Consumer-{consumer_id}] チャンク {chunk_id + 1} GPU処理開始...")
-            
-            # GPUメモリクリア
-            mempool = cp.get_default_memory_pool()
-            pinned_mempool = cp.get_default_pinned_memory_pool()
-            mempool.free_all_blocks()
-            pinned_mempool.free_all_blocks()
-            
-            gpu_start = time.time()
-            
             # kvikio+RMMで直接GPU転送
             transfer_start = time.time()
             
@@ -220,12 +250,13 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             header_size = detect_pg_header_size(header_sample)
             
             # 直接抽出処理
-            chunk_output = f"benchmark/chunk_{chunk_id}_queue.parquet"
+            process_start = time.time()
+            chunk_output = f"benchmark/chunk_{chunk_id}_ringbuffer.parquet"
             
             cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
                 raw_dev=raw_dev,
-                columns=columns,
-                ncols=len(columns),
+                columns=self.columns,
+                ncols=len(self.columns),
                 header_size=header_size,
                 output_path=chunk_output,
                 compression='snappy',
@@ -234,32 +265,23 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
                 verbose=False
             )
             
+            process_time = time.time() - process_start
             gpu_time = time.time() - gpu_start
             
             # 処理統計
             rows = len(cudf_df) if cudf_df is not None else 0
+            parse_time = detailed_timing.get('gpu_parsing', 0)
+            string_time = detailed_timing.get('string_buffer_creation', 0)
+            write_time = detailed_timing.get('parquet_export', 0)
             
-            print(f"[Consumer-{consumer_id}] チャンク {chunk_id + 1} GPU処理完了 ({gpu_time:.1f}秒, {rows:,}行)")
+            print(f"[Consumer] チャンク {chunk_id + 1} GPU処理完了 ({gpu_time:.1f}秒, {rows:,}行)", flush=True)
             
-            # 統計情報を送信
-            stats_queue.put(('gpu_time', gpu_time))
-            stats_queue.put(('transfer_time', transfer_time))
-            stats_queue.put(('rows', rows))
-            stats_queue.put(('size', file_size))
-            
-            # 詳細統計を保存
-            chunk_stats.append({
-                'chunk_id': chunk_id,
-                'consumer_id': consumer_id,
-                'rust_time': chunk_info['rust_time'],
-                'gpu_time': gpu_time,
-                'transfer_time': transfer_time,
-                'parse_time': detailed_timing.get('gpu_parsing', 0),
-                'string_time': detailed_timing.get('string_buffer_creation', 0),
-                'write_time': detailed_timing.get('parquet_export', 0),
-                'rows': rows,
-                'size_gb': file_size / 1024**3
-            })
+            # 統計更新
+            self.processed_count += 1
+            self.total_gpu_time += gpu_time
+            self.total_transfer_time += transfer_time
+            self.total_rows += rows
+            self.total_size += file_size
             
             # メモリ解放
             del raw_dev
@@ -274,93 +296,122 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             import gc
             gc.collect()
             
+            # 詳細統計を保存
+            chunk_stats.append({
+                'chunk_id': chunk_id,
+                'rust_time': chunk_info['rust_time'],
+                'gpu_time': gpu_time,
+                'transfer_time': transfer_time,
+                'parse_time': parse_time,
+                'string_time': string_time,
+                'write_time': write_time,
+                'rows': rows,
+                'size_gb': file_size / 1024**3
+            })
+            
+            return gpu_time, file_size, rows, detailed_timing, transfer_time
+            
+        except Exception as e:
+            print(f"[Consumer] GPU処理エラー: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        finally:
             # チャンクファイル削除
             if os.path.exists(chunk_file):
                 os.remove(chunk_file)
-            # Parquetファイル削除
-            if os.path.exists(chunk_output):
-                os.remove(chunk_output)
-                
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[Consumer-{consumer_id}] エラー: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    print(f"[Consumer-{consumer_id}] 終了")
+            # Parquetファイル削除（検証省略）
+            parquet_file = f"benchmark/chunk_{chunk_id}_ringbuffer.parquet"
+            if os.path.exists(parquet_file):
+                os.remove(parquet_file)
+            # プロデューサーに消費完了を通知
+            self.producer.mark_consumed(chunk_id)
 
 
 def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
-    """真の並列パイプライン実行"""
-    # キューとスレッド管理
-    chunk_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
-    stats_queue = queue.Queue()
+    """並列パイプライン実行（簡易版：1つずつ処理）"""
+    producer = RustProducer(total_chunks, RING_BUFFER_SIZE)
+    consumer = GPUConsumer(columns, producer)
     
+    # 統計情報
+    total_rust_time = 0
     start_time = time.time()
     
-    # Producerスレッド開始
-    producer_thread = threading.Thread(
-        target=rust_producer,
-        args=(chunk_queue, total_chunks, stats_queue)
-    )
-    producer_thread.start()
-    
-    # Consumerスレッド開始（1つのみ - GPUメモリ制約）
-    consumer_thread = threading.Thread(
-        target=gpu_consumer,
-        args=(chunk_queue, columns, 1, stats_queue)
-    )
-    consumer_thread.start()
-    
-    # 統計収集
-    total_rust_time = 0
-    total_gpu_time = 0
-    total_transfer_time = 0
-    total_rows = 0
-    total_size = 0
-    
-    # スレッドの終了を待機しながら統計を収集
-    producer_thread.join()
-    consumer_thread.join()
-    
-    # 統計キューから結果を収集
-    while not stats_queue.empty():
-        stat_type, value = stats_queue.get()
-        if stat_type == 'rust_time':
-            total_rust_time += value
-        elif stat_type == 'gpu_time':
-            total_gpu_time += value
-        elif stat_type == 'transfer_time':
-            total_transfer_time += value
-        elif stat_type == 'rows':
-            total_rows += value
-        elif stat_type == 'size':
-            total_size += value
+    with ThreadPoolExecutor(max_workers=2) as executor:  # Producer + Consumer
+        producer_future = None
+        consumer_future = None
+        next_chunk_id = 0
+        processed_chunks = 0
+        
+        # 最初のチャンクを開始
+        if next_chunk_id < total_chunks:
+            producer_future = executor.submit(producer.produce_chunk, next_chunk_id)
+            next_chunk_id += 1
+        
+        while processed_chunks < total_chunks and not shutdown_flag.is_set():
+            # プロデューサーの完了を確認
+            if producer_future and producer_future.done():
+                chunk_info = producer_future.result()
+                if chunk_info:
+                    total_rust_time += chunk_info['rust_time']
+                    
+                    # 次のプロデューサーを開始
+                    if next_chunk_id < total_chunks:
+                        producer_future = executor.submit(producer.produce_chunk, next_chunk_id)
+                        next_chunk_id += 1
+                    else:
+                        producer_future = None
+                    
+                    # コンシューマーを開始（前のが完了していれば）
+                    if consumer_future is None or consumer_future.done():
+                        consumer_future = executor.submit(consumer.consume_chunk, chunk_info)
+                else:
+                    producer_future = None
+            
+            # コンシューマーの完了を確認
+            if consumer_future and consumer_future.done():
+                result = consumer_future.result()
+                if result:
+                    processed_chunks += 1
+                    print(f"[Main] チャンク処理完了 ({processed_chunks}/{total_chunks})")
+                consumer_future = None
+            
+            # デバッグ情報
+            if processed_chunks % 2 == 0:
+                print(f"[Main] 進捗: {processed_chunks}/{total_chunks} 処理済み", flush=True)
+            
+            # 少し待機
+            time.sleep(0.1)
+        
+        # 残りのタスクを待機
+        if producer_future and not producer_future.done():
+            producer_future.result()
+        if consumer_future and not consumer_future.done():
+            consumer_future.result()
     
     total_time = time.time() - start_time
     
     return {
         'total_time': total_time,
         'total_rust_time': total_rust_time,
-        'total_gpu_time': total_gpu_time,
-        'total_transfer_time': total_transfer_time,
-        'total_rows': total_rows,
-        'total_size': total_size,
-        'processed_chunks': len(chunk_stats)
+        'total_gpu_time': consumer.total_gpu_time,
+        'total_transfer_time': consumer.total_transfer_time,
+        'total_rows': consumer.total_rows,
+        'total_size': consumer.total_size,
+        'processed_chunks': processed_chunks
     }
 
 
 def main(total_chunks=8):
-    print("=== PostgreSQL → Rust → GPU キューベース並列処理版 ===")
+    print("=== PostgreSQL → Rust → GPU リングバッファ版 ===")
     print(f"チャンク数: {total_chunks}")
     print(f"各チャンクサイズ: 約{52.86 / total_chunks:.1f} GB")
-    print(f"キューサイズ: {MAX_QUEUE_SIZE}")
+    print(f"リングバッファサイズ: {RING_BUFFER_SIZE}")
     print(f"出力ディレクトリ: {OUTPUT_DIR}")
     print("\n改善内容:")
-    print("  - キューベースの真の並列処理")
-    print("  - Producerは連続的にチャンクを生成")
-    print("  - Consumerは即座に処理開始")
+    print("  - リングバッファ方式で並列処理")
+    print("  - Rust転送とGPU処理を同時実行")
+    print("  - CPU待機時間を削減")
     
     # kvikio設定確認
     is_compat = os.environ.get("KVIKIO_COMPAT_MODE", "").lower() in ["on", "1", "true"]
@@ -413,6 +464,13 @@ def main(total_chunks=8):
         print(f"└─ GPU処理合計: {results['total_gpu_time']:.2f}秒 ({total_gb / results['total_gpu_time']:.2f} GB/秒)")
         print(f"   └─ kvikio転送: {results['total_transfer_time']:.2f}秒")
         
+        # 並列化による改善
+        sequential_time = results['total_rust_time'] + results['total_gpu_time']
+        parallel_speedup = sequential_time / results['total_time']
+        print(f"\n【並列化効果】")
+        print(f"├─ 逐次実行時間（推定）: {sequential_time:.2f}秒")
+        print(f"├─ 並列実行時間: {results['total_time']:.2f}秒")
+        print(f"└─ 高速化率: {parallel_speedup:.2f}倍")
         
         # チャンク毎の詳細統計テーブル
         if chunk_stats:
@@ -441,7 +499,7 @@ def main(total_chunks=8):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='PostgreSQL → GPU キューベース並列処理版ベンチマーク')
+    parser = argparse.ArgumentParser(description='PostgreSQL → GPU リングバッファ版ベンチマーク')
     parser.add_argument('--table', type=str, default='lineorder', help='対象テーブル名')
     parser.add_argument('--parallel', type=int, default=16, help='並列接続数')
     parser.add_argument('--chunks', type=int, default=8, help='チャンク数')

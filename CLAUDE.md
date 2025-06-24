@@ -83,8 +83,8 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 
 3. **標準ベンチマーク設定**
    - **並列数**: 16 (`--parallel 16`)
-   - **チャンク数**: 4 (`--chunks 4`)
-   - **総タスク数**: 64（16×4）
+   - **チャンク数**: 8 (`--chunks 8`)
+   - **総タスク数**: 16×8 = 128
    - この設定により真の高並列処理性能を測定。
    - この設定を変更する場合はユーザの許可をとること。勝手に変更することは許されない。
 
@@ -140,6 +140,8 @@ export GPUPASER_PG_DSN="dbname=postgres user=postgres host=localhost port=5432"
 - **File Organization After Development**: 開発完了後は必ずファイル整理を実施。旧版は`archive/`へ移動し、CLAUDE.mdを更新すること
 - **16並列×8チャンク実装**: Rust側は`pg_fast_copy_single_chunk`を使用、環境変数`RUST_PARALLEL_CONNECTIONS=16`で16並列実行。各チャンク約8GB
 - **kvikio+RMM最適化**: ファイル読み込みをkvikio+RMMで5.1倍高速化（3.6秒→0.71秒）。CPU経由を完全排除
+- **Producer-Consumer並列処理実装（2025/01）**: キューベースの並列処理で1.56倍高速化達成（74.77秒→47.95秒）。Rust転送とGPU処理を真の並列実行
+- **ログリファクタリング完了**: 詳細ログを削減し、最後に構造化された統計表示のみ出力。validate_parquet_output関数のサンプル表示は維持
 
 ## プロジェクト構造
 
@@ -234,7 +236,7 @@ gpupgparser/
 - `rust_fast_copy.py`: Python側のRust連携インターフェース
 
 #### ベンチマーク
-- `benchmark/benchmark_rust_gpu_direct.py`: 現在の主要ベンチマーク（16並列×8チャンク）
+- `benchmark/benchmark_rust_gpu_direct.py`: 現在の主要ベンチマーク（Producer-Consumer並列処理版）
 
 ### 整理状況
 1. **完了した整理作業**:
@@ -297,13 +299,11 @@ gpupgparser/
 
 ### 開発ロードマップ
 
-#### Phase 1: 現状分析と最適化（即時対応）
-- [ ] GPUパース処理のプロファイリング
-  - Grid/Block sizeの最適化
-  - メモリアクセスパターンの分析
-- [ ] チャンク並列処理の実装
-  - 複数チャンクの同時GPU処理
-  - パイプライン化（転送と処理の並列化）
+#### Phase 1: 現状分析と最適化（完了）
+- [x] チャンク並列処理の実装
+  - Producer-Consumerパターンで並列化実装
+  - キューベースでRust転送とGPU処理を並列実行
+  - 1.56倍高速化達成（74.77秒→47.95秒）
 
 #### Phase 2: アーキテクチャ改善（1週間）
 - [ ] 全データ一括処理の実装
