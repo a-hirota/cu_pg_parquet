@@ -16,9 +16,6 @@ from .gpu_config_utils import (
     optimize_grid_size
 )
 from .decimal_tables import POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
-from .integrated_parser_lite import (
-    parse_binary_chunk_gpu_ultra_fast_v2_lite
-)
 from .heap_page_parser import (
     parse_heap_pages_to_tuples,
     compact_tuple_offsets,

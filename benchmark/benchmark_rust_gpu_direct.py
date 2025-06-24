@@ -24,7 +24,7 @@ import psycopg
 
 from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
 from src.main_postgres_to_parquet_direct import postgresql_to_cudf_parquet_direct
-from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
+from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 from src.metadata import fetch_column_meta
 
 TABLE_NAME = "lineorder"
@@ -362,8 +362,8 @@ def main():
     columns = get_postgresql_metadata()
     
     try:
-        # 最初の3チャンクのみ処理（テスト用）
-        for chunk_id in range(min(3, TOTAL_CHUNKS)):
+        # 全8チャンク処理
+        for chunk_id in range(TOTAL_CHUNKS):
             chunk_info = process_single_chunk(chunk_id)
             total_rust_time += chunk_info['rust_time']
             total_size += chunk_info['file_size']
@@ -378,7 +378,7 @@ def main():
             validate_parquet_output(chunk_id)
         
         # 最終統計
-        processed_chunks = min(3, TOTAL_CHUNKS)
+        processed_chunks = TOTAL_CHUNKS
         total_time = time.time() - total_start
         total_gb = total_size / 1024**3
         

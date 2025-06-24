@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/gpupgparser/benchmark/benchmark_rust_gpu_direct.py", line 25, in <module>
+    from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
+  File "/home/ubuntu/gpupgparser/src/__init__.py", line 9, in <module>
+    from .main_postgres_to_parquet import (
+  File "/home/ubuntu/gpupgparser/src/main_postgres_to_parquet.py", line 32, in <module>
+    from .cuda_kernels.gpu_config_utils import (
+  File "/home/ubuntu/gpupgparser/src/cuda_kernels/__init__.py", line 19, in <module>
+    from .integrated_parser_lite import (
+ModuleNotFoundError: No module named 'src.cuda_kernels.integrated_parser_lite'
