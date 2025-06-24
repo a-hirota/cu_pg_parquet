@@ -15,6 +15,7 @@
 
 from numba import cuda, int32, types
 import numpy as np
+import time  # ソート時間計測用
 
 @cuda.jit(device=True, inline=True)
 def read_uint16_simd16_lite(raw_data, pos, end_pos, ncols):
@@ -283,54 +284,53 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if nrow == 0:
         return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
 
-    # **適応的ソート処理（サイズ別最適化）**
+    # GPUソート優先処理（闾値廃止）
     # 行位置とフィールド情報を同期してソート
     if nrow > 0:
-        # 大規模データ（50,000行以上）でのみGPUソートを使用
-        # 小規模データではCPUの方が高速（GPU初期化オーバーヘッド回避）
-        GPU_SORT_THRESHOLD = 50000
+        sort_start = time.time()
         
-        if nrow >= GPU_SORT_THRESHOLD:
-            try:
-                import cupy as cp
+        # GPUソートを優先的に使用
+        try:
+            import cupy as cp
+            
+            if debug:
+                print(f"[DEBUG] GPUソート開始: {nrow}行")
+            
+            # GPU上で直接ソート処理（転送不要）
+            row_positions_gpu = cp.asarray(row_positions[:nrow])
+            field_offsets_gpu = cp.asarray(field_offsets[:nrow])
+            field_lengths_gpu = cp.asarray(field_lengths[:nrow])
+            
+            # 有効な行位置のみ抽出（GPU上）
+            valid_mask = row_positions_gpu >= 0
+            if cp.any(valid_mask):
+                row_positions_valid = row_positions_gpu[valid_mask]
+                field_offsets_valid = field_offsets_gpu[valid_mask]
+                field_lengths_valid = field_lengths_gpu[valid_mask]
                 
-                # GPU上で直接ソート処理（転送不要）
-                row_positions_gpu = cp.asarray(row_positions[:nrow])
-                field_offsets_gpu = cp.asarray(field_offsets[:nrow])
-                field_lengths_gpu = cp.asarray(field_lengths[:nrow])
+                # GPU上で高速ソート
+                sort_indices = cp.argsort(row_positions_valid)
+                field_offsets_sorted = field_offsets_valid[sort_indices]
+                field_lengths_sorted = field_lengths_valid[sort_indices]
                 
-                # 有効な行位置のみ抽出（GPU上）
-                valid_mask = row_positions_gpu >= 0
-                if cp.any(valid_mask):
-                    row_positions_valid = row_positions_gpu[valid_mask]
-                    field_offsets_valid = field_offsets_gpu[valid_mask]
-                    field_lengths_valid = field_lengths_gpu[valid_mask]
-                    
-                    # GPU上で高速ソート
-                    sort_indices = cp.argsort(row_positions_valid)
-                    field_offsets_sorted = field_offsets_valid[sort_indices]
-                    field_lengths_sorted = field_lengths_valid[sort_indices]
-                    
-                    # CuPy配列をNumba CUDA配列に変換
-                    final_field_offsets = cuda.as_cuda_array(field_offsets_sorted)
-                    final_field_lengths = cuda.as_cuda_array(field_lengths_sorted)
-                    
-                    if debug:
-                        print(f"[DEBUG] GPU高速ソート完了: {len(sort_indices)}行（大規模データ最適化）")
-                    
-                    return final_field_offsets, final_field_lengths
-                else:
-                    return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
-                    
-            except ImportError:
-                # CuPy未対応時はCPUソートにフォールバック
-                pass
+                # CuPy配列をNumba CUDA配列に変換
+                final_field_offsets = cuda.as_cuda_array(field_offsets_sorted)
+                final_field_lengths = cuda.as_cuda_array(field_lengths_sorted)
+                
+                sort_time = time.time() - sort_start
+                print(f"✅ GPUソート完了: {len(sort_indices)}行, {sort_time:.3f}秒")
+                
+                return final_field_offsets, final_field_lengths
+            else:
+                return cuda.device_array((0, ncols), np.int32), cuda.device_array((0, ncols), np.int32)
+                
+        except ImportError:
+            # CuPy未対応時はCPUソートにフォールバック
+            if debug:
+                print("[DEBUG] CuPy未対応環境、CPUソートを使用")
         
-        # 小規模データまたはGPUソート未対応時のCPUソート
-        if debug and nrow < GPU_SORT_THRESHOLD:
-            print(f"[DEBUG] 小規模データ（{nrow}行）のためCPU最適ソートを使用")
-        elif debug:
-            print("[DEBUG] GPUソート未対応環境、CPUソートを使用")
+        # CPUソートフォールバック
+        print(f"⚠️ CPUソート使用: {nrow}行（CuPy未対応）")
         
         row_positions_host = row_positions[:nrow].copy_to_host()
         field_offsets_host = field_offsets[:nrow].copy_to_host()
@@ -349,8 +349,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
             final_field_offsets = cuda.to_device(field_offsets_sorted)
             final_field_lengths = cuda.to_device(field_lengths_sorted)
             
-            if debug:
-                print(f"[DEBUG] CPU最適ソート完了: {len(sort_indices)}行")
+            sort_time = time.time() - sort_start
+            print(f"⚠️ CPUソート完了: {len(sort_indices)}行, {sort_time:.3f}秒（GPU→CPU→GPU転送含む）")
             
             return final_field_offsets, final_field_lengths
         else:
