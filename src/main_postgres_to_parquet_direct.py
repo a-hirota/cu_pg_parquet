@@ -31,16 +31,18 @@ from .cuda_kernels.gpu_config_utils import optimize_grid_size
 class DirectProcessor:
     """直接抽出プロセッサー（統合バッファ不使用）"""
     
-    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True):
+    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True, verbose: bool = False):
         """
         初期化
         
         Args:
             use_rmm: RMM (Rapids Memory Manager) を使用
             optimize_gpu: GPU最適化を有効化
+            verbose: 詳細ログを出力
         """
         self.use_rmm = use_rmm
         self.optimize_gpu = optimize_gpu
+        self.verbose = verbose
         self.extractor = DirectColumnExtractor()
         self.device_props = self._get_device_properties()
         
@@ -56,7 +58,8 @@ class DirectProcessor:
                         initial_pool_size=pool_size,
                         maximum_pool_size=pool_size
                     )
-                    print(f"RMM メモリプール初期化完了 ({pool_size / 1024**3:.1f} GB)")
+                    # RMM初期化ログを削除（verbose時のみ表示）
+                    pass
             except Exception as e:
                 warnings.warn(f"RMM初期化警告: {e}")
     
@@ -149,7 +152,8 @@ class DirectProcessor:
         # === 2. 直接列抽出（統合バッファ不使用） ===
         extract_start = time.time()
         
-        print(f"直接列抽出開始（統合バッファ不使用）: {rows} 行")
+        if self.verbose:
+            print(f"直接列抽出開始（統合バッファ不使用）: {rows} 行")
         
         cudf_df = self.extractor.extract_columns_direct(
             raw_dev, field_offsets_dev, field_lengths_dev,
@@ -168,7 +172,7 @@ class DirectProcessor:
         used_before = mempool.used_bytes()
         mempool.free_all_blocks()
         used_after = mempool.used_bytes()
-        if used_before > used_after:
+        if self.verbose and used_before > used_after:
             print(f"Parquet書き込み前メモリ解放: {(used_before - used_after) / 1024**2:.1f} MB")
         
         parquet_timing = write_cudf_to_parquet_with_options(
@@ -205,23 +209,27 @@ class DirectProcessor:
         # === 1. GPUパース ===
         parse_start = time.time()
         
-        print("=== GPU並列パース開始 ===")
+        if self.verbose:
+            print("=== GPU並列パース開始 ===")
+        
         from .cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
         field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
             raw_dev, columns, header_size=header_size
         )
         
-        if self.optimize_gpu:
-            print("✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）")
-        
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
-        print(f"GPUパース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
+        
+        if self.verbose:
+            if self.optimize_gpu:
+                print("✅ Ultra Fast GPU並列パーサー使用（8.94倍高速化達成）")
+            print(f"GPUパース完了: {rows} 行 ({total_timing['gpu_parsing']:.4f}秒)")
         
         # === 2. 直接抽出 + エクスポート ===
         process_start = time.time()
         
-        print("=== 直接列抽出開始（統合バッファ不使用） ===")
+        if self.verbose:
+            print("=== 直接列抽出開始（統合バッファ不使用） ===")
         cudf_df, process_timing = self.process_direct(
             raw_dev, field_offsets_dev, field_lengths_dev,
             columns, output_path, compression, **kwargs
@@ -243,8 +251,11 @@ class DirectProcessor:
         timing: Dict[str, float], 
         data_size: int
     ):
-        """パフォーマンス統計の表示"""
+        """パフォーマンス統計の表示（verboseモードでのみ表示）"""
         
+        if not self.verbose:
+            return
+            
         print(f"\n=== パフォーマンス統計（直接抽出版） ===")
         print(f"処理データ: {rows:,} 行 × {cols} 列")
         print(f"データサイズ: {data_size / (1024**2):.2f} MB")
@@ -301,6 +312,7 @@ def postgresql_to_cudf_parquet_direct(
     compression: str = 'snappy',
     use_rmm: bool = True,
     optimize_gpu: bool = True,
+    verbose: bool = False,
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
@@ -324,6 +336,7 @@ def postgresql_to_cudf_parquet_direct(
         compression: 圧縮方式
         use_rmm: RMM使用フラグ
         optimize_gpu: GPU最適化フラグ
+        verbose: 詳細ログ出力フラグ
         **parquet_kwargs: 追加のParquetオプション
     
     Returns:
@@ -332,7 +345,8 @@ def postgresql_to_cudf_parquet_direct(
     
     processor = DirectProcessor(
         use_rmm=use_rmm, 
-        optimize_gpu=optimize_gpu
+        optimize_gpu=optimize_gpu,
+        verbose=verbose
     )
     
     return processor.process_postgresql_to_parquet(

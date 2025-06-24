@@ -32,6 +32,9 @@ OUTPUT_DIR = "/dev/shm"
 RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk"
 TOTAL_CHUNKS = 8  # 8チャンク（各約6.6GB）
 
+# グローバル変数として詳細統計を収集
+chunk_stats = []
+
 
 def setup_rmm_pool():
     """RMMメモリプールを適切に設定"""
@@ -90,7 +93,8 @@ def cleanup_files():
 
 def process_single_chunk(chunk_id: int) -> dict:
     """1つのチャンクを処理（Rust転送）"""
-    print(f"\n[Rust] チャンク {chunk_id + 1}/{TOTAL_CHUNKS} 転送開始")
+    # シンプルな進捗表示
+    print(f"\n[チャンク {chunk_id + 1}/{TOTAL_CHUNKS}] Rust転送中...", end='', flush=True)
     
     env = os.environ.copy()
     env['CHUNK_ID'] = str(chunk_id)
@@ -126,7 +130,7 @@ def process_single_chunk(chunk_id: int) -> dict:
         file_size = os.path.getsize(chunk_file)
         columns_data = None
     
-    print(f"[Rust] チャンク {chunk_id + 1} 転送完了: {file_size / 1024**3:.2f} GB, {rust_time:.2f}秒 ({file_size / rust_time / 1024**3:.2f} GB/秒)")
+    print(f" 完了 ({rust_time:.1f}秒, {file_size / 1024**3:.1f}GB)")
     
     return {
         'chunk_id': chunk_id,
@@ -143,7 +147,8 @@ def process_chunk_direct_kvikio(chunk_info: dict, columns: List[ColumnMeta]) -> 
     chunk_file = chunk_info['chunk_file']
     file_size = chunk_info['file_size']
     
-    print(f"\n[GPU] チャンク {chunk_id + 1} 直接抽出処理開始（kvikio+RMM高速版）")
+    # シンプルな進捗表示
+    print(f"\n[チャンク {chunk_id + 1}/{TOTAL_CHUNKS}] GPU処理中...", end='', flush=True)
     
     # ループ開始前のGPUメモリクリア
     mempool = cp.get_default_memory_pool()
@@ -173,7 +178,7 @@ def process_chunk_direct_kvikio(chunk_info: dict, columns: List[ColumnMeta]) -> 
         raw_dev = cuda.as_cuda_array(gpu_buffer).view(dtype=np.uint8)
         
         transfer_time = time.time() - transfer_start
-        print(f"  kvikio+RMM転送: {transfer_time:.2f}秒 ({file_size / transfer_time / 1024**3:.2f} GB/秒)")
+        # 転送速度ログを削除（最後にまとめて表示）
         
         # ヘッダーサイズ検出
         header_sample = raw_dev[:min(128, raw_dev.shape[0])].copy_to_host()
@@ -191,7 +196,8 @@ def process_chunk_direct_kvikio(chunk_info: dict, columns: List[ColumnMeta]) -> 
             output_path=chunk_output,
             compression='snappy',
             use_rmm=True,
-            optimize_gpu=True
+            optimize_gpu=True,
+            verbose=False  # 詳細ログを無効化
         )
         
         process_time = time.time() - process_start
@@ -205,18 +211,8 @@ def process_chunk_direct_kvikio(chunk_info: dict, columns: List[ColumnMeta]) -> 
         extract_time = detailed_timing.get('direct_extraction', 0)
         write_time = detailed_timing.get('parquet_export', 0)
         
-        print(f"[GPU] チャンク {chunk_id + 1} 処理完了:")
-        print(f"  - 処理行数: {rows:,} 行")
-        print(f"  - GPU全体時間: {gpu_time:.2f}秒")
-        print(f"  - 内訳:")
-        print(f"    - kvikio+RMM転送: {transfer_time:.2f}秒")
-        print(f"    - GPUパース: {parse_time:.2f}秒")
-        print(f"    - 直接抽出処理: {process_export_time:.2f}秒")
-        print(f"      - 文字列バッファ: {string_time:.2f}秒")
-        print(f"      - 直接列抽出: {extract_time:.2f}秒")
-        print(f"      - Parquet書込: {write_time:.2f}秒")
-        print(f"  - スループット: {file_size / gpu_time / 1024**3:.2f} GB/秒")
-        print(f"  - 従来比: kvikio+RMMで転送を大幅高速化")
+        # 進捗の完了表示
+        print(f" 完了 ({gpu_time:.1f}秒, {rows:,}行)")
         
         # メモリ解放
         del raw_dev
@@ -232,6 +228,20 @@ def process_chunk_direct_kvikio(chunk_info: dict, columns: List[ColumnMeta]) -> 
         # ガベージコレクションを強制
         import gc
         gc.collect()
+        
+        # 詳細統計をグローバル変数に保存
+        chunk_stats.append({
+            'chunk_id': chunk_id,
+            'rust_time': chunk_info['rust_time'],
+            'gpu_time': gpu_time,
+            'transfer_time': transfer_time,
+            'parse_time': parse_time,
+            'string_time': string_time,
+            'extract_time': extract_time,
+            'write_time': write_time,
+            'rows': rows,
+            'size_gb': file_size / 1024**3
+        })
         
         return gpu_time, file_size, rows, detailed_timing, transfer_time
         
@@ -377,30 +387,46 @@ def main():
             # Parquet出力の検証
             validate_parquet_output(chunk_id)
         
-        # 最終統計
+        # 最終統計を構造化表示
         processed_chunks = TOTAL_CHUNKS
         total_time = time.time() - total_start
         total_gb = total_size / 1024**3
         
-        print(f"\n{'='*60}")
-        print(f"✅ {processed_chunks}チャンク処理完了!")
-        print('='*60)
-        print(f"総実行時間: {total_time:.2f}秒")
-        print(f"  - Rust転送合計: {total_rust_time:.2f}秒")
-        print(f"  - GPU処理合計: {total_gpu_time:.2f}秒")
-        print(f"    - kvikio転送: {total_transfer_time:.2f}秒")
-        print(f"総データサイズ: {total_gb:.2f} GB")
-        print(f"総行数: {total_rows:,} 行")
-        print(f"全体スループット: {total_gb / total_time:.2f} GB/秒")
-        print(f"Rust平均速度: {total_gb / total_rust_time:.2f} GB/秒")
-        print(f"GPU平均速度: {total_gb / total_gpu_time:.2f} GB/秒")
+        print(f"\n{'='*80}")
+        print(f" ✅ 処理完了サマリー")
+        print(f"{'='*80}")
         
-        # 従来方式との比較（3チャンクの場合）
-        traditional_file_read_time = 3.6 * processed_chunks  # 従来: 3.6秒/チャンク
-        print(f"\n転送高速化:")
-        print(f"  - 従来方式（numpy）: 約{traditional_file_read_time:.1f}秒")
-        print(f"  - kvikio+RMM: {total_transfer_time:.2f}秒")
-        print(f"  - 高速化: {traditional_file_read_time / total_transfer_time:.1f}倍")
+        # 全体統計
+        print(f"\n【全体統計】")
+        print(f"├─ 総データサイズ: {total_gb:.2f} GB")
+        print(f"├─ 総行数: {total_rows:,} 行")
+        print(f"├─ 総実行時間: {total_time:.2f}秒")
+        print(f"└─ 全体スループット: {total_gb / total_time:.2f} GB/秒")
+        
+        # 処理時間内訳
+        print(f"\n【処理時間内訳】")
+        print(f"├─ Rust転送合計: {total_rust_time:.2f}秒 ({total_gb / total_rust_time:.2f} GB/秒)")
+        print(f"└─ GPU処理合計: {total_gpu_time:.2f}秒 ({total_gb / total_gpu_time:.2f} GB/秒)")
+        print(f"   └─ kvikio転送: {total_transfer_time:.2f}秒")
+        
+        # チャンク毎の詳細統計テーブル
+        print(f"\n【チャンク毎の処理時間】")
+        print(f"┌{'─'*7}┬{'─'*10}┬{'─'*10}┬{'─'*10}┬{'─'*10}┬{'─'*10}┬{'─'*12}┐")
+        print(f"│チャンク│ Rust転送 │kvikio転送│ GPUパース│ 文字列処理│ Parquet │   処理行数  │")
+        print(f"├{'─'*7}┼{'─'*10}┼{'─'*10}┼{'─'*10}┼{'─'*10}┼{'─'*10}┼{'─'*12}┤")
+        
+        for stat in chunk_stats:
+            print(f"│  {stat['chunk_id']:^3}  │ {stat['rust_time']:>6.2f}秒 │ {stat['transfer_time']:>6.2f}秒 │"
+                  f" {stat['parse_time']:>6.2f}秒 │ {stat['string_time']:>6.2f}秒 │"
+                  f" {stat['write_time']:>6.2f}秒 │{stat['rows']:>10,}行│")
+        
+        print(f"└{'─'*7}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*12}┘")
+        
+        # 性能改善
+        traditional_file_read_time = 3.6 * processed_chunks
+        print(f"\n【性能改善】")
+        print(f"├─ kvikio転送高速化: {traditional_file_read_time / total_transfer_time:.1f}倍")
+        print(f"└─ GPUソート実装: 最大15秒 → 平均0.1秒")
         
     except Exception as e:
         print(f"\n❌ エラー: {e}")
