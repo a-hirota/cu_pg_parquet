@@ -1,12 +1,6 @@
 """
 PostgreSQL → Rust → GPU キューベース並列処理版
 Producer-Consumerパターンで真の並列処理を実現
-
-改善内容:
-1. キューベースで明確な実装
-2. Producerは連続的にチャンクを生成
-3. Consumerは利用可能なチャンクを即座に処理
-4. 真の並列実行
 """
 
 import os
@@ -57,7 +51,6 @@ def setup_rmm_pool():
     """RMMメモリプールを適切に設定"""
     try:
         if rmm.is_initialized():
-            print("RMM既に初期化済み")
             return
         
         # GPUメモリの90%を使用可能に設定
@@ -69,7 +62,6 @@ def setup_rmm_pool():
             initial_pool_size=pool_size,
             maximum_pool_size=pool_size
         )
-        print(f"✅ RMMメモリプール初期化: {pool_size / 1024**3:.1f} GB")
     except Exception as e:
         print(f"⚠️ RMM初期化警告: {e}")
 
@@ -86,8 +78,6 @@ def get_postgresql_metadata():
         columns = fetch_column_meta(conn, f"SELECT * FROM {TABLE_NAME}")
         print(f"✅ メタデータ取得完了: {len(columns)} 列")
         
-        # デバッグ：Decimal列の情報を表示
-        # Decimal列の詳細表示を削除（冗長なため）
         
         return columns
     finally:
@@ -350,22 +340,8 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
 
 
 def main(total_chunks=8):
-    print("=== PostgreSQL → Rust → GPU キューベース並列処理版 ===")
-    print(f"チャンク数: {total_chunks}")
-    print(f"各チャンクサイズ: 約{52.86 / total_chunks:.1f} GB")
-    print(f"キューサイズ: {MAX_QUEUE_SIZE}")
-    print(f"出力ディレクトリ: {OUTPUT_DIR}")
-    print("\n改善内容:")
-    print("  - キューベースの真の並列処理")
-    print("  - Producerは連続的にチャンクを生成")
-    print("  - Consumerは即座に処理開始")
-    
     # kvikio設定確認
     is_compat = os.environ.get("KVIKIO_COMPAT_MODE", "").lower() in ["on", "1", "true"]
-    if is_compat:
-        print("\n⚠️  kvikio互換モードで動作中")
-    else:
-        print("\n✅ kvikio GPUDirectモードの可能性")
     
     # RMMメモリプール設定
     setup_rmm_pool()
@@ -373,7 +349,6 @@ def main(total_chunks=8):
     # CUDA context確認
     try:
         cuda.current_context()
-        print("\n✅ CUDA context OK")
     except Exception as e:
         print(f"❌ CUDA context エラー: {e}")
         return

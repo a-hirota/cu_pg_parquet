@@ -837,7 +837,6 @@ class DirectColumnExtractor:
                             dst_idx < data_out.size):
                             data_out[dst_idx] = raw_data[src_idx]
                 
-                print(f"文字列列 {col.name}: RMM DeviceBuffer直接書き込み")
                 copy_string_data_direct[blocks, threads](
                     raw_dev, field_offsets_dev, field_lengths_dev,
                     actual_col_idx, d_data_numba, d_offsets_numba, rows
@@ -850,7 +849,6 @@ class DirectColumnExtractor:
                     'offsets': offsets_buffer, # RMM DeviceBuffer
                     'actual_size': total_size
                 }
-                print(f"✅ 文字列列 {col.name}: 最適化バッファ作成完了 ({total_size} bytes)")
                 
             except Exception as e:
                 warnings.warn(f"文字列バッファ作成エラー ({col.name}): {e}")

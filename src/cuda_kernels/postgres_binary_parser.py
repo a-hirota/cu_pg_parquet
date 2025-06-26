@@ -411,7 +411,6 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 final_field_lengths = cuda.as_cuda_array(field_lengths_sorted)
                 
                 sort_time = time.time() - sort_start
-                print(f"✅ GPUソート完了: {len(sort_indices)}行, {sort_time:.3f}秒")
                 
                 return final_field_offsets, final_field_lengths
             else:
