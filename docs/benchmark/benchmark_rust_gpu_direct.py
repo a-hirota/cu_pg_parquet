@@ -29,7 +29,7 @@ import signal
 import sys
 
 from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
-from src.main_postgres_to_parquet_direct import postgresql_to_cudf_parquet_direct
+from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
 from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 from src.readPostgres.metadata import fetch_column_meta
 

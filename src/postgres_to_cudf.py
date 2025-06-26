@@ -24,6 +24,7 @@ from .types import (
 from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
+from .cuda_kernels.gpu_config_utils import optimize_grid_size
 
 
 class DirectColumnExtractor:
@@ -33,6 +34,46 @@ class DirectColumnExtractor:
         """初期化"""
         self.d_pow10_table_lo = None
         self.d_pow10_table_hi = None
+        self.device_props = self._get_device_properties()
+    
+    def _get_device_properties(self) -> dict:
+        """GPUデバイスプロパティを取得"""
+        try:
+            device = cuda.get_current_device()
+            # CuPyを使用してGPUメモリサイズを取得
+            meminfo = cp.cuda.runtime.memGetInfo()
+            gpu_memory_size = meminfo[1]  # total memory
+            
+            return {
+                'compute_capability': device.compute_capability,
+                'name': device.name.decode('utf-8') if hasattr(device.name, 'decode') else str(device.name),
+                'multiprocessor_count': device.MULTIPROCESSOR_COUNT,
+                'warp_size': device.WARP_SIZE,
+                'max_threads_per_block': device.MAX_THREADS_PER_BLOCK,
+                'max_block_dim_x': device.MAX_BLOCK_DIM_X,
+                'max_block_dim_y': device.MAX_BLOCK_DIM_Y,
+                'max_block_dim_z': device.MAX_BLOCK_DIM_Z,
+                'max_grid_dim_x': device.MAX_GRID_DIM_X,
+                'max_grid_dim_y': device.MAX_GRID_DIM_Y,
+                'max_grid_dim_z': device.MAX_GRID_DIM_Z,
+                'gpu_memory_size': gpu_memory_size
+            }
+        except Exception as e:
+            warnings.warn(f"GPUプロパティ取得失敗: {e}")
+            return {
+                'compute_capability': (7, 0),
+                'name': 'Unknown GPU',
+                'multiprocessor_count': 80,
+                'warp_size': 32,
+                'max_threads_per_block': 1024,
+                'max_block_dim_x': 1024,
+                'max_block_dim_y': 1024,
+                'max_block_dim_z': 64,
+                'max_grid_dim_x': 2147483647,
+                'max_grid_dim_y': 65535,
+                'max_grid_dim_z': 65535,
+                'gpu_memory_size': 0
+            }
     
     def _ensure_decimal_tables(self):
         """Decimal処理用テーブルの遅延初期化"""
@@ -660,6 +701,162 @@ class DirectColumnExtractor:
         except Exception as e:
             warnings.warn(f"文字列Series作成失敗: {e}")
             return cudf.Series([None] * rows, dtype='string')
+    
+    def create_string_buffers(
+        self,
+        columns: List[ColumnMeta],
+        rows: int,
+        raw_dev,
+        field_offsets_dev,
+        field_lengths_dev
+    ) -> Dict[str, Any]:
+        """
+        文字列バッファ作成（RMM DeviceBuffer版 - ゼロコピー実現）
+        
+        RMM DeviceBufferを使用してpylibcudfとの完全な互換性を実現
+        """
+        
+        string_buffers = {}
+        var_columns = [col for col in columns if col.is_variable and (col.arrow_id == UTF8 or col.arrow_id == BINARY)]
+        
+        if not var_columns:
+            return string_buffers
+        
+        for col_idx, col in enumerate(var_columns):
+            # 対応する列インデックスを検索
+            actual_col_idx = None
+            for i, c in enumerate(columns):
+                if c.name == col.name:
+                    actual_col_idx = i
+                    break
+            
+            if actual_col_idx is None:
+                continue
+            
+            try:
+                # === 1. RMM DeviceBufferで長さ配列を作成 ===
+                lengths_buffer = rmm.DeviceBuffer(size=rows * 4)  # int32は4バイト
+                
+                # CuPy配列としてビュー作成（ゼロコピー）
+                lengths_cupy = cp.ndarray(
+                    shape=(rows,),
+                    dtype=cp.int32,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(lengths_buffer.ptr, lengths_buffer.size, lengths_buffer),
+                        0
+                    )
+                )
+                
+                # Numbaカーネル用に変換
+                d_lengths_numba = cuda.as_cuda_array(lengths_cupy)
+                
+                # グリッドサイズの計算
+                blocks, threads = optimize_grid_size(0, rows, self.device_props)
+                
+                @cuda.jit
+                def extract_lengths_coalesced(field_lengths, col_idx, lengths_out, num_rows):
+                    """ワープ効率を考慮した長さ抽出"""
+                    row = cuda.grid(1)
+                    if row < num_rows:
+                        lengths_out[row] = field_lengths[row, col_idx]
+                
+                extract_lengths_coalesced[blocks, threads](
+                    field_lengths_dev, actual_col_idx, d_lengths_numba, rows
+                )
+                cuda.synchronize()
+                
+                # === 2. GPU上でのオフセット計算（CuPy使用） ===
+                # CuPyのcumsum使用（既にCuPy配列なので変換不要）
+                offsets_cumsum = cp.cumsum(lengths_cupy, dtype=cp.int32)
+                
+                # RMM DeviceBufferでオフセット配列作成
+                offsets_buffer = rmm.DeviceBuffer(size=(rows + 1) * 4)  # int32
+                offsets_cupy = cp.ndarray(
+                    shape=(rows + 1,),
+                    dtype=cp.int32,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(offsets_buffer.ptr, offsets_buffer.size, offsets_buffer),
+                        0
+                    )
+                )
+                offsets_cupy[0] = 0
+                offsets_cupy[1:] = offsets_cumsum
+                
+                # 総データサイズを取得
+                total_size = int(offsets_cupy[-1])
+                
+                if total_size == 0:
+                    string_buffers[col.name] = {'data': None, 'offsets': None, 'actual_size': 0}
+                    continue
+                
+                # === 3. RMM DeviceBufferでデータバッファ作成 ===
+                data_buffer = rmm.DeviceBuffer(size=total_size)
+                
+                # CuPy配列としてビュー作成（ゼロコピー）
+                data_cupy = cp.ndarray(
+                    shape=(total_size,),
+                    dtype=cp.uint8,
+                    memptr=cp.cuda.MemoryPointer(
+                        cp.cuda.UnownedMemory(data_buffer.ptr, data_buffer.size, data_buffer),
+                        0
+                    )
+                )
+                
+                # Numbaカーネル用に変換
+                d_data_numba = cuda.as_cuda_array(data_cupy)
+                d_offsets_numba = cuda.as_cuda_array(offsets_cupy)
+                
+                @cuda.jit
+                def copy_string_data_direct(
+                    raw_data, field_offsets, field_lengths,
+                    col_idx, data_out, offsets, num_rows
+                ):
+                    """
+                    シンプルな直接コピーカーネル
+                    デバッグ用に最もシンプルな実装
+                    """
+                    row = cuda.grid(1)
+                    if row >= num_rows:
+                        return
+                    
+                    field_offset = field_offsets[row, col_idx]
+                    field_length = field_lengths[row, col_idx]
+                    output_offset = offsets[row]
+                    
+                    # NULL チェック
+                    if field_length <= 0:
+                        return
+                    
+                    # シンプルな直接コピー
+                    for i in range(field_length):
+                        src_idx = field_offset + i
+                        dst_idx = output_offset + i
+                        
+                        # 境界チェック
+                        if (src_idx < raw_data.size and 
+                            dst_idx < data_out.size):
+                            data_out[dst_idx] = raw_data[src_idx]
+                
+                print(f"文字列列 {col.name}: RMM DeviceBuffer直接書き込み")
+                copy_string_data_direct[blocks, threads](
+                    raw_dev, field_offsets_dev, field_lengths_dev,
+                    actual_col_idx, d_data_numba, d_offsets_numba, rows
+                )
+                cuda.synchronize()
+                
+                # RMM DeviceBufferをそのまま返す（pylibcudf互換）
+                string_buffers[col.name] = {
+                    'data': data_buffer,      # RMM DeviceBuffer
+                    'offsets': offsets_buffer, # RMM DeviceBuffer
+                    'actual_size': total_size
+                }
+                print(f"✅ 文字列列 {col.name}: 最適化バッファ作成完了 ({total_size} bytes)")
+                
+            except Exception as e:
+                warnings.warn(f"文字列バッファ作成エラー ({col.name}): {e}")
+                string_buffers[col.name] = {'data': None, 'offsets': None, 'actual_size': 0}
+        
+        return string_buffers
 
 
 __all__ = ["DirectColumnExtractor"]

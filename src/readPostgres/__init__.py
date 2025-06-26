@@ -1,5 +1,4 @@
-"""Rust GPU統合モジュール"""
-from .postgres_gpu_reader import PostgresGPUReader
-from .string_builder import RustStringBuilder
+"""PostgreSQL読み取りモジュール"""
+from .metadata import fetch_column_meta
 
-__all__ = ['PostgresGPUReader', 'RustStringBuilder']
+__all__ = ['fetch_column_meta']
