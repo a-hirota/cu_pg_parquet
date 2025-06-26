@@ -24,7 +24,7 @@ from .write_parquet_from_cudf import (
 )
 
 # 基盤コンポーネント
-from .metadata import fetch_column_meta
+from .readPostgres.metadata import fetch_column_meta
 from .types import ColumnMeta, PG_OID_TO_ARROW
 from .memory_manager import GPUMemoryManager
 

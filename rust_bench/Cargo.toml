@@ -1,9 +1,0 @@
-[package]
-name = "pg_fast_copy"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-postgres = "0.7"
-futures-util = "0.3"
