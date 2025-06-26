@@ -87,9 +87,7 @@ def get_postgresql_metadata():
         print(f"✅ メタデータ取得完了: {len(columns)} 列")
         
         # デバッグ：Decimal列の情報を表示
-        for col in columns:
-            if col.arrow_id == 5:  # DECIMAL128
-                print(f"  Decimal列 {col.name}: arrow_param={col.arrow_param}")
+        # Decimal列の詳細表示を削除（冗長なため）
         
         return columns
     finally:
