@@ -26,6 +26,7 @@ from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
 from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 from src.readPostgres.metadata import fetch_column_meta
+import pyarrow.parquet as pq
 
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
@@ -262,12 +263,10 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             import gc
             gc.collect()
             
-            # チャンクファイル削除
+            # チャンクファイル削除（中間ファイルのみ）
             if os.path.exists(chunk_file):
                 os.remove(chunk_file)
-            # Parquetファイル削除
-            if os.path.exists(chunk_output):
-                os.remove(chunk_output)
+            # Parquetファイルは出力ファイルなので保持
                 
         except queue.Empty:
             continue
@@ -277,6 +276,40 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             traceback.print_exc()
     
     print(f"[Consumer-{consumer_id}] 終了")
+
+
+def validate_parquet_output(file_path: str, num_rows: int = 5) -> bool:
+    """
+    Parquetファイルの検証とサンプル表示
+    
+    Args:
+        file_path: 検証するParquetファイルのパス
+        num_rows: 表示する行数
+    
+    Returns:
+        検証成功の場合True
+    """
+    try:
+        # PyArrowでParquetファイルを読み込む
+        table = pq.read_table(file_path)
+        
+        print(f"\n📊 Parquetファイル検証: {os.path.basename(file_path)}")
+        print(f"├─ 行数: {table.num_rows:,}")
+        print(f"├─ 列数: {table.num_columns}")
+        print(f"└─ ファイルサイズ: {os.path.getsize(file_path) / 1024**2:.2f} MB")
+        
+        # サンプルデータを表示
+        print(f"\n📝 サンプルデータ（先頭{num_rows}行）:")
+        print("─" * 80)
+        df_sample = table.slice(0, num_rows).to_pandas()
+        print(df_sample.to_string(index=False, max_colwidth=20))
+        print("─" * 80)
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Parquet検証エラー: {e}")
+        return False
 
 
 def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
@@ -409,6 +442,12 @@ def main(total_chunks=8):
         traceback.print_exc()
         raise
     finally:
+        # 性能測定完了後、サンプル検証を実行
+        sample_parquet = "output/chunk_0_queue.parquet"
+        if os.path.exists(sample_parquet):
+            validate_parquet_output(sample_parquet, num_rows=5)
+            # Parquetファイルは出力ファイルなので保持
+        
         cleanup_files(total_chunks)
 
 
