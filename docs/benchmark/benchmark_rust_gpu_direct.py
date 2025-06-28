@@ -28,7 +28,7 @@ from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 from src.readPostgres.metadata import fetch_column_meta
 import pyarrow.parquet as pq
 
-TABLE_NAME = "lineorder"
+TABLE_NAME = "lineorder"  # デフォルト値（実行時に上書きされる）
 OUTPUT_DIR = "/dev/shm"
 RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk"
 MAX_QUEUE_SIZE = 3  # キューの最大サイズ
@@ -76,7 +76,7 @@ def get_postgresql_metadata():
     
     conn = psycopg.connect(dsn)
     try:
-        print("PostgreSQLメタデータを取得中...")
+        print(f"PostgreSQLメタデータを取得中 (テーブル: {TABLE_NAME})...")
         columns = fetch_column_meta(conn, f"SELECT * FROM {TABLE_NAME}")
         print(f"✅ メタデータ取得完了: {len(columns)} 列")
         
@@ -89,8 +89,8 @@ def get_postgresql_metadata():
 def cleanup_files(total_chunks=8):
     """ファイルをクリーンアップ"""
     files = [
-        f"{OUTPUT_DIR}/lineorder_meta_0.json",
-        f"{OUTPUT_DIR}/lineorder_data_0.ready"
+        f"{OUTPUT_DIR}/{TABLE_NAME}_meta_0.json",
+        f"{OUTPUT_DIR}/{TABLE_NAME}_data_0.ready"
     ] + [f"{OUTPUT_DIR}/chunk_{i}.bin" for i in range(total_chunks)]
     
     for f in files:
@@ -392,7 +392,10 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
     }
 
 
-def main(total_chunks=8):
+def main(total_chunks=8, table_name=None):
+    global TABLE_NAME
+    if table_name:
+        TABLE_NAME = table_name
     # kvikio設定確認
     is_compat = os.environ.get("KVIKIO_COMPAT_MODE", "").lower() in ["on", "1", "true"]
     
@@ -484,5 +487,6 @@ if __name__ == "__main__":
     # 環境変数を設定
     os.environ['RUST_PARALLEL_CONNECTIONS'] = str(args.parallel)
     os.environ['TOTAL_CHUNKS'] = str(args.chunks)
+    os.environ['TABLE_NAME'] = args.table  # Rust側にもテーブル名を伝える
     
-    main(total_chunks=args.chunks)
+    main(total_chunks=args.chunks, table_name=args.table)

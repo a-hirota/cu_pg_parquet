@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dsn = std::env::var("GPUPASER_PG_DSN")?;
     let chunk_id: usize = std::env::var("CHUNK_ID")?.parse()?;
     let total_chunks: usize = std::env::var("TOTAL_CHUNKS")?.parse()?;
+    let table_name = std::env::var("TABLE_NAME").unwrap_or_else(|_| "lineorder".to_string());
     
     // 環境変数から並列数を取得
     let parallel_connections = std::env::var("RUST_PARALLEL_CONNECTIONS")
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // テーブルのページ数を取得
     let row = client.query_one(
-        "SELECT relpages FROM pg_class WHERE relname='lineorder'", 
+        &format!("SELECT relpages FROM pg_class WHERE relname='{}'", table_name), 
         &[]
     ).await?;
     let max_page: i32 = row.get(0);
@@ -79,16 +80,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let columns = if chunk_id == 0 {
         println!("メタデータを取得中...");
         let meta_rows = client.query(
-            "SELECT 
+            &format!("SELECT 
                 a.attname AS name,
                 t.typname AS data_type,
                 t.oid AS pg_oid
             FROM pg_attribute a
             JOIN pg_type t ON a.atttypid = t.oid
-            WHERE a.attrelid = 'lineorder'::regclass
+            WHERE a.attrelid = '{}'::regclass
               AND a.attnum > 0
               AND NOT a.attisdropped
-            ORDER BY a.attnum",
+            ORDER BY a.attnum", table_name),
             &[]
         ).await?;
         
@@ -162,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let chunk_file_clone = Arc::clone(&chunk_file);
         let workers_clone = Arc::clone(&workers);
         let worker_offset_clone = Arc::clone(&worker_offset);
+        let table_name_clone = table_name.clone();
         
         tasks.spawn(async move {
             process_range(
@@ -172,7 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunk_file_clone,
                 workers_clone,
                 worker_offset_clone,
-                total_bytes_clone
+                total_bytes_clone,
+                table_name_clone
             ).await
         });
     }
@@ -227,6 +230,7 @@ async fn process_range(
     workers: Arc<Mutex<Vec<WorkerMeta>>>,
     worker_offset: Arc<AtomicU64>,
     total_bytes: Arc<AtomicU64>,
+    table_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (client, connection) = config.connect(NoTls).await?;
     
@@ -243,8 +247,8 @@ async fn process_range(
     
     // COPY開始
     let copy_query = format!(
-        "COPY (SELECT * FROM lineorder WHERE ctid >= '({},0)'::tid AND ctid < '({},0)'::tid) TO STDOUT (FORMAT BINARY)",
-        start_page, end_page
+        "COPY (SELECT * FROM {} WHERE ctid >= '({},0)'::tid AND ctid < '({},0)'::tid) TO STDOUT (FORMAT BINARY)",
+        table_name, start_page, end_page
     );
     
     let stream = client.copy_out(&copy_query).await?;

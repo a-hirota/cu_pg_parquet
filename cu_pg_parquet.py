@@ -100,6 +100,9 @@ def main():
     if args.test:
         os.environ["GPUPGPARSER_TEST_MODE"] = "1"
     
+    # テーブル名を環境変数に設定（Rust側でも使用）
+    os.environ["TABLE_NAME"] = args.table
+    
     print(f"GPUPGParser - PostgreSQL to GPU-accelerated Parquet converter")
     print(f"============================================================")
     print(f"テーブル: {args.table}")
@@ -123,7 +126,7 @@ def main():
     
     try:
         # benchmark_rust_gpu_direct.pyのmain()を実行
-        benchmark_main()
+        benchmark_main(total_chunks=args.chunks, table_name=args.table)
         elapsed_time = time.time() - start_time
         print(f"\n処理完了: {elapsed_time:.2f}秒")
         return 0
