@@ -69,6 +69,16 @@ def main():
         default="./output",
         help="出力ディレクトリ（デフォルト: ./output）"
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="テストモード（Grid境界スレッド情報を出力）"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="出力ディレクトリ（--output-dirのエイリアス）"
+    )
     
     args = parser.parse_args()
     
@@ -83,8 +93,12 @@ def main():
         return 1
     
     # 出力ディレクトリの作成
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output or args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # テストモードの環境変数設定
+    if args.test:
+        os.environ["GPUPGPARSER_TEST_MODE"] = "1"
     
     print(f"GPUPGParser - PostgreSQL to GPU-accelerated Parquet converter")
     print(f"============================================================")

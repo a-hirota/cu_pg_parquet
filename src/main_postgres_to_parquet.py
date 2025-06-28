@@ -13,6 +13,7 @@ cuDF直接抽出プロセッサー（統合バッファ不使用版）
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Tuple
 import os
+import json
 import time
 import warnings
 import numpy as np
@@ -210,10 +211,28 @@ class DirectProcessor:
         if self.verbose:
             print("=== GPU並列パース開始 ===")
         
+        # テストモードチェック
+        test_mode = os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1'
+        
         from .cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
-        field_offsets_dev, field_lengths_dev = parse_binary_chunk_gpu_ultra_fast_v2(
-            raw_dev, columns, header_size=header_size
+        parse_result = parse_binary_chunk_gpu_ultra_fast_v2(
+            raw_dev, columns, header_size=header_size, test_mode=test_mode
         )
+        
+        # テストモードの場合、デバッグ情報も返される
+        if test_mode and len(parse_result) >= 3:
+            field_offsets_dev = parse_result[0]
+            field_lengths_dev = parse_result[1]
+            debug_info = parse_result[2] if len(parse_result) > 2 else None
+            negative_debug_info = parse_result[3] if len(parse_result) > 3 else None
+            
+            if debug_info is not None:
+                self._print_grid_boundary_debug_info(debug_info, raw_dev)
+            if negative_debug_info is not None:
+                self._print_negative_position_debug_info(negative_debug_info, raw_dev)
+        else:
+            field_offsets_dev = parse_result[0]
+            field_lengths_dev = parse_result[1]
         
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
@@ -241,6 +260,222 @@ class DirectProcessor:
         self._print_performance_stats(rows, len(columns), total_timing, len(raw_dev))
         
         return cudf_df, total_timing
+    
+    def _print_grid_boundary_debug_info(self, debug_info: np.ndarray, raw_dev):
+        """Grid境界スレッドのデバッグ情報を表示（テストモード用）"""
+        print("\n=== Grid境界スレッドデバッグ情報 ===")
+        print(f"記録されたGrid境界スレッド数: {len(debug_info)}")
+        
+        # デバッグ情報の構造:
+        # [0]: Thread ID, [1-3]: Block/Thread indices
+        # [4-6]: Row info (position, end, ncols)
+        # [7-40]: Field offsets/lengths (17 fields)
+        # [41-80]: Binary data sample (40 bytes)
+        
+        # 表示を15スレッドに限定
+        display_limit = min(15, len(debug_info))
+        print(f"表示: 最初の{display_limit}スレッドのみ\n")
+        
+        for idx, info in enumerate(debug_info[:display_limit]):
+            print(f"\n--- Grid境界スレッド {idx + 1} ---")
+            print(f"Thread ID: {info[0]}")
+            print(f"Block Index: ({info[1]}, {info[2]}), Thread Index: {info[3]}")
+            print(f"Row Position: {info[4]}, Row End: {info[5]}, Columns: {info[6]}")
+            
+            # フィールド情報（全フィールド表示）
+            ncols = info[6]
+            print(f"Field Offsets/Lengths (all {ncols} fields):")
+            for i in range(min(ncols, 17)):  # 最大17列まで
+                if 7 + i*2 + 1 < len(info):
+                    offset = info[7 + i*2]
+                    length = info[8 + i*2]
+                    print(f"  Field {i}: offset={offset}, length={length}")
+            
+            # バイナリデータサンプル
+            row_pos = info[4]
+            sample_start = row_pos - 20  # Row Positionの20バイト前から
+            sample_end = sample_start + 40
+            
+            print(f"Binary Data Sample (position {sample_start} - {sample_end}):")
+            sample_bytes = []
+            ascii_chars = []
+            
+            for i in range(40):
+                byte_val = info[41 + i]  # 新しいオフセット
+                if byte_val >= 0:
+                    sample_bytes.append(f"{byte_val:02x}")
+                    # ASCII表示用
+                    if 32 <= byte_val <= 126:
+                        ascii_chars.append(chr(byte_val))
+                    else:
+                        ascii_chars.append(".")
+                else:
+                    sample_bytes.append("--")
+                    ascii_chars.append(".")
+            
+            # 16バイトごとに表示（HEXとASCII）
+            for i in range(0, 40, 16):
+                hex_str = " ".join(sample_bytes[i:i+16])
+                ascii_str = "".join(ascii_chars[i:i+16])
+                print(f"  HEX:   {hex_str}")
+                print(f"  ASCII: {ascii_str}")
+                
+                # Row Positionのマーキング
+                if i <= 20 < i + 16:
+                    marker_pos = (20 - i) * 3  # HEX表示での位置
+                    marker = " " * (7 + marker_pos) + "^^ Row Position"
+                    print(marker)
+            
+            # validate_and_extract_fields_liteの結果
+            row_pos = info[4]
+            row_end = info[5]
+            is_valid = info[81] if 81 < len(info) else -1
+            row_end_from_validate = info[82] if 82 < len(info) else -1
+            detected_rows = info[83] if 83 < len(info) else -1
+            
+            print(f"\nvalidate_and_extract_fields_lite戻り値:")
+            print(f"  is_valid: {is_valid} (1=True, 0=False)")
+            print(f"  row_end: {row_end_from_validate}")
+            if row_end_from_validate > row_pos:
+                print(f"  結果: Success (row_size={row_end_from_validate - row_pos})")
+            else:
+                print(f"  結果: Failed")
+            
+            print(f"\nparse_rows_and_fields_lite状態:")
+            print(f"  この時点での検出行数: {detected_rows}")
+            
+            # 行位置が負の場合の警告
+            if row_pos < 0:
+                print(f"\n⚠️ 警告: この行位置は負の値です！ row_position={row_pos}")
+        
+        # JSON形式でも出力（テスト自動化用）
+        debug_data = []
+        for info in debug_info[:display_limit]:
+            debug_entry = {
+                "thread_id": int(info[0]),
+                "block_x": int(info[1]),
+                "block_y": int(info[2]),
+                "thread_x": int(info[3]),
+                "row_position": int(info[4]),
+                "row_end": int(info[5]),
+                "ncols": int(info[6]),
+                "field_info": [],
+                "binary_sample": []
+            }
+            
+            # フィールド情報（全フィールド）
+            for i in range(min(17, info[6])):
+                if 7 + i*2 + 1 < len(info):
+                    debug_entry["field_info"].append({
+                        "offset": int(info[7 + i*2]),
+                        "length": int(info[8 + i*2])
+                    })
+            
+            # バイナリサンプル
+            for i in range(40):
+                byte_val = info[41 + i]  # 新しいオフセット
+                if byte_val >= 0:
+                    debug_entry["binary_sample"].append(int(byte_val))
+            
+            debug_data.append(debug_entry)
+        
+        # JSONファイルに保存
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='_grid_debug.json', delete=False) as f:
+            json.dump(debug_data, f, indent=2)
+            print(f"\nデバッグ情報をJSONファイルに保存: {f.name}")
+    
+    def _print_negative_position_debug_info(self, negative_debug_info: np.ndarray, raw_dev):
+        """負の行位置のデバッグ情報を表示"""
+        print("\n=== 負の行位置デバッグ情報 ===")
+        print(f"記録された負の行位置数: {len(negative_debug_info)}")
+        
+        # デバッグ情報の構造:
+        # [0]: 配列インデックス
+        # [1]: 負の行位置値
+        # [2-11]: 周辺のrow_positions値（前後5個）
+        # [12-51]: バイナリデータサンプル（40バイト）
+        
+        # 表示を10個に限定
+        display_limit = min(10, len(negative_debug_info))
+        print(f"表示: 最初の{display_limit}個のみ\n")
+        
+        for idx, info in enumerate(negative_debug_info[:display_limit]):
+            print(f"\n--- 負の行位置 {idx + 1} ---")
+            print(f"配列インデックス: {info[0]}")
+            print(f"負の値: {info[1]}")
+            
+            # 周辺のrow_positions値
+            print("周辺のrow_positions値 ([-5] 〜 [+4]):")
+            surrounding = []
+            for i in range(10):
+                val = info[2 + i]
+                if val == -999999999:
+                    surrounding.append("--")
+                else:
+                    surrounding.append(str(val))
+            print(f"  {' '.join(surrounding)}")
+            print(f"  {' '.join(['   '] * 5)}^ココが負の値")
+            
+            # バイナリデータサンプル
+            print(f"\nバイナリデータサンプル (配列インデックス{info[0]} * 4バイトかゕ40バイト):")
+            sample_bytes = []
+            ascii_chars = []
+            
+            for i in range(40):
+                if 12 + i < len(info):
+                    byte_val = info[12 + i]
+                    if byte_val >= 0:
+                        sample_bytes.append(f"{byte_val:02x}")
+                        # ASCII表示用
+                        if 32 <= byte_val <= 126:
+                            ascii_chars.append(chr(byte_val))
+                        else:
+                            ascii_chars.append(".")
+                    else:
+                        sample_bytes.append("--")
+                        ascii_chars.append(".")
+                else:
+                    sample_bytes.append("--")
+                    ascii_chars.append(".")
+            
+            # 16バイトごとに表示（HEXとASCII）
+            for i in range(0, 40, 16):
+                hex_str = " ".join(sample_bytes[i:i+16])
+                ascii_str = "".join(ascii_chars[i:i+16])
+                print(f"  HEX:   {hex_str}")
+                print(f"  ASCII: {ascii_str}")
+        
+        # JSON形式でも出力（テスト自動化用）
+        negative_data = []
+        for info in negative_debug_info[:display_limit]:
+            negative_entry = {
+                "array_index": int(info[0]),
+                "negative_value": int(info[1]),
+                "surrounding_positions": [],
+                "binary_sample": []
+            }
+            
+            # 周辺位置
+            for i in range(10):
+                val = info[2 + i]
+                if val != -999999999:
+                    negative_entry["surrounding_positions"].append(int(val))
+                else:
+                    negative_entry["surrounding_positions"].append(None)
+            
+            # バイナリサンプル
+            for i in range(40):
+                if 12 + i < len(info) and info[12 + i] >= 0:
+                    negative_entry["binary_sample"].append(int(info[12 + i]))
+            
+            negative_data.append(negative_entry)
+        
+        # JSONファイルに保存
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='_negative_pos_debug.json', delete=False) as f:
+            json.dump(negative_data, f, indent=2)
+            print(f"\n負の行位置デバッグ情報をJSONファイルに保存: {f.name}")
     
     def _print_performance_stats(
         self, 

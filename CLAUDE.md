@@ -38,8 +38,6 @@
 
 この哲学により、従来のCPU中心の処理を完全に刷新し、GPU本来の性能を100%引き出す革新的な実装を実現しています。
 
-[... rest of the existing content remains the same ...]
-
 ## Memories
 - **Memory**: Added memory section to track development insights and key project memories
 - **Environment Setup**: 毎回conda環境の設定で問題が発生。必ず`cudf_dev`環境を使用すること
@@ -56,5 +54,4 @@
 - **Producer-Consumer並列処理実装（2025/01）**: キューベースの並列処理で1.56倍高速化達成（74.77秒→47.95秒）。Rust転送とGPU処理を真の並列実行
 - **ログリファクタリング完了**: 詳細ログを削減し、最後に構造化された統計表示のみ出力。validate_parquet_output関数のサンプル表示は維持
 - **データ圧縮パース**: Apache Arrowベースの新規データ圧縮パース方式を研究開始（2025/03予定）
-
-[... rest of the existing content remains the same ...]
+- **to memorize**
