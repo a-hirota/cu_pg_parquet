@@ -171,8 +171,8 @@ def validate_and_extract_fields_lite(
                 return False, -4
 
             # 固定長フィールド検証
-            # 注：fixed_field_lengthsの長さは常に17（全フィールド分）
-            if (field_idx < 17 and
+            # 注：fixed_field_lengthsの長さはテーブルによって異なる
+            if (field_idx < expected_cols and
                 fixed_field_lengths[field_idx] > 0 and
                 flen != fixed_field_lengths[field_idx]):
                 return False, -5
@@ -529,6 +529,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
 
     # 推定行サイズ計算
     estimated_row_size = estimate_row_size_from_columns(columns)
+    if debug or test_mode:
+        print(f"[DEBUG] 推定行サイズ: {estimated_row_size} バイト (列数: {ncols})")
 
     # グリッド設定
     blocks_x, blocks_y, threads_per_block = calculate_optimal_grid_sm_aware(
@@ -540,8 +542,12 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
 
-    # 最大行数を実際のデータサイズに基づいて計算（1.2倍のマージンを持たせる）
-    max_rows = int((data_size // estimated_row_size) * 1.2)
+    # 最大行数を実際のデータサイズに基づいて計算
+    # PostgreSQLの平均行オーバーヘッド（24バイト）を考慮した最小行サイズで計算
+    min_row_size = max(40, estimated_row_size // 2)  # 推定の半分または40バイトの大きい方
+    max_rows = int((data_size // min_row_size) * 1.1)  # 10%のマージン
+    if debug or test_mode:
+        print(f"[DEBUG] max_rows計算: data_size={data_size}, estimated_row_size={estimated_row_size}, min_row_size={min_row_size}, max_rows={max_rows}")
     # 上限を設定（GPUメモリ制限のため）
     # 17列 × 4バイト × 5000万行 = 約3.4GB
     max_rows = min(max_rows, 50_000_000)  # 5000万行まで
