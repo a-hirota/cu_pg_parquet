@@ -35,6 +35,7 @@ MAX_QUEUE_SIZE = 3  # キューの最大サイズ
 
 # グローバル変数
 chunk_stats = []
+gpu_row_counts = {}  # GPU処理行数を保存（チャンクIDをキーとする辞書）
 shutdown_flag = threading.Event()
 
 
@@ -228,13 +229,14 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             # 処理統計
             rows = len(cudf_df) if cudf_df is not None else 0
             
-            # チャンクの偶奇を判定
-            chunk_parity = "偶数" if chunk_id % 2 == 0 else "奇数"
-            print(f"[Consumer-{consumer_id}] チャンク {chunk_id + 1} ({chunk_parity}チャンク) GPU処理完了 ({gpu_time:.1f}秒, {rows:,}行)")
+            # GPU処理行数を保存
+            gpu_row_counts[chunk_id] = rows
+            
+            print(f"[Consumer-{consumer_id}] チャンク {chunk_id + 1} GPU処理完了 ({gpu_time:.1f}秒, {rows:,}行)")
             
             # テストモードで追加情報を表示
             if os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1':
-                print(f"[CHUNK DEBUG] チャンク {chunk_id + 1} ({chunk_parity}): ")
+                print(f"[CHUNK DEBUG] チャンク {chunk_id + 1}: ")
                 print(f"  - ファイルサイズ: {file_size / 1024**2:.1f} MB")
                 print(f"  - 検出行数: {rows:,}行")
                 print(f"  - GPUパース時間: {detailed_timing.get('gpu_parsing', 0):.2f}秒")
@@ -288,13 +290,14 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
     print(f"[Consumer-{consumer_id}] 終了")
 
 
-def validate_parquet_output(file_path: str, num_rows: int = 5) -> bool:
+def validate_parquet_output(file_path: str, num_rows: int = 5, gpu_rows: int = None) -> bool:
     """
     Parquetファイルの検証とサンプル表示
     
     Args:
         file_path: 検証するParquetファイルのパス
         num_rows: 表示する行数
+        gpu_rows: GPU処理で検出した行数（比較用）
     
     Returns:
         検証成功の場合True
@@ -304,7 +307,14 @@ def validate_parquet_output(file_path: str, num_rows: int = 5) -> bool:
         table = pq.read_table(file_path)
         
         print(f"\n📊 Parquetファイル検証: {os.path.basename(file_path)}")
-        print(f"├─ 行数: {table.num_rows:,}")
+        print(f"├─ 行数: {table.num_rows:,}", end="")
+        if gpu_rows is not None:
+            if table.num_rows == gpu_rows:
+                print(f" ✅ OK (GPU処理行数と一致)")
+            else:
+                print(f" ❌ NG (GPU処理行数: {gpu_rows:,})")
+        else:
+            print()
         print(f"├─ 列数: {table.num_columns}")
         print(f"└─ ファイルサイズ: {os.path.getsize(file_path) / 1024**2:.2f} MB")
         
@@ -445,30 +455,6 @@ def main(total_chunks=8):
                       f" {stat['write_time']:>6.2f}秒 │{stat['rows']:>10,}行│")
             
             print(f"└{'─'*7}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*10}┴{'─'*12}┘")
-            
-            # テストモードで偶数/奇数チャンクの比較
-            if os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1':
-                print(f"\n【偶数/奇数チャンク比較】")
-                even_chunks = [s for s in sorted_stats if s['chunk_id'] % 2 == 0]
-                odd_chunks = [s for s in sorted_stats if s['chunk_id'] % 2 == 1]
-                
-                if even_chunks:
-                    even_rows = sum(s['rows'] for s in even_chunks)
-                    even_avg_rows = even_rows / len(even_chunks)
-                    even_avg_time = sum(s['gpu_time'] for s in even_chunks) / len(even_chunks)
-                    print(f"偶数チャンク: 平均{even_avg_rows:,.0f}行, 平均GPU時間{even_avg_time:.2f}秒")
-                    
-                if odd_chunks:
-                    odd_rows = sum(s['rows'] for s in odd_chunks)
-                    odd_avg_rows = odd_rows / len(odd_chunks)
-                    odd_avg_time = sum(s['gpu_time'] for s in odd_chunks) / len(odd_chunks)
-                    print(f"奇数チャンク: 平均{odd_avg_rows:,.0f}行, 平均GPU時間{odd_avg_time:.2f}秒")
-                
-                if even_chunks and odd_chunks:
-                    row_ratio = even_avg_rows / odd_avg_rows if odd_avg_rows > 0 else 0
-                    print(f"行数比率（偶数/奇数）: {row_ratio:.3f}")
-                    if row_ratio < 0.5:
-                        print("⚠️ 偶数チャンクの行数が異常に少ない可能性があります")
         
     except Exception as e:
         print(f"\n❌ エラー: {e}")
@@ -479,7 +465,9 @@ def main(total_chunks=8):
         # 性能測定完了後、サンプル検証を実行
         sample_parquet = "output/chunk_0_queue.parquet"
         if os.path.exists(sample_parquet):
-            validate_parquet_output(sample_parquet, num_rows=5)
+            # chunk_0のGPU処理行数を取得
+            gpu_rows_chunk0 = gpu_row_counts.get(0, None)
+            validate_parquet_output(sample_parquet, num_rows=5, gpu_rows=gpu_rows_chunk0)
             # Parquetファイルは出力ファイルなので保持
         
         cleanup_files(total_chunks)

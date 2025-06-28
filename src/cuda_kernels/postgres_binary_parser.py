@@ -655,12 +655,7 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 valid_count = int(cp.sum(valid_mask))
                 invalid_count = nrow - valid_count
                 
-                # 偶数/奇数位置の分布を確認
-                even_positions = cp.sum((row_positions_gpu % 2 == 0) & valid_mask)
-                odd_positions = cp.sum((row_positions_gpu % 2 == 1) & valid_mask)
-                
                 print(f"[SORT DEBUG] ソート前: 総行数={nrow}, 有効行数={valid_count}, 無効行数={invalid_count}")
-                print(f"[SORT DEBUG] 有効行の偶数位置={int(even_positions)}行, 奇数位置={int(odd_positions)}行")
                 
                 if invalid_count > 0:
                     # 無効な行の詳細を表示（最初の10個）
