@@ -473,6 +473,22 @@ def main(total_chunks=8, table_name=None):
             validate_parquet_output(sample_parquet, num_rows=5, gpu_rows=gpu_rows_chunk0)
             # Parquetファイルは出力ファイルなので保持
         
+        # 全Parquetファイルの実際の行数を確認
+        print("\n【Parquetファイル統計】")
+        actual_total_rows = 0
+        parquet_files = sorted(Path("output").glob("chunk_*_queue.parquet"))
+        for pf in parquet_files:
+            try:
+                table = pq.read_table(pf)
+                actual_total_rows += table.num_rows
+                print(f"├─ {pf.name}: {table.num_rows:,} 行")
+            except Exception as e:
+                print(f"├─ {pf.name}: 読み込みエラー - {e}")
+        print(f"└─ 実際の総行数: {actual_total_rows:,} 行")
+        
+        if actual_total_rows != results['total_rows']:
+            print(f"\n⚠️  行数不一致: GPU報告値 {results['total_rows']:,} vs Parquet実際値 {actual_total_rows:,}")
+        
         cleanup_files(total_chunks)
 
 

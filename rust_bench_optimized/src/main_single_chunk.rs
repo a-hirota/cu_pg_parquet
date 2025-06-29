@@ -68,13 +68,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // テーブルのページ数を取得
+    // テーブルのページ数を取得（正確な値を取得）
     let row = client.query_one(
-        &format!("SELECT relpages FROM pg_class WHERE relname='{}'", table_name), 
+        &format!("SELECT (pg_relation_size('{}'::regclass) / current_setting('block_size')::int)::int", table_name), 
         &[]
     ).await?;
     let max_page: i32 = row.get(0);
     let max_page = max_page as u32;
+    
+    // デバッグ情報（テストモード時のみ）
+    let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
+    if is_test_mode {
+        println!("チャンク{}: 総ページ数: {}", chunk_id, max_page);
+    }
     
     // カラム情報を取得（最初のチャンクのみ）
     let columns = if chunk_id == 0 {
@@ -130,7 +136,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (chunk_id + 1) as u32 * pages_per_chunk
     };
     
-    println!("ページ範囲: {} - {}", chunk_start_page, chunk_end_page);
+    if is_test_mode {
+        println!("ページ範囲: {} - {} (各チャンク: {}ページ)", chunk_start_page, chunk_end_page, pages_per_chunk);
+        
+        // 実際の行数を事前に確認（デバッグ用）
+        if chunk_id == 0 {
+            let count_row = client.query_one(
+                &format!("SELECT COUNT(*) FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid", 
+                    table_name, chunk_start_page, chunk_end_page),
+                &[]
+            ).await?;
+            let expected_rows: i64 = count_row.get(0);
+            println!("チャンク0の推定行数: {}", expected_rows);
+        }
+    } else {
+        println!("ページ範囲: {} - {}", chunk_start_page, chunk_end_page);
+    }
     
     // チャンクファイルを作成
     let chunk_path = format!("{}/chunk_{}.bin", OUTPUT_DIR, chunk_id);
@@ -247,7 +268,7 @@ async fn process_range(
     
     // COPY開始
     let copy_query = format!(
-        "COPY (SELECT * FROM {} WHERE ctid >= '({},0)'::tid AND ctid < '({},0)'::tid) TO STDOUT (FORMAT BINARY)",
+        "COPY (SELECT * FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid) TO STDOUT (FORMAT BINARY)",
         table_name, start_page, end_page
     );
     

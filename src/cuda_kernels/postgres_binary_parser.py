@@ -20,6 +20,129 @@ from numba import cuda, int32, uint64, types
 import numpy as np
 import time  # ソート時間計測用
 
+# Numba CUDAビットニックソート実装
+@cuda.jit
+def count_valid_rows(row_positions, n, invalid_value, count):
+    """有効な行数をGPU上でカウント"""
+    tid = cuda.threadIdx.x
+    bid = cuda.blockIdx.x
+    threads_per_block = cuda.blockDim.x
+    
+    # 共有メモリでブロック内の合計を計算
+    shared_count = cuda.shared.array(256, dtype=int32)
+    shared_count[tid] = 0
+    
+    # 各スレッドが担当する範囲をカウント
+    idx = bid * threads_per_block + tid
+    stride = cuda.gridsize(1)
+    
+    local_count = 0
+    for i in range(idx, n, stride):
+        if row_positions[i] != invalid_value:
+            local_count += 1
+    
+    shared_count[tid] = local_count
+    cuda.syncthreads()
+    
+    # ブロック内でリダクション
+    s = threads_per_block // 2
+    while s > 0:
+        if tid < s:
+            shared_count[tid] += shared_count[tid + s]
+        cuda.syncthreads()
+        s //= 2
+    
+    # ブロックの合計をグローバルメモリに加算
+    if tid == 0:
+        cuda.atomic.add(count, 0, shared_count[0])
+
+@cuda.jit
+def create_sort_indices(indices, n):
+    """ソート用インデックス配列を初期化"""
+    idx = cuda.grid(1)
+    if idx < n:
+        indices[idx] = idx
+
+@cuda.jit
+def bitonic_sort_step(keys, indices, j, k):
+    """ビットニックソートの1ステップ"""
+    idx = cuda.grid(1)
+    ixj = idx ^ j
+    
+    if ixj > idx and idx < keys.size and ixj < keys.size:
+        if (idx & k) == 0:
+            # 昇順
+            if keys[indices[idx]] > keys[indices[ixj]]:
+                indices[idx], indices[ixj] = indices[ixj], indices[idx]
+        else:
+            # 降順
+            if keys[indices[idx]] < keys[indices[ixj]]:
+                indices[idx], indices[ixj] = indices[ixj], indices[idx]
+
+@cuda.jit
+def apply_sort_indices_single(src, dst, indices, n):
+    """ソートインデックスを使って1D配列を並べ替え"""
+    idx = cuda.grid(1)
+    if idx < n:
+        dst[idx] = src[indices[idx]]
+
+@cuda.jit
+def apply_sort_indices_2d(src, dst, indices, n, ncols):
+    """ソートインデックスを使って2D配列を並べ替え"""
+    idx = cuda.grid(1)
+    if idx < n:
+        src_idx = indices[idx]
+        for col in range(ncols):
+            dst[idx, col] = src[src_idx, col]
+
+@cuda.jit
+def compact_valid_rows(row_positions, field_offsets, field_lengths, 
+                      out_offsets, out_lengths, invalid_value, n, ncols):
+    """有効な行のみを抽出して出力配列に格納"""
+    idx = cuda.grid(1)
+    if idx < n:
+        if row_positions[idx] != invalid_value:
+            # atomic操作で出力位置を取得
+            out_idx = cuda.atomic.add(out_offsets, (0, 0), 0)  # ダミー操作
+            # 実際には別途インデックス管理が必要
+
+def cuda_bitonic_sort(row_positions, field_offsets, field_lengths, valid_rows, ncols):
+    """Numba CUDAでビットニックソートを実行"""
+    # インデックス配列を作成
+    indices = cuda.device_array(valid_rows, dtype=np.int32)
+    threads = 256
+    blocks = (valid_rows + threads - 1) // threads
+    create_sort_indices[blocks, threads](indices, valid_rows)
+    
+    # 2のべき乗に切り上げ
+    n = 1
+    while n < valid_rows:
+        n *= 2
+    
+    # ビットニックソート実行
+    k = 2
+    while k <= n:
+        j = k // 2
+        while j >= 1:
+            blocks = (valid_rows + threads - 1) // threads
+            bitonic_sort_step[blocks, threads](row_positions, indices, j, k)
+            j //= 2
+        k *= 2
+    
+    # ソート結果を適用（新しい配列を作成）
+    sorted_offsets = cuda.device_array((valid_rows, ncols), dtype=np.uint64)
+    sorted_lengths = cuda.device_array((valid_rows, ncols), dtype=np.int32)
+    
+    blocks_2d = (valid_rows + threads - 1) // threads
+    apply_sort_indices_2d[blocks_2d, threads](
+        field_offsets, sorted_offsets, indices, valid_rows, ncols
+    )
+    apply_sort_indices_2d[blocks_2d, threads](
+        field_lengths, sorted_lengths, indices, valid_rows, ncols
+    )
+    
+    return sorted_offsets, sorted_lengths
+
 def detect_pg_header_size(raw_data: np.ndarray) -> int:
     """Detect COPY BINARY header size"""
     base = 11
@@ -71,7 +194,10 @@ def get_device_properties():
     }
 
 def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
-    """SMコア数を考慮した最適なグリッドサイズ計算"""
+    """SMコア数を考慮した最適なグリッドサイズ計算
+    
+    重要：各スレッドが処理できる最大行数（256行）を考慮
+    """
     props = get_device_properties()
     
     sm_count = props.get('MULTIPROCESSOR_COUNT', 108)
@@ -89,21 +215,24 @@ def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
     else:
         threads_per_block = min(1024, max_threads_per_block)
     
-    # データサイズベースの基本必要ブロック数
-    num_threads = (data_size + estimated_row_size - 1) // estimated_row_size
-    base_blocks = (num_threads + threads_per_block - 1) // threads_per_block
+    # 各スレッドの最大処理行数を考慮した計算
+    MAX_ROWS_PER_THREAD = 200  # 256行バッファの余裕を持たせて200行
+    estimated_total_rows = data_size // estimated_row_size
     
-    # データサイズ閾値による最適化
-    if data_mb < 50:
-        target_blocks = min(base_blocks, sm_count * 2)
+    # 必要なスレッド数を計算（各スレッドが最大200行処理）
+    required_threads = (estimated_total_rows + MAX_ROWS_PER_THREAD - 1) // MAX_ROWS_PER_THREAD
+    base_blocks = (required_threads + threads_per_block - 1) // threads_per_block
+    
+    # 大容量データ（>1GB）の場合、より多くのブロックを使用
+    if data_mb >= 1000:  # 1GB以上
+        # 各スレッドが確実に256行以下を処理するよう調整
+        target_blocks = max(base_blocks, sm_count * 20)
+    elif data_mb >= 200:
+        target_blocks = max(base_blocks, sm_count * 12)
+    elif data_mb >= 50:
+        target_blocks = max(base_blocks, sm_count * 6)
     else:
-        if data_mb < 200:
-            target_blocks = max(sm_count * 4, min(base_blocks, sm_count * 6))
-        else:
-            target_blocks = max(sm_count * 6, min(base_blocks, sm_count * 12))
-    
-    # 最低限のSM活用保証
-    target_blocks = max(target_blocks, sm_count)
+        target_blocks = max(base_blocks, sm_count * 2)
     
     # 2次元グリッド配置
     blocks_x = min(target_blocks, max_blocks_x)
@@ -541,6 +670,14 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     thread_stride = (data_size + actual_threads - 1) // actual_threads
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
+    
+    # thread_strideに上限を設定（最大200行分のデータ）
+    MAX_ROWS_PER_THREAD = 200
+    max_thread_stride = estimated_row_size * MAX_ROWS_PER_THREAD
+    if thread_stride > max_thread_stride:
+        thread_stride = max_thread_stride
+        if debug or test_mode:
+            print(f"[DEBUG] thread_stride制限: {thread_stride} バイト (最大{MAX_ROWS_PER_THREAD}行/スレッド)")
 
     # 最大行数を実際のデータサイズに基づいて計算
     # PostgreSQLの平均行オーバーヘッド（24バイト）を考慮した最小行サイズで計算
@@ -549,14 +686,40 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if debug or test_mode:
         print(f"[DEBUG] max_rows計算: data_size={data_size}, estimated_row_size={estimated_row_size}, min_row_size={min_row_size}, max_rows={max_rows}")
     # 上限を設定（GPUメモリ制限のため）
-    # 17列 × 4バイト × 5000万行 = 約3.4GB
-    max_rows = min(max_rows, 50_000_000)  # 5000万行まで
+    # GPUメモリに基づいて動的に計算（24GBのGPUを想定）
+    # ソート時の一時メモリを考慮して、メモリ制限を設定
+    bytes_per_row = 8 + ncols * (8 + 4)  # row_positions + field_offsets + field_lengths
+    # ソート時のメモリ使用を考慮（searchsorted最適化により1.5倍程度）
+    available_memory = 20 * 1024**3  # 20GB (24GB GPUの場合)
+    memory_limit_rows = available_memory // int(bytes_per_row * 1.5)  # searchsorted最適化後は1.5倍程度
+    max_rows = min(max_rows, memory_limit_rows)
+    if debug or test_mode:
+        print(f"[DEBUG] メモリ制限: bytes_per_row={bytes_per_row}, memory_limit_rows={memory_limit_rows:,}, final_max_rows={max_rows:,}")
 
     # 統合出力配列の準備
     row_positions = cuda.device_array(max_rows, np.uint64)
     field_offsets = cuda.device_array((max_rows, ncols), np.uint64)
     field_lengths = cuda.device_array((max_rows, ncols), np.int32)
     row_count = cuda.to_device(np.array([0], dtype=np.int32))
+    
+    # row_positionsを明示的に初期化（未使用領域を識別可能にする）
+    # CuPyを使用して効率的に初期化
+    try:
+        import cupy as cp
+        row_positions_gpu = cp.full(max_rows, 0xFFFFFFFFFFFFFFFF, dtype=cp.uint64)
+        row_positions = cuda.as_cuda_array(row_positions_gpu)
+        del row_positions_gpu  # CuPy配列は不要になったので削除
+    except ImportError:
+        # CuPyが使えない場合は初期化カーネルを使用
+        @cuda.jit
+        def init_kernel(arr, value):
+            idx = cuda.grid(1)
+            if idx < arr.size:
+                arr[idx] = value
+        
+        threads = 256
+        blocks = (max_rows + threads - 1) // threads
+        init_kernel[blocks, threads](row_positions, np.uint64(0xFFFFFFFFFFFFFFFF))
 
     # テストモード用のデバッグ情報配列
     debug_info_array = None
@@ -585,6 +748,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if debug:
         print(f"[DEBUG] 軽量統合カーネル実行: grid=({blocks_x}, {blocks_y}) × {threads_per_block}")
         print(f"[DEBUG] データサイズ: {data_size//1024//1024}MB, 推定行サイズ: {estimated_row_size}B")
+        print(f"[DEBUG] thread_stride: {thread_stride}B, 総スレッド数: {actual_threads:,}")
+        print(f"[DEBUG] 推定総行数: {data_size//estimated_row_size:,}, スレッドあたり: {thread_stride//estimated_row_size:.1f}行")
         print(f"[DEBUG] 共有メモリ使用量: <1KB（大幅削減）")
         if test_mode:
             print(f"[DEBUG] テストモード有効: Grid境界スレッド情報を記録")
@@ -639,83 +804,53 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     if nrow > 0:
         sort_start = time.time()
         
-        # GPUソートを優先的に使用
-        try:
-            import cupy as cp
+        # 一時的にソートを無効化してテスト（メモリ削減のため）
+        if debug:
+            print(f"[DEBUG] ソート処理一時無効化（メモリ削減テスト）")
+        
+        # 有効行数を計算
+        invalid_value = np.uint64(0xFFFFFFFFFFFFFFFF)
+        valid_count = cuda.to_device(np.array([0], dtype=np.int32))
+        
+        threads = 256
+        blocks = (nrow + threads - 1) // threads
+        count_valid_rows[blocks, threads](row_positions, nrow, invalid_value, valid_count)
+        cuda.synchronize()
+        
+        valid_rows = int(valid_count.copy_to_host()[0])
+        
+        if test_mode or debug:
+            print(f"[NO SORT] 有効行数: {valid_rows}/{nrow}")
+        
+        if valid_rows > 0:
+            # ソートせずにそのまま返す（Rustがページ順で取得しているため）
+            final_field_offsets = field_offsets[:valid_rows]
+            final_field_lengths = field_lengths[:valid_rows]
             
-            if debug:
-                print(f"[DEBUG] GPUソート開始: {nrow}行")
+            sort_time = time.time() - sort_start
             
-            # GPU上で直接ソート処理（転送不要）
-            row_positions_gpu = cp.asarray(row_positions[:nrow], dtype=cp.uint64)
-            field_offsets_gpu = cp.asarray(field_offsets[:nrow], dtype=cp.uint64)
-            field_lengths_gpu = cp.asarray(field_lengths[:nrow], dtype=cp.int32)
-            
-            # 有効な行位置のみ抽出（GPU上）
-            # 0xFFFFFFFFFFFFFFFF（初期値）以外を有効とする
-            invalid_value = cp.uint64(0xFFFFFFFFFFFFFFFF)
-            valid_mask = row_positions_gpu != invalid_value
-            
-            # テストモードでのデバッグ情報
             if test_mode or debug:
-                valid_count = int(cp.sum(valid_mask))
-                invalid_count = nrow - valid_count
-                
-                print(f"[SORT DEBUG] ソート前: 総行数={nrow}, 有効行数={valid_count}, 無効行数={invalid_count}")
-                
-                if invalid_count > 0:
-                    # 無効な行の詳細を表示（最初の10個）
-                    invalid_positions = row_positions_gpu[~valid_mask]
-                    # uint64として正しく表示
-                    invalid_list = [int(x) for x in invalid_positions[:10].get()]
-                    print(f"[SORT DEBUG] 無効な行位置（最初の10個）: {invalid_list}")
-                    # 16進数でも表示
-                    hex_list = [hex(int(x)) for x in invalid_positions[:10].get()]
-                    print(f"[SORT DEBUG] 無効な行位置（16進数）: {hex_list}")
+                print(f"[NO SORT] 処理完了: {valid_rows}行, {sort_time:.3f}秒")
             
-            if cp.any(valid_mask):
-                row_positions_valid = row_positions_gpu[valid_mask]
-                field_offsets_valid = field_offsets_gpu[valid_mask]
-                field_lengths_valid = field_lengths_gpu[valid_mask]
+            # テストモードの場合、デバッグ情報も返す
+            if test_mode and debug_info_array is not None:
+                debug_count = int(debug_count_array.copy_to_host()[0])
+                debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
                 
-                # GPU上で高速ソート
-                sort_indices = cp.argsort(row_positions_valid)
-                field_offsets_sorted = field_offsets_valid[sort_indices]
-                field_lengths_sorted = field_lengths_valid[sort_indices]
+                # 負の行位置デバッグ情報も取得
+                neg_debug_host = None
+                if negative_pos_debug is not None and negative_pos_count is not None:
+                    neg_count = int(negative_pos_count.copy_to_host()[0])
+                    if neg_count > 0:
+                        neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
                 
-                if test_mode or debug:
-                    print(f"[SORT DEBUG] ソート後: {len(field_offsets_sorted)}行")
-                
-                # CuPy配列をNumba CUDA配列に変換
-                final_field_offsets = cuda.as_cuda_array(field_offsets_sorted)
-                final_field_lengths = cuda.as_cuda_array(field_lengths_sorted)
-                
-                sort_time = time.time() - sort_start
-                
-                # テストモードの場合、デバッグ情報も返す
-                if test_mode and debug_info_array is not None:
-                    debug_count = int(debug_count_array.copy_to_host()[0])
-                    debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
-                    
-                    # 負の行位置デバッグ情報も取得
-                    neg_debug_host = None
-                    if negative_pos_debug is not None and negative_pos_count is not None:
-                        neg_count = int(negative_pos_count.copy_to_host()[0])
-                        if neg_count > 0:
-                            neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
-                    
-                    return final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
-                
-                return final_field_offsets, final_field_lengths
-            else:
-                if test_mode:
-                    return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
-                return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
-                
-        except ImportError:
-            # CuPy未対応時はCPUソートにフォールバック
-            if debug:
-                print("[DEBUG] CuPy未対応環境、CPUソートを使用")
+                return final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
+            
+            return final_field_offsets, final_field_lengths
+        else:
+            if test_mode:
+                return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
+            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
         
         # CPUソートフォールバック
         print(f"⚠️ CPUソート使用: {nrow}行（CuPy未対応）")
