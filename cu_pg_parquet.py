@@ -96,6 +96,19 @@ def main():
     output_dir = Path(args.output or args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # outputフォルダ内の.parquetファイルチェック
+    parquet_files = list(output_dir.glob("*.parquet"))
+    if parquet_files:
+        print(f"\n⚠️  outputフォルダ内に{len(parquet_files)}個の.parquetファイルが見つかりました。")
+        response = input("削除してもよろしいですか？ [y/n]: ")
+        if response.lower() == 'y':
+            for file in parquet_files:
+                file.unlink()
+            print(f"✅ {len(parquet_files)}個のファイルを削除しました。")
+        else:
+            print("処理を中断しました。")
+            return 1
+    
     # テストモードの環境変数設定
     if args.test:
         os.environ["GPUPGPARSER_TEST_MODE"] = "1"

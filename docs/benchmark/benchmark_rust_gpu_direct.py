@@ -486,6 +486,27 @@ def main(total_chunks=8, table_name=None):
                 print(f"├─ {pf.name}: 読み込みエラー - {e}")
         print(f"└─ 実際の総行数: {actual_total_rows:,} 行")
         
+        # --testモードの場合、PostgreSQLテーブル行数と比較
+        if os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
+            print("\n【PostgreSQLテーブル行数との比較】")
+            try:
+                # PostgreSQLのテーブル行数を取得
+                dsn = os.environ.get("GPUPASER_PG_DSN", "")
+                with psycopg.connect(dsn) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+                        pg_row_count = cur.fetchone()[0]
+                        print(f"psql -c \"SELECT COUNT(*) FROM {table_name};\"の結果: {pg_row_count:,} 行")
+                        
+                        # 比較結果を表示
+                        print(f"\n📊 Parquet全ファイル検証: ")
+                        if actual_total_rows == pg_row_count:
+                            print(f"├─ 行数: {actual_total_rows:,} OK (psqlと一致)")
+                        else:
+                            print(f"├─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
+            except Exception as e:
+                print(f"PostgreSQL行数取得エラー: {e}")
+        
         if actual_total_rows != results['total_rows']:
             print(f"\n⚠️  行数不一致: GPU報告値 {results['total_rows']:,} vs Parquet実際値 {actual_total_rows:,}")
         
