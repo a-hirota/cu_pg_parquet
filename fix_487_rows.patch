@@ -1,0 +1,15 @@
+--- postgres_binary_parser.py.orig
++++ postgres_binary_parser.py
+@@ -390,8 +390,10 @@
+         elif candidate_pos == -1:  # 行ヘッダ未発見
+             pos += 15
+             continue
+-        elif candidate_pos >= end_pos:  # 担当範囲外
+-            break
++        elif candidate_pos >= end_pos:  # 担当範囲外でも
++            # 行の開始位置が範囲内なら処理を継続
++            if candidate_pos - 2 < end_pos:  # 行ヘッダ(2B)が範囲内
++                pass  # 処理を継続
+ 
+         # === 2. 行検証+フィールド抽出の統合実行 ===
+         is_valid, row_end = validate_and_extract_fields_lite(

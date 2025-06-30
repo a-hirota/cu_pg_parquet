@@ -60,8 +60,8 @@ def main():
     parser.add_argument(
         "--chunks", 
         type=int, 
-        default=8,
-        help="チャンク数（デフォルト: 8）"
+        default=None,
+        help="チャンク数（指定しない場合は自動計算）"
     )
     parser.add_argument(
         "--output-dir",
@@ -107,8 +107,11 @@ def main():
     print(f"============================================================")
     print(f"テーブル: {args.table}")
     print(f"並列数: {args.parallel}")
-    print(f"チャンク数: {args.chunks}")
-    print(f"総タスク数: {args.parallel * args.chunks}")
+    if args.chunks:
+        print(f"チャンク数: {args.chunks}（手動指定）")
+        print(f"総タスク数: {args.parallel * args.chunks}")
+    else:
+        print(f"チャンク数: 自動計算")
     print(f"出力先: {output_dir}")
     print()
     
@@ -126,7 +129,11 @@ def main():
     
     try:
         # benchmark_rust_gpu_direct.pyのmain()を実行
-        benchmark_main(total_chunks=args.chunks, table_name=args.table)
+        # chunksがNoneの場合は自動計算させる
+        if args.chunks:
+            benchmark_main(total_chunks=args.chunks, table_name=args.table)
+        else:
+            benchmark_main(table_name=args.table)  # total_chunksを指定しない
         elapsed_time = time.time() - start_time
         print(f"\n処理完了: {elapsed_time:.2f}秒")
         return 0

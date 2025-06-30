@@ -32,7 +32,7 @@ from .cuda_kernels.gpu_config_utils import optimize_grid_size
 class DirectProcessor:
     """直接抽出プロセッサー（統合バッファ不使用）"""
     
-    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True, verbose: bool = False):
+    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True, verbose: bool = False, test_mode: bool = False):
         """
         初期化
         
@@ -40,10 +40,12 @@ class DirectProcessor:
             use_rmm: RMM (Rapids Memory Manager) を使用
             optimize_gpu: GPU最適化を有効化
             verbose: 詳細ログを出力
+            test_mode: テストモード（デバッグ情報を取得）
         """
         self.use_rmm = use_rmm
         self.optimize_gpu = optimize_gpu
         self.verbose = verbose
+        self.test_mode = test_mode
         self.extractor = DirectColumnExtractor()
         self.device_props = self._get_device_properties()
         
@@ -211,8 +213,8 @@ class DirectProcessor:
         if self.verbose:
             print("=== GPU並列パース開始 ===")
         
-        # テストモードチェック
-        test_mode = os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1'
+        # テストモードチェック（self.test_modeを優先）
+        test_mode = self.test_mode or os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1'
         
         from .cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2
         parse_result = parse_binary_chunk_gpu_ultra_fast_v2(
@@ -259,7 +261,15 @@ class DirectProcessor:
         # === 3. パフォーマンス統計 ===
         self._print_performance_stats(rows, len(columns), total_timing, len(raw_dev))
         
-        return cudf_df, total_timing
+        # test_modeの場合、デバッグ情報も返す
+        if test_mode:
+            # debug_infoが定義されているかチェック
+            debug_info_to_return = None
+            if 'debug_info' in locals() and debug_info is not None:
+                debug_info_to_return = debug_info
+            return cudf_df, total_timing, debug_info_to_return
+        else:
+            return cudf_df, total_timing
     
     def _print_grid_boundary_debug_info(self, debug_info: np.ndarray, raw_dev):
         """Grid境界スレッドのデバッグ情報を表示（テストモード用）"""
@@ -546,6 +556,7 @@ def postgresql_to_cudf_parquet_direct(
     use_rmm: bool = True,
     optimize_gpu: bool = True,
     verbose: bool = False,
+    test_mode: bool = False,
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
@@ -579,7 +590,8 @@ def postgresql_to_cudf_parquet_direct(
     processor = DirectProcessor(
         use_rmm=use_rmm, 
         optimize_gpu=optimize_gpu,
-        verbose=verbose
+        verbose=verbose,
+        test_mode=test_mode
     )
     
     return processor.process_postgresql_to_parquet(

@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // テーブルのページ数を取得（正確な値を取得）
+    // テーブルの最大ページ番号を取得
+    // pg_relation_sizeを使用して全ページ数を取得（空ページを含む）
     let row = client.query_one(
         &format!("SELECT (pg_relation_size('{}'::regclass) / current_setting('block_size')::int)::int", table_name), 
         &[]
@@ -127,14 +128,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new()
     };
     
-    // チャンクの範囲を計算
-    let pages_per_chunk = (max_page + 1) / total_chunks as u32;
+    // チャンクの範囲を計算（切り上げ除算で全ページをカバー）
+    // max_pageは総ページ数なので、切り上げ除算は不要
+    let pages_per_chunk = max_page / total_chunks as u32;
     let chunk_start_page = chunk_id as u32 * pages_per_chunk;
     let chunk_end_page = if chunk_id == total_chunks - 1 {
-        max_page + 1
+        max_page  // 最後のチャンクは実際の総ページ数まで
     } else {
         (chunk_id + 1) as u32 * pages_per_chunk
     };
+    
+    // デバッグ情報を追加
+    eprintln!("[DEBUG] チャンク{}: max_page={}, total_chunks={}, pages_per_chunk={}", 
+        chunk_id, max_page, total_chunks, pages_per_chunk);
+    eprintln!("[DEBUG] チャンク{}: start_page={}, end_page={}, ページ数={}", 
+        chunk_id, chunk_start_page, chunk_end_page, chunk_end_page - chunk_start_page);
     
     if is_test_mode {
         println!("ページ範囲: {} - {} (各チャンク: {}ページ)", chunk_start_page, chunk_end_page, pages_per_chunk);
@@ -196,7 +204,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workers_clone,
                 worker_offset_clone,
                 total_bytes_clone,
-                table_name_clone
+                table_name_clone,
+                chunk_id,
+                total_chunks
             ).await
         });
     }
@@ -216,11 +226,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
+    // デバッグ: ワーカーの書き込み位置を表示
+    if is_test_mode {
+        println!("\nワーカー書き込み位置:");
+        let w = workers.lock().unwrap();
+        for worker in w.iter() {
+            println!("  ワーカー{:2}: オフセット {:10} バイト ({:.2} GB)", 
+                worker.id, worker.offset, worker.size as f64 / 1024.0 / 1024.0 / 1024.0);
+        }
+    }
+    
     let elapsed = start.elapsed();
     let final_bytes = total_bytes.load(Ordering::Relaxed);
     let speed_gbps = final_bytes as f64 / elapsed.as_secs_f64() / 1024.0 / 1024.0 / 1024.0;
     
-    println!("チャンクサイズ: {:.2} GB", final_bytes as f64 / 1024.0 / 1024.0 / 1024.0);
+    println!("チャンク{}: サイズ: {:.2} GB ({} bytes)", 
+        chunk_id, final_bytes as f64 / 1024.0 / 1024.0 / 1024.0, final_bytes);
+    println!("チャンク{}: ページ範囲: {} - {} ({}ページ)", 
+        chunk_id, chunk_start_page, chunk_end_page, chunk_end_page - chunk_start_page);
     println!("処理時間: {:.2}秒", elapsed.as_secs_f64());
     println!("速度: {:.2} GB/秒", speed_gbps);
     
@@ -252,6 +275,8 @@ async fn process_range(
     worker_offset: Arc<AtomicU64>,
     total_bytes: Arc<AtomicU64>,
     table_name: String,
+    chunk_id: usize,
+    total_chunks: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (client, connection) = config.connect(NoTls).await?;
     
@@ -263,14 +288,23 @@ async fn process_range(
     
     // ワーカー用のバッファ
     let mut write_buffer = Vec::with_capacity(BUFFER_SIZE);
-    let worker_start_offset = worker_offset.load(Ordering::SeqCst);
     let mut worker_bytes = 0u64;
+    let mut worker_write_offset = 0u64;  // このワーカーの書き込み開始位置
     
     // COPY開始
-    let copy_query = format!(
-        "COPY (SELECT * FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid) TO STDOUT (FORMAT BINARY)",
-        table_name, start_page, end_page
-    );
+    let copy_query = if chunk_id == 0 && total_chunks == 1 {
+        // 1チャンクの場合はctid制限なし
+        format!(
+            "COPY {} TO STDOUT (FORMAT BINARY)",
+            table_name
+        )
+    } else {
+        // 複数チャンクの場合はctidで分割
+        format!(
+            "COPY (SELECT * FROM {} WHERE ctid >= '({},0)'::tid AND ctid < '({},0)'::tid) TO STDOUT (FORMAT BINARY)",
+            table_name, start_page, end_page
+        )
+    };
     
     let stream = client.copy_out(&copy_query).await?;
     futures_util::pin_mut!(stream);
@@ -283,6 +317,11 @@ async fn process_range(
         if write_buffer.len() >= BUFFER_SIZE {
             let bytes_to_write = write_buffer.len();
             let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
+            
+            // 最初の書き込み位置を記録
+            if worker_bytes == 0 {
+                worker_write_offset = write_offset;
+            }
             
             chunk_file.write_all_at(&write_buffer, write_offset)?;
             
@@ -298,18 +337,23 @@ async fn process_range(
         let bytes_to_write = write_buffer.len();
         let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
         
+        // 最初の書き込み位置を記録
+        if worker_bytes == 0 {
+            worker_write_offset = write_offset;
+        }
+        
         chunk_file.write_all_at(&write_buffer, write_offset)?;
         
         worker_bytes += bytes_to_write as u64;
         total_bytes.fetch_add(bytes_to_write as u64, Ordering::Relaxed);
     }
     
-    // ワーカーメタデータを保存
+    // ワーカーメタデータを保存（実際の書き込み開始位置を記録）
     {
         let mut w = workers.lock().unwrap();
         w.push(WorkerMeta {
             id: worker_id,
-            offset: worker_start_offset,
+            offset: worker_write_offset,
             size: worker_bytes,
         });
     }

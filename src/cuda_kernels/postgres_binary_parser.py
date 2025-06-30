@@ -96,15 +96,19 @@ def apply_sort_indices_2d(src, dst, indices, n, ncols):
             dst[idx, col] = src[src_idx, col]
 
 @cuda.jit
-def compact_valid_rows(row_positions, field_offsets, field_lengths, 
-                      out_offsets, out_lengths, invalid_value, n, ncols):
+def compact_valid_rows(row_positions, field_offsets_in, field_lengths_in, 
+                      field_offsets_out, field_lengths_out, 
+                      out_count, invalid_value, n, ncols):
     """有効な行のみを抽出して出力配列に格納"""
     idx = cuda.grid(1)
     if idx < n:
         if row_positions[idx] != invalid_value:
             # atomic操作で出力位置を取得
-            out_idx = cuda.atomic.add(out_offsets, (0, 0), 0)  # ダミー操作
-            # 実際には別途インデックス管理が必要
+            out_idx = cuda.atomic.add(out_count, 0, 1)
+            # 有効な行をコンパクトな配列にコピー
+            for col in range(ncols):
+                field_offsets_out[out_idx, col] = field_offsets_in[idx, col]
+                field_lengths_out[out_idx, col] = field_lengths_in[idx, col]
 
 def cuda_bitonic_sort(row_positions, field_offsets, field_lengths, valid_rows, ncols):
     """Numba CUDAでビットニックソートを実行"""
@@ -334,7 +338,7 @@ def parse_rows_and_fields_lite(
     row_positions,      # uint64[max_rows] - 行開始位置
     field_offsets,      # uint64[max_rows, ncols] - フィールド開始位置
     field_lengths,      # int32[max_rows, ncols] - フィールド長
-    row_count,          # int32[1] - 検出行数
+    row_count,          # uint64[1] - 検出行数
 
     # 設定
     thread_stride,
@@ -367,6 +371,10 @@ def parse_rows_and_fields_lite(
     # 担当範囲計算
     start_pos = uint64(header_size + tid * thread_stride)
     end_pos = uint64(header_size + (tid + 1) * thread_stride)
+    
+    # end_posがデータサイズを超えないように調整
+    if end_pos > raw_data.size:
+        end_pos = uint64(raw_data.size)
 
     if start_pos >= raw_data.size:
         return
@@ -487,7 +495,7 @@ def parse_rows_and_fields_lite_test(
     row_positions,      # uint64[max_rows] - 行開始位置
     field_offsets,      # uint64[max_rows, ncols] - フィールド開始位置
     field_lengths,      # int32[max_rows, ncols] - フィールド長
-    row_count,          # int32[1] - 検出行数
+    row_count,          # uint64[1] - 検出行数
 
     # 設定
     thread_stride,
@@ -519,6 +527,11 @@ def parse_rows_and_fields_lite_test(
     if cuda.blockIdx.y == 0 or cuda.blockIdx.y == cuda.gridDim.y - 1:
         is_grid_boundary = True
     
+    # 総スレッド数と最後のスレッドからの距離を計算
+    total_threads = cuda.gridDim.x * cuda.gridDim.y * cuda.blockDim.x
+    threads_from_end = total_threads - tid - 1
+    is_last_threads = threads_from_end < 10  # 最後の10スレッド
+    
     # 共有メモリ初期化
     if local_tid == 0:
         block_count[0] = 0
@@ -541,6 +554,23 @@ def parse_rows_and_fields_lite_test(
     
     # Grid境界スレッドの場合、最初の行情報を記録
     debug_recorded = False
+    last_thread_idx = -1  # 最後のスレッドのデバッグインデックス
+    
+    # 最後のスレッドの場合、開始情報を記録
+    if is_last_threads:
+        last_thread_idx = cuda.atomic.add(debug_count, 0, 1)
+        if last_thread_idx < 100:
+            # スレッド情報を記録（10-19の範囲を使用）
+            debug_info[last_thread_idx, 10] = tid  # Thread ID
+            debug_info[last_thread_idx, 11] = threads_from_end  # 最後から何番目
+            debug_info[last_thread_idx, 12] = uint64(start_pos)  # 開始位置
+            debug_info[last_thread_idx, 13] = uint64(end_pos)  # 終了位置
+            debug_info[last_thread_idx, 14] = uint64(raw_data.size)  # データサイズ
+            debug_info[last_thread_idx, 15] = thread_stride  # thread_stride
+            debug_info[last_thread_idx, 16] = -1  # 処理行数（後で更新）
+            debug_info[last_thread_idx, 17] = -1  # 最後の行位置（後で更新）
+            debug_info[last_thread_idx, 18] = -1  # データ終端検出位置（後で更新）
+            debug_info[last_thread_idx, 19] = total_threads  # 総スレッド数
     
     # 統合処理ループ
     while pos < end_pos:
@@ -548,6 +578,9 @@ def parse_rows_and_fields_lite_test(
         candidate_pos = read_uint16_simd16_lite(raw_data, pos, end_pos, ncols)
         
         if candidate_pos <= -2:  # データ終端
+            # 最後のスレッドの場合、終端位置を記録
+            if is_last_threads and last_thread_idx >= 0 and last_thread_idx < 100:
+                debug_info[last_thread_idx, 18] = uint64(pos)  # データ終端検出位置
             break
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
@@ -610,6 +643,12 @@ def parse_rows_and_fields_lite_test(
                 pos = candidate_pos + 1
         else:
             pos = candidate_pos + 1
+    
+    # 最後のスレッドの場合、処理結果を記録
+    if is_last_threads and last_thread_idx >= 0 and last_thread_idx < 100:
+        debug_info[last_thread_idx, 16] = local_count  # 処理行数
+        if local_count > 0:
+            debug_info[last_thread_idx, 17] = uint64(local_positions[local_count-1])  # 最後の行位置
     
     # 結果を直接グローバルメモリに書き込み
     if local_count > 0:
@@ -680,9 +719,9 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
             print(f"[DEBUG] thread_stride制限: {thread_stride} バイト (最大{MAX_ROWS_PER_THREAD}行/スレッド)")
 
     # 最大行数を実際のデータサイズに基づいて計算
-    # PostgreSQLの平均行オーバーヘッド（24バイト）を考慮した最小行サイズで計算
-    min_row_size = max(40, estimated_row_size // 2)  # 推定の半分または40バイトの大きい方
-    max_rows = int((data_size // min_row_size) * 1.1)  # 10%のマージン
+    # より現実的な行サイズで計算（推定値の80%を最小とする）
+    min_row_size = max(200, int(estimated_row_size * 0.8))  # 推定の80%または200バイトの大きい方
+    max_rows = int((data_size // min_row_size) * 1.2)  # 20%のマージン
     if debug or test_mode:
         print(f"[DEBUG] max_rows計算: data_size={data_size}, estimated_row_size={estimated_row_size}, min_row_size={min_row_size}, max_rows={max_rows}")
     # 上限を設定（GPUメモリ制限のため）
@@ -700,7 +739,7 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     row_positions = cuda.device_array(max_rows, np.uint64)
     field_offsets = cuda.device_array((max_rows, ncols), np.uint64)
     field_lengths = cuda.device_array((max_rows, ncols), np.int32)
-    row_count = cuda.to_device(np.array([0], dtype=np.int32))
+    row_count = cuda.to_device(np.array([0], dtype=np.uint64))
     
     # row_positionsを明示的に初期化（未使用領域を識別可能にする）
     # CuPyを使用して効率的に初期化
@@ -757,11 +796,13 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # カーネル実行
     grid_2d = (blocks_x, blocks_y)
     if test_mode:
-        # テストモードでも一旦本番カーネルを使用
-        parse_rows_and_fields_lite[grid_2d, threads_per_block](
+        # テストモード用カーネル（デバッグ情報取得）
+        parse_rows_and_fields_lite_test[grid_2d, threads_per_block](
             raw_dev, header_size, ncols,
             row_positions, field_offsets, field_lengths, row_count,
-            thread_stride, max_rows, fixed_field_lengths_dev
+            thread_stride, max_rows, fixed_field_lengths_dev,
+            debug_info_array, debug_count_array,
+            negative_pos_debug, negative_pos_count
         )
     else:
         # 本番用カーネル（性能影響なし）
@@ -782,6 +823,10 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"[DEBUG] max_rows={max_rows}, actual nrow={nrow}")
 
     if nrow == 0:
+        if test_mode and debug_info_array is not None:
+            debug_count = int(debug_count_array.copy_to_host()[0])
+            debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
+            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), debug_info_host, None
         return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
     
     # テストモードで負の行位置を分析
@@ -897,8 +942,18 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
             return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
     else:
-        if test_mode:
-            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
+        # test_modeでもデバッグ情報を返す
+        if test_mode and debug_info_array is not None:
+            debug_count = int(debug_count_array.copy_to_host()[0])
+            debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
+            
+            neg_debug_host = None
+            if negative_pos_debug is not None and negative_pos_count is not None:
+                neg_count = int(negative_pos_count.copy_to_host()[0])
+                if neg_count > 0:
+                    neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
+            
+            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), debug_info_host, neg_debug_host
         return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
 
 # エイリアス関数（後方互換性）
