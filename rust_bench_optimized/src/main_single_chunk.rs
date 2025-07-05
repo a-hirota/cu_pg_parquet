@@ -169,11 +169,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 並列タスクを作成
     let mut tasks = JoinSet::new();
-    let pages_per_task = (chunk_end_page - chunk_start_page) / parallel_connections as u32;
+    let total_pages = chunk_end_page - chunk_start_page;
+    let pages_per_task = total_pages / parallel_connections as u32;
     
     for worker_id in 0..parallel_connections {
         let start_page = chunk_start_page + (worker_id as u32 * pages_per_task);
         let end_page = if worker_id == parallel_connections - 1 {
+            // 最後のワーカーは残り全てを処理
             chunk_end_page
         } else {
             chunk_start_page + ((worker_id + 1) as u32 * pages_per_task)
@@ -263,7 +265,8 @@ async fn process_range(
     
     // ワーカー用のバッファ
     let mut write_buffer = Vec::with_capacity(BUFFER_SIZE);
-    let worker_start_offset = worker_offset.load(Ordering::SeqCst);
+    // 注意: worker_start_offsetは最初の書き込み時に決定される
+    let mut worker_start_offset: Option<u64> = None;
     let mut worker_bytes = 0u64;
     
     // COPY開始
@@ -284,6 +287,11 @@ async fn process_range(
             let bytes_to_write = write_buffer.len();
             let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
             
+            // 最初の書き込み時にstart_offsetを記録
+            if worker_start_offset.is_none() {
+                worker_start_offset = Some(write_offset);
+            }
+            
             chunk_file.write_all_at(&write_buffer, write_offset)?;
             
             worker_bytes += bytes_to_write as u64;
@@ -298,6 +306,11 @@ async fn process_range(
         let bytes_to_write = write_buffer.len();
         let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
         
+        // 最初の書き込み時にstart_offsetを記録
+        if worker_start_offset.is_none() {
+            worker_start_offset = Some(write_offset);
+        }
+        
         chunk_file.write_all_at(&write_buffer, write_offset)?;
         
         worker_bytes += bytes_to_write as u64;
@@ -309,7 +322,7 @@ async fn process_range(
         let mut w = workers.lock().unwrap();
         w.push(WorkerMeta {
             id: worker_id,
-            offset: worker_start_offset,
+            offset: worker_start_offset.unwrap_or(0),
             size: worker_bytes,
         });
     }

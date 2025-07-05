@@ -162,7 +162,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
     print("[Producer] 全チャンク転送完了")
 
 
-def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue):
+def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int):
     """GPU処理を実行するConsumerスレッド"""
     while not shutdown_flag.is_set():
         try:
@@ -211,6 +211,12 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             
             # 直接抽出処理
             chunk_output = f"output/chunk_{chunk_id}_queue.parquet"
+            
+            # 最後のチャンクかどうかを環境変数で設定
+            if chunk_id == total_chunks - 1:
+                os.environ['GPUPGPARSER_LAST_CHUNK'] = '1'
+            else:
+                os.environ['GPUPGPARSER_LAST_CHUNK'] = '0'
             
             cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
                 raw_dev=raw_dev,
@@ -350,7 +356,7 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
     # Consumerスレッド開始（1つのみ - GPUメモリ制約）
     consumer_thread = threading.Thread(
         target=gpu_consumer,
-        args=(chunk_queue, columns, 1, stats_queue)
+        args=(chunk_queue, columns, 1, stats_queue, total_chunks)
     )
     consumer_thread.start()
     

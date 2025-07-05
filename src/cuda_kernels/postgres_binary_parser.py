@@ -19,6 +19,7 @@ PostgreSQL Binary Parser (統合最適化版)
 from numba import cuda, int32, uint64, types
 import numpy as np
 import time  # ソート時間計測用
+import os  # 環境変数のチェック用
 
 # Numba CUDAビットニックソート実装
 @cuda.jit
@@ -682,7 +683,13 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # 最大行数を実際のデータサイズに基づいて計算
     # PostgreSQLの平均行オーバーヘッド（24バイト）を考慮した最小行サイズで計算
     min_row_size = max(40, estimated_row_size // 2)  # 推定の半分または40バイトの大きい方
-    max_rows = int((data_size // min_row_size) * 1.1)  # 10%のマージン
+    max_rows = int((data_size // min_row_size) * 1.2)  # 20%のマージン（10%から増加）
+    
+    # 最後のチャンクの場合は、さらに余裕を持たせる
+    if test_mode and os.environ.get('GPUPGPARSER_LAST_CHUNK', '0') == '1':
+        max_rows = int(max_rows * 1.1)  # さらに10%追加
+        print(f"[DEBUG] 最後のチャンク検出: max_rowsを10%増加")
+    
     if debug or test_mode:
         print(f"[DEBUG] max_rows計算: data_size={data_size}, estimated_row_size={estimated_row_size}, min_row_size={min_row_size}, max_rows={max_rows}")
     # 上限を設定（GPUメモリ制限のため）
@@ -790,10 +797,10 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         analyze_threads = 256  # 固定のスレッド数を使用
         analyze_blocks = (nrow + analyze_threads - 1) // analyze_threads
         print(f"[TEST MODE] analyze_negative_positions: blocks={analyze_blocks}, threads={analyze_threads}, nrow={nrow}")
-        # analyze_negative_positions[analyze_blocks, analyze_threads](
-        #     row_positions, nrow, raw_dev, negative_pos_debug, negative_pos_count
-        # )
-        # cuda.synchronize()
+        analyze_negative_positions[analyze_blocks, analyze_threads](
+            row_positions, nrow, raw_dev, negative_pos_debug, negative_pos_count
+        )
+        cuda.synchronize()
         
         neg_count = int(negative_pos_count.copy_to_host()[0])
         if neg_count > 0:
