@@ -80,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
     if is_test_mode {
         println!("チャンク{}: 総ページ数: {}", chunk_id, max_page);
+        println!("チャンク{}: 総チャンク数: {}", chunk_id, total_chunks);
     }
     
     // カラム情報を取得（最初のチャンクのみ）
@@ -137,7 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     if is_test_mode {
-        println!("ページ範囲: {} - {} (各チャンク: {}ページ)", chunk_start_page, chunk_end_page, pages_per_chunk);
+        println!("チャンク{}: ページ範囲: {} - {} (各チャンク: {}ページ)", 
+            chunk_id, chunk_start_page, chunk_end_page, pages_per_chunk);
+        println!("チャンク{}: 期待される行数 (ページ×53行/ページ): 約{}行", 
+            chunk_id, (chunk_end_page - chunk_start_page) * 53);
         
         // 実際の行数を事前に確認（デバッグ用）
         if chunk_id == 0 {
@@ -269,6 +273,13 @@ async fn process_range(
     let mut worker_start_offset: Option<u64> = None;
     let mut worker_bytes = 0u64;
     
+    // デバッグ情報（テストモード時のみ）
+    let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
+    if is_test_mode && worker_id == 0 {
+        println!("ワーカー{}: COPY範囲 ページ{} - {}", 
+            worker_id, start_page, end_page);
+    }
+    
     // COPY開始
     let copy_query = format!(
         "COPY (SELECT * FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid) TO STDOUT (FORMAT BINARY)",
@@ -315,6 +326,12 @@ async fn process_range(
         
         worker_bytes += bytes_to_write as u64;
         total_bytes.fetch_add(bytes_to_write as u64, Ordering::Relaxed);
+    }
+    
+    // ストリーミング完了ログ（テストモード時のみ）
+    if is_test_mode {
+        println!("ワーカー{}: ストリーミング完了。合計{}バイト転送 (ページ{} - {})", 
+            worker_id, worker_bytes, start_page, end_page);
     }
     
     // ワーカーメタデータを保存

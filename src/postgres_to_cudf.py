@@ -16,6 +16,7 @@ from numba import cuda
 import pylibcudf as plc
 import rmm
 from numba import uint8
+import os
 
 from .types import (
     ColumnMeta, INT16, INT32, INT64, FLOAT32, FLOAT64, DECIMAL128,
@@ -84,6 +85,7 @@ class DirectColumnExtractor:
     def extract_columns_direct(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
+        row_positions_dev: cuda.cudadrv.devicearray.DeviceNDArray,  # 追加
         field_offsets_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         field_lengths_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         columns: List[ColumnMeta],
@@ -96,6 +98,24 @@ class DirectColumnExtractor:
         """
         rows, ncols = field_offsets_dev.shape
         cudf_series_dict = {}
+        
+        # デバッグ：処理する列の概要を出力
+        if os.environ.get('GPUPGPARSER_TEST_MODE') == '1':
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"\n{prefix} === 列抽出処理開始 ===")
+            print(f"{prefix} 総列数: {len(columns)}")
+            fixed_cols = [c for c in columns if not c.is_variable]
+            string_cols = [c for c in columns if c.is_variable and (c.arrow_id == UTF8 or c.arrow_id == BINARY)]
+            print(f"{prefix} 固定長列: {len(fixed_cols)}個")
+            print(f"{prefix} 文字列列: {len(string_cols)}個")
+            if fixed_cols:
+                first_fixed = fixed_cols[0]
+                type_name = first_fixed.arrow_id.name if hasattr(first_fixed.arrow_id, 'name') else f"Type_{first_fixed.arrow_id}"
+                print(f"{prefix} 最初の固定長列: {first_fixed.name} ({type_name})")
+            if string_cols:
+                print(f"{prefix} 最初の文字列列: {string_cols[0].name}")
+            print(f"{prefix} =================\n")
         
         for col_idx, col in enumerate(columns):
             try:
@@ -110,8 +130,8 @@ class DirectColumnExtractor:
                 else:
                     # 固定長列：入力データから直接抽出
                     series = self._extract_fixed_column_direct(
-                        raw_dev, field_offsets_dev, field_lengths_dev,
-                        col, col_idx, rows
+                        raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
+                        col, col_idx, rows, columns
                     )
                 
                 cudf_series_dict[col.name] = series
@@ -125,11 +145,13 @@ class DirectColumnExtractor:
     def _extract_fixed_column_direct(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
+        row_positions_dev: cuda.cudadrv.devicearray.DeviceNDArray,  # 追加
         field_offsets_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         field_lengths_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         col: ColumnMeta,
         col_idx: int,
-        rows: int
+        rows: int,
+        columns: List[ColumnMeta] = None  # Decimal列判定用
     ) -> cudf.Series:
         """固定長列を入力データから直接抽出"""
         
@@ -183,26 +205,90 @@ class DirectColumnExtractor:
         )
         null_mask = cuda.as_cuda_array(null_mask_cupy)
         
-        # 直接抽出カーネルを実行
-        threads = 256
-        blocks = (rows + threads - 1) // threads
+        # 直接抽出カーネルを実行（2次元グリッド対応）
+        threads_per_block = 256
+        
+        # 2次元グリッドサイズ計算
+        max_blocks_x = self.device_props.get('max_grid_dim_x', 2147483647)
+        max_blocks_y = self.device_props.get('max_grid_dim_y', 65535)
+        
+        # まずは1行/1スレッドで計算
+        total_threads_needed = rows
+        blocks_x = min((total_threads_needed + threads_per_block - 1) // threads_per_block, max_blocks_x)
+        blocks_y = (total_threads_needed + blocks_x * threads_per_block - 1) // (blocks_x * threads_per_block)
+        
+        # Y次元の制限を超える場合は各スレッドが複数行処理
+        rows_per_thread = 1
+        if blocks_y > max_blocks_y:
+            # 最大グリッドサイズでの総スレッド数
+            max_total_threads = max_blocks_x * max_blocks_y * threads_per_block
+            rows_per_thread = (rows + max_total_threads - 1) // max_total_threads
+            blocks_y = min(blocks_y, max_blocks_y)
+        
+        # グリッド設定
+        grid = (blocks_x, blocks_y)
+        
+        # カーネル実行情報を出力（最初の固定長列のみ）
+        if os.environ.get('GPUPGPARSER_TEST_MODE') == '1' and col_idx == 0:
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"\n{prefix} ============================================================")
+            print(f"{prefix} Kernel Execution Info: _extract_fixed_direct (First Column)")
+            print(f"{prefix} ============================================================")
+            print(f"{prefix} Column: {col.name} (index: {col_idx})")
+            # arrow_idが整数の場合と列挙型の場合の両方に対応
+            data_type_name = col.arrow_id.name if hasattr(col.arrow_id, 'name') else f"Type_{col.arrow_id}"
+            print(f"{prefix} Data Type: {data_type_name}")
+            print(f"{prefix} Grid Dimensions: {grid}")
+            print(f"{prefix} Block Dimensions: {threads_per_block}")
+            print(f"{prefix} Total Blocks: {blocks_x * blocks_y:,}")
+            print(f"{prefix} Total Threads: {blocks_x * blocks_y * threads_per_block:,}")
+            print(f"{prefix} Rows per Thread: {rows_per_thread}")
+            print(f"{prefix} Total Rows: {rows:,}")
+            print(f"{prefix} ============================================================\n")
         
         if col.arrow_id == DECIMAL128:
+            # カーネル実行情報を出力（最初のDecimal列のみ）
+            if os.environ.get('GPUPGPARSER_TEST_MODE') == '1' and columns:
+                # Decimal列のカウントが必要（最初のDecimal列のみ出力）
+                is_first_decimal = True
+                for i in range(col_idx):
+                    if i < len(columns) and columns[i].arrow_id == DECIMAL128:
+                        is_first_decimal = False
+                        break
+                
+                if is_first_decimal:
+                    chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+                    prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+                    print(f"\n{prefix} ============================================================")
+                    print(f"{prefix} Kernel Execution Info: _extract_decimal_direct (First Decimal)")
+                    print(f"{prefix} ============================================================")
+                    print(f"{prefix} Column: {col.name} (index: {col_idx})")
+                    print(f"{prefix} Data Type: DECIMAL128")
+                    print(f"{prefix} Precision/Scale: {precision}/{decimal_scale}")
+                    print(f"{prefix} Grid Dimensions: {grid}")
+                    print(f"{prefix} Block Dimensions: {threads_per_block}")
+                    print(f"{prefix} Total Blocks: {blocks_x * blocks_y:,}")
+                    print(f"{prefix} Total Threads: {blocks_x * blocks_y * threads_per_block:,}")
+                    print(f"{prefix} Rows per Thread: {rows_per_thread}")
+                    print(f"{prefix} Total Rows: {rows:,}")
+                    print(f"{prefix} ============================================================\n")
+            
             # Decimal専用カーネル
-            self._extract_decimal_direct[blocks, threads](
-                raw_dev, field_offsets_dev, field_lengths_dev,
+            self._extract_decimal_direct[grid, threads_per_block](
+                raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
                 col_idx, column_buffer, null_mask,
                 self.d_pow10_table_lo, self.d_pow10_table_hi,
-                decimal_scale, rows
+                decimal_scale, rows, rows_per_thread
             )
         else:
             # その他の固定長型用カーネル
             # arrow_idの値を整数として渡す
             arrow_type_id = int(col.arrow_id)
-            self._extract_fixed_direct[blocks, threads](
-                raw_dev, field_offsets_dev, field_lengths_dev,
+            self._extract_fixed_direct[grid, threads_per_block](
+                raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
                 col_idx, arrow_type_id, col_size, 
-                column_buffer, null_mask, rows
+                column_buffer, null_mask, rows, rows_per_thread
             )
         
         cuda.synchronize()
@@ -215,158 +301,174 @@ class DirectColumnExtractor:
     @staticmethod
     @cuda.jit
     def _extract_fixed_direct(
-        raw_data, field_offsets, field_lengths,
+        raw_data, row_positions, field_offsets, field_lengths,
         col_idx, arrow_type, col_size,
-        output_buffer, null_mask, rows
+        output_buffer, null_mask, rows, rows_per_thread
     ):
-        """固定長データの直接抽出カーネル"""
-        row = cuda.grid(1)
-        if row >= rows:
-            return
+        """固定長データの直接抽出カーネル（2次元グリッド対応）"""
+        # 2次元グリッドからスレッドIDを計算
+        tid = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x + \
+              cuda.blockIdx.y * cuda.gridDim.x * cuda.blockDim.x
         
-        # フィールド情報取得
-        src_offset = field_offsets[row, col_idx]
-        field_length = field_lengths[row, col_idx]
+        # 各スレッドが処理する行範囲
+        start_row = tid * rows_per_thread
+        end_row = min(start_row + rows_per_thread, rows)
         
-        # NULL判定
-        is_null = (field_length == -1)
-        null_mask[row] = 0 if is_null else 1
-        
-        # 出力位置
-        dst_offset = row * col_size
-        
-        if is_null or src_offset == 0:
-            # NULLの場合はゼロで埋める
-            for i in range(col_size):
-                if dst_offset + i < output_buffer.size:
-                    output_buffer[dst_offset + i] = 0
-        else:
-            # データをコピー（エンディアン変換）
-            # INT32=1, FLOAT32=3, DATE32=9
-            if arrow_type == 1 or arrow_type == 3 or arrow_type == 9:
-                # 4バイト型：ビッグエンディアン→リトルエンディアン
-                if src_offset + 4 <= raw_data.size and dst_offset + 4 <= output_buffer.size:
-                    output_buffer[dst_offset] = raw_data[src_offset + 3]
-                    output_buffer[dst_offset + 1] = raw_data[src_offset + 2]
-                    output_buffer[dst_offset + 2] = raw_data[src_offset + 1]
-                    output_buffer[dst_offset + 3] = raw_data[src_offset]
+        # 複数行を処理
+        for row in range(start_row, end_row):
+            # フィールド情報取得（相対オフセットから絶対位置を計算）
+            row_start = row_positions[row]
+            relative_offset = field_offsets[row, col_idx]
+            src_offset = row_start + relative_offset  # uint64として計算
+            field_length = field_lengths[row, col_idx]
             
-            # INT64=2, FLOAT64=4, TS64_US=10
-            elif arrow_type == 2 or arrow_type == 4 or arrow_type == 10:
-                # 8バイト型：ビッグエンディアン→リトルエンディアン
-                if src_offset + 8 <= raw_data.size and dst_offset + 8 <= output_buffer.size:
-                    for i in range(8):
-                        output_buffer[dst_offset + i] = raw_data[src_offset + 7 - i]
+            # NULL判定
+            is_null = (field_length == -1)
+            null_mask[row] = 0 if is_null else 1
             
-            # INT16=11
-            elif arrow_type == 11:
-                # 2バイト型：ビッグエンディアン→リトルエンディアン
-                if src_offset + 2 <= raw_data.size and dst_offset + 2 <= output_buffer.size:
-                    output_buffer[dst_offset] = raw_data[src_offset + 1]
-                    output_buffer[dst_offset + 1] = raw_data[src_offset]
+            # 出力位置
+            dst_offset = row * col_size
             
-            # BOOL=8
-            elif arrow_type == 8:
-                # 1バイト型：そのままコピー
-                if src_offset < raw_data.size and dst_offset < output_buffer.size:
-                    output_buffer[dst_offset] = raw_data[src_offset]
+            if is_null or src_offset == 0:
+                # NULLの場合はゼロで埋める
+                for i in range(col_size):
+                    if dst_offset + i < output_buffer.size:
+                        output_buffer[dst_offset + i] = 0
+            else:
+                # データをコピー（エンディアン変換）
+                # INT32=1, FLOAT32=3, DATE32=9
+                if arrow_type == 1 or arrow_type == 3 or arrow_type == 9:
+                    # 4バイト型：ビッグエンディアン→リトルエンディアン
+                    if src_offset + 4 <= raw_data.size and dst_offset + 4 <= output_buffer.size:
+                        output_buffer[dst_offset] = raw_data[src_offset + 3]
+                        output_buffer[dst_offset + 1] = raw_data[src_offset + 2]
+                        output_buffer[dst_offset + 2] = raw_data[src_offset + 1]
+                        output_buffer[dst_offset + 3] = raw_data[src_offset]
+                
+                # INT64=2, FLOAT64=4, TS64_US=10
+                elif arrow_type == 2 or arrow_type == 4 or arrow_type == 10:
+                    # 8バイト型：ビッグエンディアン→リトルエンディアン
+                    if src_offset + 8 <= raw_data.size and dst_offset + 8 <= output_buffer.size:
+                        for i in range(8):
+                            output_buffer[dst_offset + i] = raw_data[src_offset + 7 - i]
+                
+                # INT16=11
+                elif arrow_type == 11:
+                    # 2バイト型：ビッグエンディアン→リトルエンディアン
+                    if src_offset + 2 <= raw_data.size and dst_offset + 2 <= output_buffer.size:
+                        output_buffer[dst_offset] = raw_data[src_offset + 1]
+                        output_buffer[dst_offset + 1] = raw_data[src_offset]
+                
+                # BOOL=8
+                elif arrow_type == 8:
+                    # 1バイト型：そのままコピー
+                    if src_offset < raw_data.size and dst_offset < output_buffer.size:
+                        output_buffer[dst_offset] = raw_data[src_offset]
     
     @staticmethod
     @cuda.jit
     def _extract_decimal_direct(
-        raw_data, field_offsets, field_lengths,
+        raw_data, row_positions, field_offsets, field_lengths,
         col_idx, output_buffer, null_mask,
         d_pow10_table_lo, d_pow10_table_hi,
-        target_scale, rows
+        target_scale, rows, rows_per_thread
     ):
-        """Decimal128データの直接抽出カーネル"""
-        row = cuda.grid(1)
-        if row >= rows:
-            return
+        """Decimal128データの直接抽出カーネル（2次元グリッド対応）"""
+        # 2次元グリッドからスレッドIDを計算
+        tid = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x + \
+              cuda.blockIdx.y * cuda.gridDim.x * cuda.blockDim.x
         
-        # フィールド情報取得
-        src_offset = field_offsets[row, col_idx]
-        field_length = field_lengths[row, col_idx]
+        # 各スレッドが処理する行範囲
+        start_row = tid * rows_per_thread
+        end_row = min(start_row + rows_per_thread, rows)
         
-        # NULL判定
-        is_null = (field_length == -1)
-        null_mask[row] = 0 if is_null else 1
-        
-        # 出力位置（16バイト）
-        dst_offset = row * 16
-        
-        if is_null or src_offset == 0:
-            # NULLの場合はゼロで埋める
-            for i in range(16):
-                if dst_offset + i < output_buffer.size:
-                    output_buffer[dst_offset + i] = 0
-        else:
-            # PostgreSQL NUMERICからDecimal128への変換
-            # （data_decoder.pyのparse_decimal_from_rawロジックを使用）
+        # 複数行を処理
+        for row in range(start_row, end_row):
+            # フィールド情報取得（相対オフセットから絶対位置を計算）
+            row_start = row_positions[row]
+            relative_offset = field_offsets[row, col_idx]
+            src_offset = row_start + relative_offset  # uint64として計算
+            field_length = field_lengths[row, col_idx]
             
-            # NUMERICヘッダ読み取り（8バイト）
-            if src_offset + 8 > raw_data.size:
+            # NULL判定
+            is_null = (field_length == -1)
+            null_mask[row] = 0 if is_null else 1
+            
+            # 出力位置（16バイト）
+            dst_offset = row * 16
+            
+            if is_null or src_offset == 0:
+                # NULLの場合はゼロで埋める
                 for i in range(16):
                     if dst_offset + i < output_buffer.size:
                         output_buffer[dst_offset + i] = 0
-                return
-            
-            nd = (raw_data[src_offset] << 8) | raw_data[src_offset + 1]
-            weight = (raw_data[src_offset + 2] << 8) | raw_data[src_offset + 3]
-            sign = (raw_data[src_offset + 4] << 8) | raw_data[src_offset + 5]
-            dscale = (raw_data[src_offset + 6] << 8) | raw_data[src_offset + 7]
-            
-            # NaN処理
-            if sign == 0xC000:
-                for i in range(16):
-                    if dst_offset + i < output_buffer.size:
-                        output_buffer[dst_offset + i] = 0
-                return
-            
-            # 桁数制限
-            if nd > 9:
-                for i in range(16):
-                    if dst_offset + i < output_buffer.size:
-                        output_buffer[dst_offset + i] = 0
-                return
-            
-            current_offset = src_offset + 8
-            
-            # 基数10000から128ビット整数への変換
-            val_hi = 0
-            val_lo = 0
-            
-            # 基数10000桁読み取り
-            for digit_idx in range(nd):
-                if current_offset + 2 > raw_data.size:
-                    break
+            else:
+                # PostgreSQL NUMERICからDecimal128への変換
+                # （data_decoder.pyのparse_decimal_from_rawロジックを使用）
                 
-                digit = (raw_data[current_offset] << 8) | raw_data[current_offset + 1]
-                current_offset += 2
+                # NUMERICヘッダ読み取り（8バイト）
+                if src_offset + 8 > raw_data.size:
+                    for i in range(16):
+                        if dst_offset + i < output_buffer.size:
+                            output_buffer[dst_offset + i] = 0
+                    continue
                 
-                # val = val * 10000 + digit
-                # 簡略化実装（完全な128ビット演算は複雑なため）
-                val_lo = val_lo * 10000 + digit
-                # TODO: 完全な128ビット演算実装
-            
-            # スケール調整（簡略化）
-            # TODO: 完全なスケール調整実装
-            
-            # 符号適用
-            if sign == 0x4000:  # 負数
-                # 2の補数
-                val_lo = ~val_lo + 1
-                val_hi = ~val_hi
-                if val_lo == 0:
-                    val_hi += 1
-            
-            # リトルエンディアンで書き込み
-            for i in range(8):
-                if dst_offset + i < output_buffer.size:
-                    output_buffer[dst_offset + i] = (val_lo >> (i * 8)) & 0xFF
-            for i in range(8):
-                if dst_offset + 8 + i < output_buffer.size:
-                    output_buffer[dst_offset + 8 + i] = (val_hi >> (i * 8)) & 0xFF
+                nd = (raw_data[src_offset] << 8) | raw_data[src_offset + 1]
+                weight = (raw_data[src_offset + 2] << 8) | raw_data[src_offset + 3]
+                sign = (raw_data[src_offset + 4] << 8) | raw_data[src_offset + 5]
+                dscale = (raw_data[src_offset + 6] << 8) | raw_data[src_offset + 7]
+                
+                # NaN処理
+                if sign == 0xC000:
+                    for i in range(16):
+                        if dst_offset + i < output_buffer.size:
+                            output_buffer[dst_offset + i] = 0
+                    continue
+                
+                # 桁数制限
+                if nd > 9:
+                    for i in range(16):
+                        if dst_offset + i < output_buffer.size:
+                            output_buffer[dst_offset + i] = 0
+                    continue
+                
+                current_offset = src_offset + 8
+                
+                # 基数10000から128ビット整数への変換
+                val_hi = 0
+                val_lo = 0
+                
+                # 基数10000桁読み取り
+                for digit_idx in range(nd):
+                    if current_offset + 2 > raw_data.size:
+                        break
+                    
+                    digit = (raw_data[current_offset] << 8) | raw_data[current_offset + 1]
+                    current_offset += 2
+                    
+                    # val = val * 10000 + digit
+                    # 簡略化実装（完全な128ビット演算は複雑なため）
+                    val_lo = val_lo * 10000 + digit
+                    # TODO: 完全な128ビット演算実装
+                
+                # スケール調整（簡略化）
+                # TODO: 完全なスケール調整実装
+                
+                # 符号適用
+                if sign == 0x4000:  # 負数
+                    # 2の補数
+                    val_lo = ~val_lo + 1
+                    val_hi = ~val_hi
+                    if val_lo == 0:
+                        val_hi += 1
+                
+                # リトルエンディアンで書き込み
+                for i in range(8):
+                    if dst_offset + i < output_buffer.size:
+                        output_buffer[dst_offset + i] = (val_lo >> (i * 8)) & 0xFF
+                for i in range(8):
+                    if dst_offset + 8 + i < output_buffer.size:
+                        output_buffer[dst_offset + 8 + i] = (val_hi >> (i * 8)) & 0xFF
     
     def _create_series_from_rmm_buffer(
         self,
@@ -707,6 +809,7 @@ class DirectColumnExtractor:
         columns: List[ColumnMeta],
         rows: int,
         raw_dev,
+        row_positions_dev,  # 追加
         field_offsets_dev,
         field_lengths_dev
     ) -> Dict[str, Any]:
@@ -750,8 +853,43 @@ class DirectColumnExtractor:
                 # Numbaカーネル用に変換
                 d_lengths_numba = cuda.as_cuda_array(lengths_cupy)
                 
-                # グリッドサイズの計算
-                blocks, threads = optimize_grid_size(0, rows, self.device_props)
+                # 2次元グリッドサイズの計算
+                threads_per_block = 256
+                max_blocks_x = self.device_props.get('max_grid_dim_x', 2147483647)
+                max_blocks_y = self.device_props.get('max_grid_dim_y', 65535)
+                
+                # まずは1行/1スレッドで計算
+                total_threads_needed = rows
+                blocks_x = min((total_threads_needed + threads_per_block - 1) // threads_per_block, max_blocks_x)
+                blocks_y = (total_threads_needed + blocks_x * threads_per_block - 1) // (blocks_x * threads_per_block)
+                
+                # Y次元の制限を超える場合は各スレッドが複数行処理
+                rows_per_thread = 1
+                if blocks_y > max_blocks_y:
+                    # 最大グリッドサイズでの総スレッド数
+                    max_total_threads = max_blocks_x * max_blocks_y * threads_per_block
+                    rows_per_thread = (rows + max_total_threads - 1) // max_total_threads
+                    blocks_y = min(blocks_y, max_blocks_y)
+                
+                # グリッド設定
+                grid = (blocks_x, blocks_y)
+                
+                # カーネル実行情報を出力（最初の文字列列のみ）
+                if os.environ.get('GPUPGPARSER_TEST_MODE') == '1' and col_idx == 0:
+                    chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+                    prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+                    print(f"\n{prefix} ============================================================")
+                    print(f"{prefix} Kernel Execution Info: copy_string_data_direct (First String)")
+                    print(f"{prefix} ============================================================")
+                    print(f"{prefix} Column: {col.name} (index: {actual_col_idx})")
+                    print(f"{prefix} Data Type: STRING")
+                    print(f"{prefix} Grid Dimensions: {grid}")
+                    print(f"{prefix} Block Dimensions: {threads_per_block}")
+                    print(f"{prefix} Total Blocks: {blocks_x * blocks_y:,}")
+                    print(f"{prefix} Total Threads: {blocks_x * blocks_y * threads_per_block:,}")
+                    print(f"{prefix} Rows per Thread: {rows_per_thread}")
+                    print(f"{prefix} Total Rows: {rows:,}")
+                    print(f"{prefix} ============================================================\n")
                 
                 @cuda.jit
                 def extract_lengths_coalesced(field_lengths, col_idx, lengths_out, num_rows):
@@ -760,7 +898,7 @@ class DirectColumnExtractor:
                     if row < num_rows:
                         lengths_out[row] = field_lengths[row, col_idx]
                 
-                extract_lengths_coalesced[blocks, threads](
+                extract_lengths_coalesced[grid, threads_per_block](
                     field_lengths_dev, actual_col_idx, d_lengths_numba, rows
                 )
                 cuda.synchronize()
@@ -808,38 +946,47 @@ class DirectColumnExtractor:
                 
                 @cuda.jit
                 def copy_string_data_direct(
-                    raw_data, field_offsets, field_lengths,
-                    col_idx, data_out, offsets, num_rows
+                    raw_data, row_positions, field_offsets, field_lengths,
+                    col_idx, data_out, offsets, num_rows, rows_per_thread
                 ):
                     """
-                    シンプルな直接コピーカーネル
+                    シンプルな直接コピーカーネル（2次元グリッド対応）
                     デバッグ用に最もシンプルな実装
                     """
-                    row = cuda.grid(1)
-                    if row >= num_rows:
-                        return
+                    # 2次元グリッドからスレッドIDを計算
+                    tid = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x + \
+                          cuda.blockIdx.y * cuda.gridDim.x * cuda.blockDim.x
                     
-                    field_offset = field_offsets[row, col_idx]
-                    field_length = field_lengths[row, col_idx]
-                    output_offset = offsets[row]
+                    # 各スレッドが処理する行範囲
+                    start_row = tid * rows_per_thread
+                    end_row = min(start_row + rows_per_thread, num_rows)
                     
-                    # NULL チェック
-                    if field_length <= 0:
-                        return
-                    
-                    # シンプルな直接コピー
-                    for i in range(field_length):
-                        src_idx = field_offset + i
-                        dst_idx = output_offset + i
+                    # 複数行を処理
+                    for row in range(start_row, end_row):
+                        # 相対オフセットから絶対位置を計算
+                        row_start = row_positions[row]
+                        relative_offset = field_offsets[row, col_idx]
+                        field_offset = row_start + relative_offset  # uint64として計算
+                        field_length = field_lengths[row, col_idx]
+                        output_offset = offsets[row]
                         
-                        # 境界チェック
-                        if (src_idx < raw_data.size and 
-                            dst_idx < data_out.size):
-                            data_out[dst_idx] = raw_data[src_idx]
+                        # NULL チェック
+                        if field_length <= 0:
+                            continue
+                        
+                        # シンプルな直接コピー
+                        for i in range(field_length):
+                            src_idx = field_offset + i
+                            dst_idx = output_offset + i
+                            
+                            # 境界チェック
+                            if (src_idx < raw_data.size and 
+                                dst_idx < data_out.size):
+                                data_out[dst_idx] = raw_data[src_idx]
                 
-                copy_string_data_direct[blocks, threads](
-                    raw_dev, field_offsets_dev, field_lengths_dev,
-                    actual_col_idx, d_data_numba, d_offsets_numba, rows
+                copy_string_data_direct[grid, threads_per_block](
+                    raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
+                    actual_col_idx, d_data_numba, d_offsets_numba, rows, rows_per_thread
                 )
                 cuda.synchronize()
                 

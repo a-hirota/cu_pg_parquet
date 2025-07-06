@@ -16,7 +16,7 @@ PostgreSQL Binary Parser (統合最適化版)
 - 統合最適化処理
 """
 
-from numba import cuda, int32, uint64, types
+from numba import cuda, int32, uint32, uint64, types
 import numpy as np
 import time  # ソート時間計測用
 import os  # 環境変数のチェック用
@@ -192,12 +192,31 @@ def get_device_properties():
         'MAX_THREADS_PER_BLOCK': device.MAX_THREADS_PER_BLOCK,
         'MAX_GRID_DIM_X': device.MAX_GRID_DIM_X,
         'MAX_GRID_DIM_Y': device.MAX_GRID_DIM_Y,
+        'WARP_SIZE': device.WARP_SIZE,
+        'MAX_SHARED_MEMORY_PER_BLOCK': device.MAX_SHARED_MEMORY_PER_BLOCK,
+        'COMPUTE_CAPABILITY': (device.COMPUTE_CAPABILITY_MAJOR, device.COMPUTE_CAPABILITY_MINOR),
+        'NAME': device.name.decode('utf-8') if hasattr(device.name, 'decode') else str(device.name),
     }
+
+def print_gpu_properties():
+    """GPU特性を表形式で表示"""
+    props = get_device_properties()
+    print("\n" + "="*60)
+    print("GPU Device Properties")
+    print("="*60)
+    print(f"Device Name:              {props.get('NAME', 'Unknown')}")
+    print(f"Compute Capability:       {props.get('COMPUTE_CAPABILITY', (0,0))[0]}.{props.get('COMPUTE_CAPABILITY', (0,0))[1]}")
+    print(f"SM (Multiprocessor) Count: {props.get('MULTIPROCESSOR_COUNT', 0)}")
+    print(f"Max Threads per Block:    {props.get('MAX_THREADS_PER_BLOCK', 0):,}")
+    print(f"Warp Size:               {props.get('WARP_SIZE', 32)}")
+    print(f"Max Grid Dimensions:     X={props.get('MAX_GRID_DIM_X', 0):,}, Y={props.get('MAX_GRID_DIM_Y', 0):,}")
+    print(f"Max Shared Memory/Block:  {props.get('MAX_SHARED_MEMORY_PER_BLOCK', 0):,} bytes")
+    print("="*60 + "\n")
 
 def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
     """SMコア数を考慮した最適なグリッドサイズ計算
     
-    重要：各スレッドが処理できる最大行数（256行）を考慮
+    データサイズとSMコア数に基づいて、最適な並列度を決定
     """
     props = get_device_properties()
     
@@ -216,17 +235,15 @@ def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
     else:
         threads_per_block = min(1024, max_threads_per_block)
     
-    # 各スレッドの最大処理行数を考慮した計算
-    MAX_ROWS_PER_THREAD = 200  # 256行バッファの余裕を持たせて200行
+    # 推定総行数から必要なスレッド数を計算
     estimated_total_rows = data_size // estimated_row_size
     
-    # 必要なスレッド数を計算（各スレッドが最大200行処理）
-    required_threads = (estimated_total_rows + MAX_ROWS_PER_THREAD - 1) // MAX_ROWS_PER_THREAD
-    base_blocks = (required_threads + threads_per_block - 1) // threads_per_block
+    # SM数とデータサイズに基づいてブロック数を決定
+    # 小さいデータでは各SMに少なくとも2ブロック、大きいデータではより多くのブロックを配置
+    base_blocks = sm_count * 2  # 最小でも各SMに2ブロック
     
     # 大容量データ（>1GB）の場合、より多くのブロックを使用
     if data_mb >= 1000:  # 1GB以上
-        # 各スレッドが確実に256行以下を処理するよう調整
         target_blocks = max(base_blocks, sm_count * 20)
     elif data_mb >= 200:
         target_blocks = max(base_blocks, sm_count * 12)
@@ -261,7 +278,7 @@ def read_uint16_simd16_lite(raw_data, pos, end_pos, ncols):
 @cuda.jit(device=True, inline=True)
 def validate_and_extract_fields_lite(
     raw_data, row_start, expected_cols, fixed_field_lengths,
-    field_offsets_out,  # この行のフィールド開始位置配列
+    field_offsets_out,  # この行のフィールド相対オフセット配列（uint32）
     field_lengths_out   # この行のフィールド長配列
 ):
     """
@@ -292,7 +309,7 @@ def validate_and_extract_fields_lite(
 
         # フィールド情報を即座に出力配列に記録
         if flen == 0xFFFFFFFF:  # NULL
-            field_offsets_out[field_idx] = 0
+            field_offsets_out[field_idx] = uint32(0)  # uint32にキャスト
             field_lengths_out[field_idx] = -1
             pos += 4
         else:
@@ -311,8 +328,10 @@ def validate_and_extract_fields_lite(
             if pos + 4 + flen > raw_data.size:
                 return False, -6
 
-            # フィールド情報記録
-            field_offsets_out[field_idx] = uint64(pos + 4)  # データ開始位置
+            # フィールド情報記録（相対オフセットとして保存）
+            # 注意: row_startからの相対位置を計算
+            relative_offset = uint32((pos + 4) - row_start)
+            field_offsets_out[field_idx] = relative_offset  # 行開始からの相対オフセット
             field_lengths_out[field_idx] = flen      # データ長
             pos += uint64(4 + flen)
 
@@ -333,7 +352,7 @@ def parse_rows_and_fields_lite(
 
     # 出力配列（直接書き込み）
     row_positions,      # uint64[max_rows] - 行開始位置
-    field_offsets,      # uint64[max_rows, ncols] - フィールド開始位置
+    field_offsets,      # uint32[max_rows, ncols] - 行開始位置からの相対オフセット
     field_lengths,      # int32[max_rows, ncols] - フィールド長
     row_count,          # int32[1] - 検出行数
 
@@ -374,7 +393,7 @@ def parse_rows_and_fields_lite(
 
     # ローカル結果バッファ（従来版と同じサイズ）
     local_positions = cuda.local.array(256, uint64)
-    local_field_offsets = cuda.local.array((256, 17), uint64)
+    local_field_offsets = cuda.local.array((256, 17), uint32)  # 相対オフセット用にuint32に変更
     local_field_lengths = cuda.local.array((256, 17), int32)
     local_count = 0
 
@@ -430,8 +449,128 @@ def parse_rows_and_fields_lite(
 
                 # フィールド情報
                 for j in range(min(ncols, 17)):
-                    field_offsets[global_idx, j] = local_field_offsets[i, j]
+                    field_offsets[global_idx, j] = local_field_offsets[i, j]  # uint32相対オフセット
                     field_lengths[global_idx, j] = local_field_lengths[i, j]
+
+
+@cuda.jit
+def parse_rows_and_fields_lite_debug(
+    raw_data,
+    header_size,
+    ncols,
+
+    # 出力配列（直接書き込み）
+    row_positions,      # uint64[max_rows] - 行開始位置
+    field_offsets,      # uint32[max_rows, ncols] - 行開始位置からの相対オフセット
+    field_lengths,      # int32[max_rows, ncols] - フィールド長
+    row_count,          # int32[1] - 検出行数
+
+    # 設定
+    thread_stride,
+    max_rows,
+    fixed_field_lengths,
+    
+    # デバッグ用
+    thread_debug_info,  # 各スレッドのデバッグ情報 [tid, start_pos, end_pos, row_count]
+    total_threads       # 総スレッド数
+):
+    """
+    デバッグ版カーネル: スレッド情報を記録
+    """
+    # 最小限の共有メモリ（<1KB）
+    block_count = cuda.shared.array(1, int32)
+
+    # スレッド・ブロック情報
+    tid = cuda.blockIdx.x * cuda.gridDim.y * cuda.blockDim.x + \
+          cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+    local_tid = cuda.threadIdx.x
+    
+    # デバッグモード：スレッドごとの検出行数
+    thread_row_count = 0
+
+    # 共有メモリ初期化
+    if local_tid == 0:
+        block_count[0] = 0
+
+    cuda.syncthreads()
+
+    # 担当範囲計算
+    start_pos = uint64(header_size + tid * thread_stride)
+    end_pos = uint64(header_size + (tid + 1) * thread_stride)
+
+    if start_pos >= raw_data.size:
+        # データ範囲外のスレッドも記録
+        if tid < total_threads:
+            thread_debug_info[tid, 0] = tid
+            thread_debug_info[tid, 1] = start_pos
+            thread_debug_info[tid, 2] = end_pos
+            thread_debug_info[tid, 3] = 0
+        return
+
+    # ローカル結果バッファ（従来版と同じサイズ）
+    local_positions = cuda.local.array(256, uint64)
+    local_field_offsets = cuda.local.array((256, 17), uint32)  # 相対オフセット用にuint32に変更
+    local_field_lengths = cuda.local.array((256, 17), int32)
+    local_count = 0
+
+    pos = uint64(start_pos)
+
+    # 統合処理ループ: 行検出+フィールド抽出を同時実行
+    while pos < end_pos:
+
+        # === 1. 行ヘッダ検出 ===
+        candidate_pos = read_uint16_simd16_lite(raw_data, pos, end_pos, ncols)
+
+        if candidate_pos <= -2:  # データ終端
+            break
+        elif candidate_pos == -1:  # 行ヘッダ未発見
+            pos += 15
+            continue
+        elif candidate_pos >= end_pos:  # 担当範囲外
+            break
+
+        # === 2. 行検証+フィールド抽出（統合） ===
+        is_valid, row_end = validate_and_extract_fields_lite(
+            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            local_field_offsets[local_count],
+            local_field_lengths[local_count]
+        )
+
+        if is_valid:
+            # 有効な行を検出
+            if local_count < 256:
+                local_positions[local_count] = uint64(candidate_pos)
+                local_count += 1
+            if row_end > 0:
+                pos = row_end
+            else:
+                pos = candidate_pos + 1
+        else:
+            pos = candidate_pos + 1
+
+    # 結果を直接グローバルメモリに書き込み
+    if local_count > 0:
+        # スレッドローカルの結果をatomic操作で確保
+        base_idx = cuda.atomic.add(row_count, 0, local_count)
+        thread_row_count = local_count  # デバッグ用
+
+        for i in range(local_count):
+            global_idx = base_idx + i
+            if global_idx < max_rows:
+                # 行位置
+                row_positions[global_idx] = local_positions[i]
+
+                # フィールド情報
+                for j in range(min(ncols, 17)):
+                    field_offsets[global_idx, j] = local_field_offsets[i, j]  # uint32相対オフセット
+                    field_lengths[global_idx, j] = local_field_lengths[i, j]
+    
+    # デバッグモード：スレッド情報を記録
+    if tid < total_threads:
+        thread_debug_info[tid, 0] = tid
+        thread_debug_info[tid, 1] = start_pos
+        thread_debug_info[tid, 2] = end_pos
+        thread_debug_info[tid, 3] = thread_row_count
 
 
 @cuda.jit
@@ -660,52 +799,110 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # 推定行サイズ計算
     estimated_row_size = estimate_row_size_from_columns(columns)
     if debug or test_mode:
-        print(f"[DEBUG] 推定行サイズ: {estimated_row_size} バイト (列数: {ncols})")
+        # チャンクIDから処理元を判定
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [DEBUG] 推定行サイズ: {estimated_row_size} バイト (列数: {ncols})")
 
-    # グリッド設定
-    blocks_x, blocks_y, threads_per_block = calculate_optimal_grid_sm_aware(
-        data_size, estimated_row_size
-    )
-
+    # グリッド設定（2次元グリッドで大規模データ対応）
+    props = get_device_properties()
+    max_blocks_x = props.get('MAX_GRID_DIM_X', 2147483647)
+    max_blocks_y = props.get('MAX_GRID_DIM_Y', 65535)
+    sm_count = props.get('MULTIPROCESSOR_COUNT', 108)
+    
+    # スレッドブロックサイズ
+    threads_per_block = 256  # 8ワープ
+    
+    # データサイズと推定行サイズから必要なスレッド数を計算
+    estimated_rows = data_size // estimated_row_size
+    target_threads = estimated_rows  # 1行1スレッドから開始
+    
+    # グリッドサイズ計算
+    blocks_x = min((target_threads + threads_per_block - 1) // threads_per_block, max_blocks_x)
+    blocks_y = (target_threads + blocks_x * threads_per_block - 1) // (blocks_x * threads_per_block)
+    
+    if test_mode:
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [GRID計算] target_threads={target_threads:,}, blocks_x={blocks_x:,}, blocks_y計算値={blocks_y:,}")
+    
+    # Y次元制限チェック
+    if blocks_y > max_blocks_y:
+        blocks_y = max_blocks_y
+    
+    # 最小ブロック数を確保（SMごとに複数ブロック）
+    # 大規模データの場合はこのチェックをスキップ
+    min_blocks = sm_count * 4  # 各SMに4ブロック
+    if blocks_x * blocks_y < min_blocks and blocks_y == 0:  # blocks_y==0の場合のみ（つまり実行されない）
+        blocks_x = min(min_blocks, max_blocks_x)
+        blocks_y = 1
+    
+    # 実験: blocks_yを強制的に設定してテスト
+    if test_mode and os.environ.get('GPUPGPARSER_TEST_BLOCKS_Y'):
+        test_blocks_y = int(os.environ.get('GPUPGPARSER_TEST_BLOCKS_Y', '2'))
+        old_blocks_y = blocks_y
+        blocks_y = test_blocks_y
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [TEST] blocks_yを{old_blocks_y}から{test_blocks_y}に変更")
+    
     actual_threads = blocks_x * blocks_y * threads_per_block
     thread_stride = (data_size + actual_threads - 1) // actual_threads
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
     
-    # thread_strideに上限を設定（最大200行分のデータ）
-    MAX_ROWS_PER_THREAD = 200
-    max_thread_stride = estimated_row_size * MAX_ROWS_PER_THREAD
-    if thread_stride > max_thread_stride:
-        thread_stride = max_thread_stride
+    
+    # thread_strideが大きい場合のワーニング（制限はしない）
+    rows_per_thread = thread_stride // estimated_row_size
+    if rows_per_thread > 200:
         if debug or test_mode:
-            print(f"[DEBUG] thread_stride制限: {thread_stride} バイト (最大{MAX_ROWS_PER_THREAD}行/スレッド)")
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"{prefix} ⚠️ WARNING: 各スレッドが処理する行数が多い: {rows_per_thread}行/スレッド (推奨: 200行以下)")
+            print(f"{prefix}            thread_stride={thread_stride:,} バイト, estimated_row_size={estimated_row_size} バイト")
+            if rows_per_thread > 256:
+                print(f"{prefix} ⚠️ CAUTION: ローカルバッファサイズ(256行)を超える可能性があります")
 
-    # 最大行数を実際のデータサイズに基づいて計算
-    # PostgreSQLの平均行オーバーヘッド（24バイト）を考慮した最小行サイズで計算
-    min_row_size = max(40, estimated_row_size // 2)  # 推定の半分または40バイトの大きい方
-    max_rows = int((data_size // min_row_size) * 1.2)  # 20%のマージン（10%から増加）
+    # 推定行数を計算
+    estimated_rows = data_size // estimated_row_size
+    
+    # バッファサイズは推定行数に少しのマージンを追加（5%程度）
+    max_rows = int(estimated_rows * 1.05)
     
     # 最後のチャンクの場合は、さらに余裕を持たせる
     if test_mode and os.environ.get('GPUPGPARSER_LAST_CHUNK', '0') == '1':
-        max_rows = int(max_rows * 1.1)  # さらに10%追加
-        print(f"[DEBUG] 最後のチャンク検出: max_rowsを10%増加")
+        max_rows = int(max_rows * 1.02)  # さらに2%追加
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [DEBUG] 最後のチャンク検出: max_rowsを2%増加")
     
     if debug or test_mode:
-        print(f"[DEBUG] max_rows計算: data_size={data_size}, estimated_row_size={estimated_row_size}, min_row_size={min_row_size}, max_rows={max_rows}")
-    # 上限を設定（GPUメモリ制限のため）
-    # GPUメモリに基づいて動的に計算（24GBのGPUを想定）
-    # ソート時の一時メモリを考慮して、メモリ制限を設定
-    bytes_per_row = 8 + ncols * (8 + 4)  # row_positions + field_offsets + field_lengths
-    # ソート時のメモリ使用を考慮（searchsorted最適化により1.5倍程度）
-    available_memory = 20 * 1024**3  # 20GB (24GB GPUの場合)
-    memory_limit_rows = available_memory // int(bytes_per_row * 1.5)  # searchsorted最適化後は1.5倍程度
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [DEBUG] estimated_rows計算: data_size={data_size:,}, estimated_row_size={estimated_row_size}, estimated_rows={estimated_rows:,}")
+    # GPUメモリ上限の確認
+    bytes_per_row = 8 + ncols * (4 + 4)  # row_positions(8) + field_offsets(4*ncols) + field_lengths(4*ncols)
+    available_memory = 20 * 1024**3  # 20GB (24GB GPUの場合、余裕を持たせて)
+    memory_limit_rows = available_memory // bytes_per_row  # ソート無効化中なので1.5倍係数は不要
     max_rows = min(max_rows, memory_limit_rows)
+    
     if debug or test_mode:
-        print(f"[DEBUG] メモリ制限: bytes_per_row={bytes_per_row}, memory_limit_rows={memory_limit_rows:,}, final_max_rows={max_rows:,}")
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        
+        # メモリ使用量の詳細表示
+        offsets_size = 4 * ncols
+        lengths_size = 4 * ncols
+        estimated_memory_mb = (bytes_per_row * estimated_rows) / (1024 * 1024)
+        actual_memory_mb = (bytes_per_row * max_rows) / (1024 * 1024)
+        
+        print(f"{prefix} [DEBUG] GPU行位置情報配列: 1行あたり{bytes_per_row}バイト (row_pos:8 + offsets:{offsets_size} + lengths:{lengths_size})")
+        print(f"{prefix} [DEBUG] 推定必要メモリ: {bytes_per_row}バイト × {estimated_rows:,}行 = {estimated_memory_mb:.0f}MB")
+        print(f"{prefix} [DEBUG] 実際の配列確保: {max_rows:,}行分 = {actual_memory_mb:.0f}MB (推定の{(max_rows/estimated_rows*100):.1f}%)")
 
     # 統合出力配列の準備
     row_positions = cuda.device_array(max_rows, np.uint64)
-    field_offsets = cuda.device_array((max_rows, ncols), np.uint64)
+    field_offsets = cuda.device_array((max_rows, ncols), np.uint32)  # 相対オフセット用にuint32に変更
     field_lengths = cuda.device_array((max_rows, ncols), np.int32)
     row_count = cuda.to_device(np.array([0], dtype=np.int32))
     
@@ -733,6 +930,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     debug_count_array = None
     negative_pos_debug = None
     negative_pos_count = None
+    thread_row_counts = None  # 各スレッドの検出行数
+    thread_debug_info = None  # スレッドデバッグ情報
     
     if test_mode:
         # デバッグ情報配列: 100エントリ × 100要素に拡張
@@ -743,6 +942,50 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         # [81]: validate_and_extract_fields_liteの戻り値（is_valid）
         # [82]: validate_and_extract_fields_liteの戻り値（row_end）
         # [83]: parse_rows_and_fields_liteでの検出行数
+        
+        # 各スレッドの検出行数を記録する配列を追加
+        thread_row_counts = cuda.device_array(actual_threads, np.int32)
+        # スレッドデバッグ情報配列を追加 [tid, start_pos, end_pos, row_count]
+        thread_debug_info = cuda.device_array((actual_threads, 4), np.int64)
+        
+        # 初期化
+        @cuda.jit
+        def init_thread_counts(arr):
+            idx = cuda.grid(1)
+            if idx < arr.size:
+                arr[idx] = 0
+        init_blocks = (actual_threads + 255) // 256
+        init_thread_counts[init_blocks, 256](thread_row_counts)
+        
+        # スレッドデバッグ情報も初期化
+        @cuda.jit
+        def init_thread_debug(arr):
+            idx = cuda.grid(1)
+            if idx < arr.shape[0]:
+                for j in range(4):
+                    arr[idx, j] = -1
+        init_thread_debug[init_blocks, 256](thread_debug_info)
+        
+        # スレッド行数統計を収集するカーネル
+        @cuda.jit
+        def analyze_thread_row_distribution(
+            row_positions, nrows, thread_stride, header_size, thread_counts
+        ):
+            """各スレッドが何行検出したかを分析"""
+            row_idx = cuda.grid(1)
+            if row_idx >= nrows:
+                return
+            
+            # この行の位置から担当スレッドを逆算
+            row_pos = row_positions[row_idx]
+            if row_pos < header_size:
+                return
+                
+            # どのスレッドが検出したか計算
+            thread_id = (row_pos - header_size) // thread_stride
+            if thread_id < thread_counts.size:
+                cuda.atomic.add(thread_counts, thread_id, 1)
+        
         # [84]: 負の行位置フラグ（1=負の値検出）
         # [85-99]: 予備領域
         debug_info_array = cuda.device_array((100, 100), np.int64)
@@ -753,22 +996,43 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         negative_pos_count = cuda.to_device(np.array([0], dtype=np.int32))
 
     if debug:
-        print(f"[DEBUG] 軽量統合カーネル実行: grid=({blocks_x}, {blocks_y}) × {threads_per_block}")
-        print(f"[DEBUG] データサイズ: {data_size//1024//1024}MB, 推定行サイズ: {estimated_row_size}B")
-        print(f"[DEBUG] thread_stride: {thread_stride}B, 総スレッド数: {actual_threads:,}")
-        print(f"[DEBUG] 推定総行数: {data_size//estimated_row_size:,}, スレッドあたり: {thread_stride//estimated_row_size:.1f}行")
-        print(f"[DEBUG] 共有メモリ使用量: <1KB（大幅削減）")
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [DEBUG] 軽量統合カーネル実行: grid=({blocks_x}, {blocks_y}) × {threads_per_block}")
+        print(f"{prefix} [DEBUG] データサイズ: {data_size//1024//1024}MB, 推定行サイズ: {estimated_row_size}B")
+        print(f"{prefix} [DEBUG] thread_stride: {thread_stride:,}B, 総スレッド数: {actual_threads:,}")
+        print(f"{prefix} [DEBUG] 推定総行数: {estimated_rows:,}, スレッドあたり: {thread_stride//estimated_row_size:.1f}行")
+        print(f"{prefix} [DEBUG] 共有メモリ使用量: <1KB（大幅削減）")
         if test_mode:
-            print(f"[DEBUG] テストモード有効: Grid境界スレッド情報を記録")
+            print(f"{prefix} [DEBUG] テストモード有効: Grid境界スレッド情報を記録")
 
     # カーネル実行
     grid_2d = (blocks_x, blocks_y)
+    
+    # テストモード時にカーネル実行情報を表示
     if test_mode:
-        # テストモードでも一旦本番カーネルを使用
-        parse_rows_and_fields_lite[grid_2d, threads_per_block](
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"\n{prefix} " + "="*60)
+        print(f"{prefix} Kernel Execution Info: parse_rows_and_fields_lite")
+        print(f"{prefix} " + "="*60)
+        print(f"{prefix} Data Size:               {data_size:,} bytes ({data_size/1024/1024:.1f} MB)")
+        print(f"{prefix} Grid Dimensions:         ({blocks_x}, {blocks_y})")
+        print(f"{prefix} Block Dimensions:        {threads_per_block}")
+        print(f"{prefix} Total Blocks:            {blocks_x * blocks_y:,}")
+        print(f"{prefix} Total Threads:           {blocks_x * blocks_y * threads_per_block:,}")
+        print(f"{prefix} Thread Stride:           {thread_stride:,} bytes")
+        print(f"{prefix} Estimated Rows:          {estimated_rows:,}")
+        print(f"{prefix} Estimated Rows/Thread:   {thread_stride//estimated_row_size:.1f}")
+        print(f"{prefix} " + "="*60 + "\n")
+    
+    if test_mode:
+        # テストモードではデバッグカーネルを使用
+        parse_rows_and_fields_lite_debug[grid_2d, threads_per_block](
             raw_dev, header_size, ncols,
             row_positions, field_offsets, field_lengths, row_count,
-            thread_stride, max_rows, fixed_field_lengths_dev
+            thread_stride, max_rows, fixed_field_lengths_dev,
+            thread_debug_info, actual_threads  # デバッグ用追加パラメータ
         )
     else:
         # 本番用カーネル（性能影響なし）
@@ -783,28 +1047,120 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     nrow = int(row_count.copy_to_host()[0])
 
     if debug or test_mode:
-        print(f"[DEBUG] 軽量統合処理完了: {nrow}行 (メモリ読み込み1回のみ)")
-        if debug:
-            print(f"[DEBUG] メモリ効率: 50%向上（重複アクセス排除）")
-        print(f"[DEBUG] max_rows={max_rows}, actual nrow={nrow}")
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} [DEBUG] 検出行数: {nrow:,}行 (バッファ: {max_rows:,}行)")
+        
+        # テストモードでスレッド行数分布を分析
+        if test_mode and thread_row_counts is not None and nrow > 0:
+            # 分析カーネルを実行
+            analyze_blocks = (nrow + 255) // 256
+            analyze_thread_row_distribution[analyze_blocks, 256](
+                row_positions, nrow, thread_stride, header_size, thread_row_counts
+            )
+            cuda.synchronize()
+            
+            # 結果を取得して分析
+            thread_counts_host = thread_row_counts.copy_to_host()
+            
+            # 統計を計算
+            threads_with_data = np.count_nonzero(thread_counts_host)
+            max_rows_per_thread = np.max(thread_counts_host)
+            threads_with_2plus = np.sum(thread_counts_host >= 2)
+            threads_with_5plus = np.sum(thread_counts_host >= 5)
+            threads_with_10plus = np.sum(thread_counts_host >= 10)
+            
+            print(f"{prefix} [THREAD分析] スレッド行数分布:")
+            print(f"{prefix}   - 総スレッド数: {actual_threads:,}")
+            print(f"{prefix}   - 行を検出したスレッド: {threads_with_data:,} ({threads_with_data/actual_threads*100:.1f}%)")
+            print(f"{prefix}   - 最大行数/スレッド: {max_rows_per_thread}")
+            print(f"{prefix}   - 2行以上検出: {threads_with_2plus:,}スレッド")
+            print(f"{prefix}   - 5行以上検出: {threads_with_5plus:,}スレッド")
+            print(f"{prefix}   - 10行以上検出: {threads_with_10plus:,}スレッド")
+            
+            # 分布のヒストグラムを簡易表示
+            if max_rows_per_thread > 0:
+                hist, bins = np.histogram(thread_counts_host[thread_counts_host > 0], 
+                                        bins=min(10, max_rows_per_thread))
+                print(f"{prefix}   - 行数分布:")
+                for i in range(len(hist)):
+                    if hist[i] > 0:
+                        print(f"{prefix}     {int(bins[i])}-{int(bins[i+1])}行: {hist[i]:,}スレッド")
+            
+            # スレッドデバッグ情報を出力
+            if thread_debug_info is not None:
+                thread_debug_host = thread_debug_info.copy_to_host()
+                
+                # 最初の10スレッド
+                print(f"{prefix} [DEBUG] 最初の10スレッド:")
+                for i in range(min(10, actual_threads)):
+                    tid = int(thread_debug_host[i, 0])
+                    start_pos = int(thread_debug_host[i, 1])
+                    end_pos = int(thread_debug_host[i, 2])
+                    row_count = int(thread_debug_host[i, 3])
+                    print(f"{prefix}   スレッド{tid}: start_pos={start_pos:,}, end_pos={end_pos:,}, 検出行数={row_count}")
+                
+                # 最後の10スレッド
+                print(f"{prefix} [DEBUG] 最後の10スレッド:")
+                start_idx = max(0, actual_threads - 10)
+                for i in range(start_idx, actual_threads):
+                    tid = int(thread_debug_host[i, 0])
+                    start_pos = int(thread_debug_host[i, 1])
+                    end_pos = int(thread_debug_host[i, 2])
+                    row_count = int(thread_debug_host[i, 3])
+                    print(f"{prefix}   スレッド{tid}: start_pos={start_pos:,}, end_pos={end_pos:,}, 検出行数={row_count}")
+                
+                # 0件検出スレッド（最初の10個）
+                zero_count_threads = []
+                for i in range(actual_threads):
+                    if int(thread_debug_host[i, 3]) == 0:
+                        zero_count_threads.append(i)
+                        if len(zero_count_threads) >= 10:
+                            break
+                
+                if zero_count_threads:
+                    print(f"{prefix} [DEBUG] 0件検出スレッド（最初の10個）:")
+                    for i in zero_count_threads[:10]:
+                        tid = int(thread_debug_host[i, 0])
+                        start_pos = int(thread_debug_host[i, 1])
+                        end_pos = int(thread_debug_host[i, 2])
+                        print(f"{prefix}   スレッド{tid}: start_pos={start_pos:,}, end_pos={end_pos:,}")
+                
+                # データ終端付近の情報
+                print(f"{prefix} [DEBUG] データサイズ: {data_size:,}")
+                print(f"{prefix} [DEBUG] 最終スレッドのend_pos: {int(thread_debug_host[actual_threads-1, 2]):,}")
+                if int(thread_debug_host[actual_threads-1, 2]) > data_size:
+                    print(f"{prefix} [DEBUG] ⚠️  最終スレッドがデータ終端を超えています")
+    
+    # max_rowsを超えた場合のワーニング
+    if nrow > max_rows:
+        chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+        prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+        print(f"{prefix} ⚠️ WARNING: 検出行数({nrow:,})がバッファサイズ({max_rows:,})を超えています！")
+        print(f"{prefix}           切り捨てられた行数: {nrow - max_rows:,}行")
+        print(f"{prefix}           実際の処理行数: {min(nrow, max_rows):,}行")
 
     if nrow == 0:
-        return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
+        return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
     
-    # テストモードで負の行位置を分析
-    if test_mode and negative_pos_debug is not None and negative_pos_count is not None:
-        # 負の行位置分析カーネルを実行（一時的に無効化）
-        analyze_threads = 256  # 固定のスレッド数を使用
-        analyze_blocks = (nrow + analyze_threads - 1) // analyze_threads
-        print(f"[TEST MODE] analyze_negative_positions: blocks={analyze_blocks}, threads={analyze_threads}, nrow={nrow}")
-        analyze_negative_positions[analyze_blocks, analyze_threads](
-            row_positions, nrow, raw_dev, negative_pos_debug, negative_pos_count
-        )
-        cuda.synchronize()
-        
-        neg_count = int(negative_pos_count.copy_to_host()[0])
-        if neg_count > 0:
-            print(f"[NEGATIVE POS DEBUG] {neg_count}個の負の行位置を検出（最大50個まで記録）")
+    # テストモードで負の行位置を分析（現在はコメントアウト）
+    # if test_mode and negative_pos_debug is not None and negative_pos_count is not None:
+    #     # 負の行位置分析カーネルを実行
+    #     analyze_threads = 256
+    #     analyze_blocks = (nrow + analyze_threads - 1) // analyze_threads
+    #     chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+    #     prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+    #     print(f"{prefix} [TEST MODE] 負の行位置分析: {nrow:,}行 ÷ {analyze_threads}スレッド/ブロック = {analyze_blocks:,}ブロック")
+    #     analyze_negative_positions[analyze_blocks, analyze_threads](
+    #         row_positions, nrow, raw_dev, negative_pos_debug, negative_pos_count
+    #     )
+    #     cuda.synchronize()
+    #     
+    #     neg_count = int(negative_pos_count.copy_to_host()[0])
+    #     if neg_count > 0:
+    #         chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+    #         prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+    #         print(f"{prefix} [NEGATIVE POS DEBUG] {neg_count}個の負の行位置を検出（最大50個まで記録）")
 
     # GPUソート優先処理（閾値なし）
     # 行位置とフィールド情報を同期してソート
@@ -813,7 +1169,9 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         
         # 一時的にソートを無効化してテスト（メモリ削減のため）
         if debug:
-            print(f"[DEBUG] ソート処理一時無効化（メモリ削減テスト）")
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"{prefix} [DEBUG] ソート処理一時無効化（メモリ削減テスト）")
         
         # 有効行数を計算
         invalid_value = np.uint64(0xFFFFFFFFFFFFFFFF)
@@ -827,17 +1185,22 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         valid_rows = int(valid_count.copy_to_host()[0])
         
         if test_mode or debug:
-            print(f"[NO SORT] 有効行数: {valid_rows}/{nrow}")
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"{prefix} [NO SORT] 有効行数: {valid_rows}/{nrow}")
         
         if valid_rows > 0:
             # ソートせずにそのまま返す（Rustがページ順で取得しているため）
+            final_row_positions = row_positions[:valid_rows]
             final_field_offsets = field_offsets[:valid_rows]
             final_field_lengths = field_lengths[:valid_rows]
             
             sort_time = time.time() - sort_start
             
             if test_mode or debug:
-                print(f"[NO SORT] 処理完了: {valid_rows}行, {sort_time:.3f}秒")
+                chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+                prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+                print(f"{prefix} [NO SORT] 処理完了: {valid_rows}行, {sort_time:.3f}秒")
             
             # テストモードの場合、デバッグ情報も返す
             if test_mode and debug_info_array is not None:
@@ -851,13 +1214,13 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                     if neg_count > 0:
                         neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
                 
-                return final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
+                return final_row_positions, final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
             
-            return final_field_offsets, final_field_lengths
+            return final_row_positions, final_field_offsets, final_field_lengths
         else:
             if test_mode:
-                return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
-            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
+                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), None, None
+            return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
         
         # CPUソートフォールバック
         print(f"⚠️ CPUソート使用: {nrow}行（CuPy未対応）")
@@ -875,9 +1238,11 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
             field_lengths_valid = field_lengths_host[valid_indices]
             
             sort_indices = np.argsort(row_positions_valid)
+            row_positions_sorted = row_positions_valid[sort_indices]
             field_offsets_sorted = field_offsets_valid[sort_indices]
             field_lengths_sorted = field_lengths_valid[sort_indices]
             
+            final_row_positions = cuda.to_device(row_positions_sorted)
             final_field_offsets = cuda.to_device(field_offsets_sorted)
             final_field_lengths = cuda.to_device(field_lengths_sorted)
             
@@ -896,13 +1261,13 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                     if neg_count > 0:
                         neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
                 
-                return final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
+                return final_row_positions, final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
             
-            return final_field_offsets, final_field_lengths
+            return final_row_positions, final_field_offsets, final_field_lengths
         else:
             if test_mode:
-                return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
-            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
+                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), None, None
+            return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
     else:
         if test_mode:
             return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
@@ -924,6 +1289,7 @@ __all__ = [
     "parse_binary_chunk_gpu_ultra_fast_v2_integrated",
     "estimate_row_size_from_columns",
     "get_device_properties",
+    "print_gpu_properties",
     "calculate_optimal_grid_sm_aware",
     "parse_rows_and_fields_lite",
     "validate_and_extract_fields_lite"

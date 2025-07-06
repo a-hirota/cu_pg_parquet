@@ -75,6 +75,11 @@ def main():
         help="テストモード（Grid境界スレッド情報を出力）"
     )
     parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="既存のParquetファイルを確認なしで削除"
+    )
+    parser.add_argument(
         "--output",
         type=str,
         help="出力ディレクトリ（--output-dirのエイリアス）"
@@ -100,14 +105,21 @@ def main():
     parquet_files = list(output_dir.glob("*.parquet"))
     if parquet_files:
         print(f"\n⚠️  outputフォルダ内に{len(parquet_files)}個の.parquetファイルが見つかりました。")
-        response = input("削除してもよろしいですか？ [y/n]: ")
-        if response.lower() == 'y':
+        
+        # -yオプションが指定されている場合は確認なしで削除
+        if args.yes:
             for file in parquet_files:
                 file.unlink()
             print(f"✅ {len(parquet_files)}個のファイルを削除しました。")
         else:
-            print("処理を中断しました。")
-            return 1
+            response = input("削除してもよろしいですか？ [y/n]: ")
+            if response.lower() == 'y':
+                for file in parquet_files:
+                    file.unlink()
+                print(f"✅ {len(parquet_files)}個のファイルを削除しました。")
+            else:
+                print("処理を中断しました。")
+                return 1
     
     # テストモードの環境変数設定
     if args.test:

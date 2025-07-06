@@ -123,6 +123,12 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 print(f"❌ Rustエラー: {process.stderr}")
                 continue
             
+            # テストモードの場合、Rustの出力を表示
+            if os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
+                for line in process.stdout.split('\n'):
+                    if 'チャンク' in line or 'ページ' in line or 'COPY範囲' in line:
+                        print(f"[Rust Debug] {line}")
+            
             # JSON結果を抽出
             output = process.stdout
             json_start = output.find("===CHUNK_RESULT_JSON===")
@@ -212,7 +218,8 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             # 直接抽出処理
             chunk_output = f"output/chunk_{chunk_id}_queue.parquet"
             
-            # 最後のチャンクかどうかを環境変数で設定
+            # チャンクIDと最後のチャンクかどうかを環境変数で設定
+            os.environ['GPUPGPARSER_CURRENT_CHUNK'] = str(chunk_id)
             if chunk_id == total_chunks - 1:
                 os.environ['GPUPGPARSER_LAST_CHUNK'] = '1'
             else:
@@ -227,7 +234,8 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
                 compression='snappy',
                 use_rmm=True,
                 optimize_gpu=True,
-                verbose=False
+                verbose=False,
+                test_mode=(os.environ.get('GPUPGPARSER_TEST_MODE', '0') == '1')
             )
             
             gpu_time = time.time() - gpu_start
@@ -398,10 +406,16 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
     }
 
 
-def main(total_chunks=8, table_name=None):
+def main(total_chunks=8, table_name=None, test_mode=False):
     global TABLE_NAME
     if table_name:
         TABLE_NAME = table_name
+    
+    # テストモードの場合、GPU特性を表示
+    if test_mode:
+        from src.cuda_kernels.postgres_binary_parser import print_gpu_properties
+        print_gpu_properties()
+    
     # kvikio設定確認
     is_compat = os.environ.get("KVIKIO_COMPAT_MODE", "").lower() in ["on", "1", "true"]
     
@@ -507,9 +521,9 @@ def main(total_chunks=8, table_name=None):
                         # 比較結果を表示
                         print(f"\n📊 Parquet全ファイル検証: ")
                         if actual_total_rows == pg_row_count:
-                            print(f"├─ 行数: {actual_total_rows:,} OK (psqlと一致)")
+                            print(f"└─ 行数: {actual_total_rows:,} OK (psqlと一致)")
                         else:
-                            print(f"├─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
+                            print(f"└─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
             except Exception as e:
                 print(f"PostgreSQL行数取得エラー: {e}")
         
@@ -525,6 +539,7 @@ if __name__ == "__main__":
     parser.add_argument('--table', type=str, default='lineorder', help='対象テーブル名')
     parser.add_argument('--parallel', type=int, default=16, help='並列接続数')
     parser.add_argument('--chunks', type=int, default=8, help='チャンク数')
+    parser.add_argument('--test', action='store_true', help='テストモード（GPU特性・カーネル情報表示）')
     args = parser.parse_args()
     
     # 環境変数を設定
@@ -532,4 +547,8 @@ if __name__ == "__main__":
     os.environ['TOTAL_CHUNKS'] = str(args.chunks)
     os.environ['TABLE_NAME'] = args.table  # Rust側にもテーブル名を伝える
     
-    main(total_chunks=args.chunks, table_name=args.table)
+    # テストモードの場合は環境変数を設定
+    if args.test:
+        os.environ['GPUPGPARSER_TEST_MODE'] = '1'
+    
+    main(total_chunks=args.chunks, table_name=args.table, test_mode=args.test)

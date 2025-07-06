@@ -32,7 +32,7 @@ from .cuda_kernels.gpu_config_utils import optimize_grid_size
 class DirectProcessor:
     """直接抽出プロセッサー（統合バッファ不使用）"""
     
-    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True, verbose: bool = False):
+    def __init__(self, use_rmm: bool = True, optimize_gpu: bool = True, verbose: bool = False, test_mode: bool = False):
         """
         初期化
         
@@ -40,10 +40,12 @@ class DirectProcessor:
             use_rmm: RMM (Rapids Memory Manager) を使用
             optimize_gpu: GPU最適化を有効化
             verbose: 詳細ログを出力
+            test_mode: テストモード（GPU特性・カーネル情報表示）
         """
         self.use_rmm = use_rmm
         self.optimize_gpu = optimize_gpu
         self.verbose = verbose
+        self.test_mode = test_mode
         self.extractor = DirectColumnExtractor()
         self.device_props = self._get_device_properties()
         
@@ -104,6 +106,7 @@ class DirectProcessor:
         columns: List[ColumnMeta],
         rows: int,
         raw_dev,
+        row_positions_dev,
         field_offsets_dev,
         field_lengths_dev
     ) -> Dict[str, Any]:
@@ -111,12 +114,13 @@ class DirectProcessor:
         文字列バッファ作成（DirectColumnExtractorから使用）
         """
         return self.extractor.create_string_buffers(
-            columns, rows, raw_dev, field_offsets_dev, field_lengths_dev
+            columns, rows, raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev
         )
     
     def process_direct(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
+        row_positions_dev,
         field_offsets_dev,
         field_lengths_dev,
         columns: List[ColumnMeta],
@@ -143,7 +147,7 @@ class DirectProcessor:
         
         # 最適化文字列バッファ作成（既存の実装を使用）
         optimized_string_buffers = self.create_string_buffers(
-            columns, rows, raw_dev, field_offsets_dev, field_lengths_dev
+            columns, rows, raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev
         )
         
         timing_info['string_buffer_creation'] = time.time() - prep_start
@@ -155,7 +159,7 @@ class DirectProcessor:
             print(f"直接列抽出開始（統合バッファ不使用）: {rows} 行")
         
         cudf_df = self.extractor.extract_columns_direct(
-            raw_dev, field_offsets_dev, field_lengths_dev,
+            raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
             columns, optimized_string_buffers
         )
         
@@ -220,19 +224,21 @@ class DirectProcessor:
         )
         
         # テストモードの場合、デバッグ情報も返される
-        if test_mode and len(parse_result) >= 3:
-            field_offsets_dev = parse_result[0]
-            field_lengths_dev = parse_result[1]
-            debug_info = parse_result[2] if len(parse_result) > 2 else None
-            negative_debug_info = parse_result[3] if len(parse_result) > 3 else None
+        if test_mode and len(parse_result) >= 4:
+            row_positions_dev = parse_result[0]
+            field_offsets_dev = parse_result[1]
+            field_lengths_dev = parse_result[2]
+            debug_info = parse_result[3] if len(parse_result) > 3 else None
+            negative_debug_info = parse_result[4] if len(parse_result) > 4 else None
             
             if debug_info is not None:
                 self._print_grid_boundary_debug_info(debug_info, raw_dev)
             if negative_debug_info is not None:
                 self._print_negative_position_debug_info(negative_debug_info, raw_dev)
         else:
-            field_offsets_dev = parse_result[0]
-            field_lengths_dev = parse_result[1]
+            row_positions_dev = parse_result[0]
+            field_offsets_dev = parse_result[1]
+            field_lengths_dev = parse_result[2]
         
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
@@ -248,7 +254,7 @@ class DirectProcessor:
         if self.verbose:
             print("=== 直接列抽出開始（統合バッファ不使用） ===")
         cudf_df, process_timing = self.process_direct(
-            raw_dev, field_offsets_dev, field_lengths_dev,
+            raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
             columns, output_path, compression, **kwargs
         )
         
@@ -546,6 +552,7 @@ def postgresql_to_cudf_parquet_direct(
     use_rmm: bool = True,
     optimize_gpu: bool = True,
     verbose: bool = False,
+    test_mode: bool = False,
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
@@ -579,7 +586,8 @@ def postgresql_to_cudf_parquet_direct(
     processor = DirectProcessor(
         use_rmm=use_rmm, 
         optimize_gpu=optimize_gpu,
-        verbose=verbose
+        verbose=verbose,
+        test_mode=test_mode
     )
     
     return processor.process_postgresql_to_parquet(

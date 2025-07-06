@@ -48,7 +48,8 @@
 - **Memory Coalescing**: 奇数/偶数行処理ではワープダイバージェンスとメモリコアレッシング問題に注意。ワープ最適化カーネルで解決
 - **Current Development**: benchmark/benchmark_rust_gpu_direct.pyを使用してチューニング中。これは直接抽出版（統合バッファ削除）で、文字列破損修正済み
 - **Work Output Organization**: 作業実施後は必ずアウトプットを整理すること。実行したプログラム、設定、結果を明確に文書化
-- **File Organization After Development**: 開発完了後は必ずファイル整理を実施。旧版は`archive/`へ移動し、CLAUDE.mdを更新すること
+- **File Organization After Development**: 開発完了後は必ず
+ファイル整理を実施。旧版は`archive/`へ移動し、CLAUDE.mdを更新すること
 - **16並列×8チャンク実装**: Rust側は`pg_fast_copy_single_chunk`を使用、環境変数`RUST_PARALLEL_CONNECTIONS=16`で16並列実行。各チャンク約8GB
 - **kvikio+RMM最適化**: ファイル読み込みをkvikio+RMMで5.1倍高速化（3.6秒→0.71秒）。CPU経由を完全排除
 - **Producer-Consumer並列処理実装（2025/01）**: キューベースの並列処理で1.56倍高速化達成（74.77秒→47.95秒）。Rust転送とGPU処理を真の並列実行
