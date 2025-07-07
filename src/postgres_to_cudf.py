@@ -28,6 +28,56 @@ from .cuda_kernels.decimal_tables import (
 from .cuda_kernels.gpu_config_utils import optimize_grid_size
 
 
+# 128ビット演算のデバイス関数（モジュールレベル）
+@cuda.jit(device=True, inline=True)
+def _add128_fast(a_hi, a_lo, b_hi, b_lo):
+    """高速128ビット加算（data_decoder.pyから移植）"""
+    res_lo = a_lo + b_lo
+    carry = 1 if res_lo < a_lo else 0
+    res_hi = a_hi + b_hi + carry
+    return res_hi, res_lo
+
+@cuda.jit(device=True, inline=True)
+def _mul128_u64_fast(a_hi, a_lo, b):
+    """高速128ビット × 64ビット乗算（data_decoder.pyから移植）"""
+    mask32 = 0xFFFFFFFF
+    
+    a0 = a_lo & mask32
+    a1 = a_lo >> 32
+    a2 = a_hi & mask32
+    a3 = a_hi >> 32
+    
+    b0 = b & mask32
+    b1 = b >> 32
+    
+    p00 = a0 * b0
+    p01 = a0 * b1
+    p10 = a1 * b0
+    p11 = a1 * b1
+    p20 = a2 * b0
+    p21 = a2 * b1
+    p30 = a3 * b0
+    
+    c0 = p00 >> 32
+    r0 = p00 & mask32
+    
+    temp1 = p01 + p10 + c0
+    c1 = temp1 >> 32
+    r1 = temp1 & mask32
+    
+    temp2 = p11 + p20 + c1
+    c2 = temp2 >> 32
+    r2 = temp2 & mask32
+    
+    temp3 = p21 + p30 + c2
+    r3 = temp3 & mask32
+    
+    res_lo = (r1 << 32) | r0
+    res_hi = (r3 << 32) | r2
+    
+    return res_hi, res_lo
+
+
 class DirectColumnExtractor:
     """入力データから直接列を抽出するプロセッサー"""
     
@@ -470,25 +520,57 @@ class DirectColumnExtractor:
                 
                 current_offset = src_offset + 8
                 
-                # 基数10000から128ビット整数への変換
+                # 基数10000から128ビット整数への変換（data_decoder.pyの実装を使用）
                 val_hi = 0
                 val_lo = 0
                 
-                # 基数10000桁読み取り
-                for digit_idx in range(nd):
-                    if current_offset + 2 > raw_data.size:
+                # 基数1e8最適化実装
+                i = 0
+                while i < nd:
+                    if i + 1 < nd and current_offset + 4 <= raw_data.size:
+                        # 2桁まとめて処理（基数10000 * 10000 = 1e8）
+                        digit1 = (raw_data[current_offset] << 8) | raw_data[current_offset + 1]
+                        digit2 = (raw_data[current_offset + 2] << 8) | raw_data[current_offset + 3]
+                        combined_digit = digit1 * 10000 + digit2
+                        
+                        val_hi, val_lo = _mul128_u64_fast(val_hi, val_lo, 100000000)  # 1e8
+                        val_hi, val_lo = _add128_fast(val_hi, val_lo, 0, combined_digit)
+                        current_offset += 4
+                        i += 2
+                    elif current_offset + 2 <= raw_data.size:
+                        # 残り1桁の処理
+                        digit = (raw_data[current_offset] << 8) | raw_data[current_offset + 1]
+                        val_hi, val_lo = _mul128_u64_fast(val_hi, val_lo, 10000)
+                        val_hi, val_lo = _add128_fast(val_hi, val_lo, 0, digit)
+                        current_offset += 2
+                        i += 1
+                    else:
                         break
-                    
-                    digit = (raw_data[current_offset] << 8) | raw_data[current_offset + 1]
-                    current_offset += 2
-                    
-                    # val = val * 10000 + digit
-                    # 簡略化実装（完全な128ビット演算は複雑なため）
-                    val_lo = val_lo * 10000 + digit
-                    # TODO: 完全な128ビット演算実装
                 
-                # スケール調整（簡略化）
-                # TODO: 完全なスケール調整実装
+                # weightによる調整
+                # weightは基数10000での最上位桁の位置を示す
+                # weight=0: 1～9999、weight=1: 10000～99990000
+                # 実際の値 = Σ(digits[i] * 10000^(weight-i))
+                # 
+                # 最下位桁の位置を計算：weight - (nd - 1)
+                # これを10000^n倍する必要がある
+                if weight > 0:
+                    # 10000^weightだけ乗算が必要
+                    # ただし、すでに桁を順番に処理しているので、
+                    # 最下位桁の位置分だけ追加で乗算
+                    lowest_digit_weight = weight - (nd - 1)
+                    for _ in range(lowest_digit_weight):
+                        val_hi, val_lo = _mul128_u64_fast(val_hi, val_lo, 10000)
+                
+                # スケール調整
+                # PostgreSQLのdscaleをtarget_scaleに合わせる
+                if dscale != target_scale:
+                    scale_diff = target_scale - dscale
+                    if scale_diff > 0:
+                        # 小数点を右に移動（10^scale_diff倍）
+                        for _ in range(scale_diff):
+                            val_hi, val_lo = _mul128_u64_fast(val_hi, val_lo, 10)
+                    # scale_diff < 0の場合（除算）は複雑なため、現時点では省略
                 
                 # 符号適用
                 if sign == 0x4000:  # 負数
