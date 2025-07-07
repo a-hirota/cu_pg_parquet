@@ -46,6 +46,7 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
     for desc in cur.description:
         name = desc.name
         pg_oid: int = desc.type_code
+        # まずinternal_sizeを試す（numericの場合は有効な値が入っている可能性）
         pg_typmod = desc.internal_size or 0
 
         if pg_typmod < 0:
@@ -60,8 +61,9 @@ def fetch_column_meta(conn: Any, sql: str) -> List[ColumnMeta]:
             precision, scale = _decode_numeric_pg_typmod(pg_typmod)
             arrow_param = (precision, scale)
         elif arrow_id == UTF8:
-            if pg_typmod > 4:
-                arrow_param = pg_typmod - 4
+            # bpchar/varcharの場合、display_sizeが実際の文字長
+            if desc.display_size and desc.display_size > 0:
+                arrow_param = desc.display_size
 
         metas.append(
             ColumnMeta(

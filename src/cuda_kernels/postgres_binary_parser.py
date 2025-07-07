@@ -168,21 +168,46 @@ def estimate_row_size_from_columns(columns):
     except ImportError:
         from src.types import UTF8, DECIMAL128
     
+    # デバッグモード判定
+    import os
+    debug = os.environ.get('GPUPGPARSER_DEBUG_ESTIMATE', '0') == '1'
+    
     size = 2  # フィールド数(2B)
+    if debug:
+        print(f"[ESTIMATE DEBUG] フィールド数: 2バイト")
+    
     for col in columns:
         size += 4  # フィールド長(4B)
         if col.elem_size > 0:  # 固定長
             size += col.elem_size
+            if debug:
+                print(f"[ESTIMATE DEBUG] {col.name}: 4 + {col.elem_size} = {4 + col.elem_size}バイト (固定長)")
         else:  # 可変長の推定
             if col.arrow_id == UTF8:
-                size += 20  # 文字列平均20B
+                # arrow_paramがある場合は実際の長さを使用（bpchar）
+                if col.arrow_param is not None and isinstance(col.arrow_param, int):
+                    size += col.arrow_param
+                    if debug:
+                        print(f"[ESTIMATE DEBUG] {col.name}: 4 + {col.arrow_param} = {4 + col.arrow_param}バイト (bpchar)")
+                else:
+                    # arrow_paramがない場合は従来通り（varchar）
+                    size += 20  # 文字列平均20B
+                    if debug:
+                        print(f"[ESTIMATE DEBUG] {col.name}: 4 + 20 = 24バイト (varchar推定)")
             elif col.arrow_id == DECIMAL128:
                 size += 16   # NUMERIC平均16B
+                if debug:
+                    print(f"[ESTIMATE DEBUG] {col.name}: 4 + 16 = 20バイト (DECIMAL128)")
             else:
                 size += 4   # その他4B
+                if debug:
+                    print(f"[ESTIMATE DEBUG] {col.name}: 4 + 4 = 8バイト (その他)")
     
     # メモリバンクコンフリクト回避: 32B境界整列
-    return ((size + 31) // 32) * 32
+    aligned = ((size + 31) // 32) * 32
+    if debug:
+        print(f"[ESTIMATE DEBUG] 合計: {size}バイト → 32バイト整列: {aligned}バイト")
+    return aligned
 
 def get_device_properties():
     """GPU デバイス特性を取得"""
@@ -866,8 +891,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # 推定行数を計算
     estimated_rows = data_size // estimated_row_size
     
-    # バッファサイズは推定行数に少しのマージンを追加（5%程度）
-    max_rows = int(estimated_rows * 1.05)
+    # バッファサイズは推定行数に少しのマージンを追加（40%程度）
+    max_rows = int(estimated_rows * 1.4)
     
     # 最後のチャンクの場合は、さらに余裕を持たせる
     if test_mode and os.environ.get('GPUPGPARSER_LAST_CHUNK', '0') == '1':
