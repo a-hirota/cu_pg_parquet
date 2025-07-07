@@ -891,8 +891,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # 推定行数を計算
     estimated_rows = data_size // estimated_row_size
     
-    # バッファサイズは推定行数に少しのマージンを追加（40%程度）
-    max_rows = int(estimated_rows * 1.4)
+    # バッファサイズは推定行数に少しのマージンを追加（20%程度）
+    max_rows = int(estimated_rows * 1.2)
     
     # 最後のチャンクの場合は、さらに余裕を持たせる
     if test_mode and os.environ.get('GPUPGPARSER_LAST_CHUNK', '0') == '1':
