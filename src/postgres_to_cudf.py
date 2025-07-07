@@ -89,7 +89,10 @@ class DirectColumnExtractor:
         field_offsets_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         field_lengths_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         columns: List[ColumnMeta],
-        string_buffers: Optional[Dict[str, Any]] = None
+        string_buffers: Optional[Dict[str, Any]] = None,
+        thread_ids_dev: Optional[cuda.cudadrv.devicearray.DeviceNDArray] = None,
+        thread_start_positions_dev: Optional[cuda.cudadrv.devicearray.DeviceNDArray] = None,
+        thread_end_positions_dev: Optional[cuda.cudadrv.devicearray.DeviceNDArray] = None
     ) -> cudf.DataFrame:
         """
         入力データから直接列を抽出してcuDF DataFrameを作成
@@ -139,6 +142,39 @@ class DirectColumnExtractor:
             except Exception as e:
                 warnings.warn(f"列 {col.name} の直接抽出でエラー: {e}")
                 cudf_series_dict[col.name] = cudf.Series([None] * rows)
+        
+        # テストモード時にデバッグ列を追加
+        if thread_ids_dev is not None:
+            try:
+                # thread_idsをCuPy配列として解釈
+                thread_ids_cupy = cp.asarray(thread_ids_dev)
+                cudf_series_dict['_thread_id'] = cudf.Series(thread_ids_cupy)
+            except Exception as e:
+                warnings.warn(f"thread_ids列の追加でエラー: {e}")
+        
+        # row_positionsも追加（row_positions_devから）
+        if row_positions_dev is not None:
+            try:
+                row_positions_cupy = cp.asarray(row_positions_dev)
+                cudf_series_dict['_row_position'] = cudf.Series(row_positions_cupy)
+            except Exception as e:
+                warnings.warn(f"row_positions列の追加でエラー: {e}")
+        
+        # thread_start_positionsを追加
+        if thread_start_positions_dev is not None:
+            try:
+                thread_start_cupy = cp.asarray(thread_start_positions_dev)
+                cudf_series_dict['_thread_start_pos'] = cudf.Series(thread_start_cupy)
+            except Exception as e:
+                warnings.warn(f"thread_start_positions列の追加でエラー: {e}")
+        
+        # thread_end_positionsを追加
+        if thread_end_positions_dev is not None:
+            try:
+                thread_end_cupy = cp.asarray(thread_end_positions_dev)
+                cudf_series_dict['_thread_end_pos'] = cudf.Series(thread_end_cupy)
+            except Exception as e:
+                warnings.warn(f"thread_end_positions列の追加でエラー: {e}")
         
         return cudf.DataFrame(cudf_series_dict)
     

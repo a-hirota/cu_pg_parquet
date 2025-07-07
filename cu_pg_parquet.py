@@ -151,7 +151,7 @@ def main():
     
     try:
         # benchmark_rust_gpu_direct.pyのmain()を実行
-        benchmark_main(total_chunks=args.chunks, table_name=args.table)
+        benchmark_main(total_chunks=args.chunks, table_name=args.table, test_mode=args.test)
         elapsed_time = time.time() - start_time
         print(f"\n処理完了: {elapsed_time:.2f}秒")
         return 0

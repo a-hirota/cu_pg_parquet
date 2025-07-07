@@ -126,6 +126,9 @@ class DirectProcessor:
         columns: List[ColumnMeta],
         output_path: str,
         compression: str = 'snappy',
+        thread_ids_dev=None,
+        thread_start_positions_dev=None,
+        thread_end_positions_dev=None,
         **parquet_kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
@@ -160,7 +163,8 @@ class DirectProcessor:
         
         cudf_df = self.extractor.extract_columns_direct(
             raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
-            columns, optimized_string_buffers
+            columns, optimized_string_buffers, thread_ids_dev,
+            thread_start_positions_dev, thread_end_positions_dev
         )
         
         timing_info['direct_extraction'] = time.time() - extract_start
@@ -228,17 +232,16 @@ class DirectProcessor:
             row_positions_dev = parse_result[0]
             field_offsets_dev = parse_result[1]
             field_lengths_dev = parse_result[2]
-            debug_info = parse_result[3] if len(parse_result) > 3 else None
-            negative_debug_info = parse_result[4] if len(parse_result) > 4 else None
-            
-            if debug_info is not None:
-                self._print_grid_boundary_debug_info(debug_info, raw_dev)
-            if negative_debug_info is not None:
-                self._print_negative_position_debug_info(negative_debug_info, raw_dev)
+            thread_ids_dev = parse_result[3] if len(parse_result) > 3 else None
+            thread_start_positions_dev = parse_result[4] if len(parse_result) > 4 else None
+            thread_end_positions_dev = parse_result[5] if len(parse_result) > 5 else None
         else:
             row_positions_dev = parse_result[0]
             field_offsets_dev = parse_result[1]
             field_lengths_dev = parse_result[2]
+            thread_ids_dev = None
+            thread_start_positions_dev = None
+            thread_end_positions_dev = None
         
         rows = field_offsets_dev.shape[0]
         total_timing['gpu_parsing'] = time.time() - parse_start
@@ -255,7 +258,11 @@ class DirectProcessor:
             print("=== 直接列抽出開始（統合バッファ不使用） ===")
         cudf_df, process_timing = self.process_direct(
             raw_dev, row_positions_dev, field_offsets_dev, field_lengths_dev,
-            columns, output_path, compression, **kwargs
+            columns, output_path, compression, 
+            thread_ids_dev=thread_ids_dev,
+            thread_start_positions_dev=thread_start_positions_dev,
+            thread_end_positions_dev=thread_end_positions_dev,
+            **kwargs
         )
         
         total_timing['process_and_export'] = time.time() - process_start

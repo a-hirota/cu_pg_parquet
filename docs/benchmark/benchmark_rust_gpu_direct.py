@@ -21,6 +21,7 @@ import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import signal
 import sys
+import pandas as pd
 
 from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
@@ -524,6 +525,194 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                             print(f"└─ 行数: {actual_total_rows:,} OK (psqlと一致)")
                         else:
                             print(f"└─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
+                            
+                        # テーブルのキー列を特定（通常は最初の列）
+                        cur.execute(f"""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = '{table_name}' 
+                            AND ordinal_position = 1
+                        """)
+                        key_column = cur.fetchone()
+                        
+                        if key_column:
+                            key_column_name = key_column[0]
+                            print(f"\n【重複チェック（キー列: {key_column_name}）】")
+                            
+                            # 全Parquetファイルを読み込んで重複をチェック
+                            import cudf
+                            all_dfs = []
+                            duplicate_info = {}
+                            
+                            for i, pf in enumerate(parquet_files):
+                                try:
+                                    df = cudf.read_parquet(pf)
+                                    if key_column_name in df.columns:
+                                        # 各チャンク内の重複をチェック
+                                        total_rows = len(df)
+                                        unique_rows = df[key_column_name].nunique()
+                                        duplicates_in_chunk = total_rows - unique_rows
+                                        
+                                        duplicate_info[pf.name] = {
+                                            'total': total_rows,
+                                            'unique': unique_rows,
+                                            'duplicates': duplicates_in_chunk
+                                        }
+                                        
+                                        if duplicates_in_chunk > 0:
+                                            print(f"├─ {pf.name}: {duplicates_in_chunk:,}個の重複")
+                                            # 重複キーの例を表示
+                                            try:
+                                                # Decimal列の場合はint64に変換
+                                                if hasattr(df[key_column_name].dtype, 'precision'):
+                                                    key_series = df[key_column_name].astype('int64')
+                                                else:
+                                                    key_series = df[key_column_name]
+                                                key_counts = key_series.value_counts()
+                                                dup_keys = key_counts[key_counts > 1].head(5)
+                                            except Exception as e:
+                                                print(f"│   └─ 重複キー分析エラー: {e}")
+                                                dup_keys = []
+                                            
+                                            # thread_id情報があれば詳細表示
+                                            if '_thread_id' in df.columns and len(dup_keys) > 0:
+                                                print(f"│   └─ スレッドID情報付き重複分析:")
+                                                # dup_keysをpandasに変換してiterableにする
+                                                dup_keys_items = dup_keys.to_pandas().items()
+                                                
+                                                # 最初の3つの重複キーについて全列データを表示
+                                                sample_count = 0
+                                                for key, count in dup_keys_items:
+                                                    if sample_count >= 3:  # 最初の3つのみ
+                                                        break
+                                                    sample_count += 1
+                                                    
+                                                    # この重複キーを持つ行のthread_id情報を取得
+                                                    # Decimal列の場合はint64に変換
+                                                    if hasattr(df[key_column_name].dtype, 'precision'):
+                                                        dup_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                    else:
+                                                        dup_rows = df[df[key_column_name] == key]
+                                                    thread_ids = dup_rows['_thread_id'].unique().to_pandas()
+                                                    print(f"│       └─ {key_column_name}={key}: {count}回出現")
+                                                    print(f"│           処理スレッド: {sorted(thread_ids)}")
+                                                    
+                                                    # 全列データを表示（デバッグ列を除く）
+                                                    print(f"│           ")
+                                                    print(f"│           【全列データのサンプル表示】")
+                                                    # デバッグ列を除外
+                                                    debug_cols = ['_thread_id', '_row_position', '_thread_start_pos', '_thread_end_pos']
+                                                    display_cols = [col for col in dup_rows.columns if col not in debug_cols]
+                                                    
+                                                    # 各行の全データを表示
+                                                    for row_idx in range(min(len(dup_rows), count)):  # 全ての重複行を表示
+                                                        print(f"│           ")
+                                                        print(f"│           行{row_idx + 1}:")
+                                                        
+                                                        # 基本データの表示 - 簡単な方法で
+                                                        for col in display_cols:
+                                                            try:
+                                                                # dup_rowsから直接値を取得
+                                                                value = dup_rows[col].iloc[row_idx]
+                                                                
+                                                                # 文字列の場合は長さも表示
+                                                                if pd.api.types.is_string_dtype(dup_rows[col].dtype):
+                                                                    # 末尾の空白を可視化
+                                                                    str_value = str(value)
+                                                                    visible_value = str_value.replace(' ', '·')
+                                                                    print(f"│             {col}: '{str_value}' (長さ: {len(str_value)}, 表示: '{visible_value}')")
+                                                                else:
+                                                                    print(f"│             {col}: {value}")
+                                                            except Exception as e:
+                                                                # エラーの場合は単純な文字列表現を試す
+                                                                try:
+                                                                    simple_value = str(dup_rows[col].iloc[row_idx])
+                                                                    print(f"│             {col}: {simple_value}")
+                                                                except:
+                                                                    print(f"│             {col}: (表示エラー)")
+                                                        
+                                                        # デバッグ情報の表示
+                                                        if '_thread_id' in dup_rows.columns:
+                                                            print(f"│             ---")
+                                                            try:
+                                                                print(f"│             thread_id: {dup_rows['_thread_id'].iloc[row_idx]}")
+                                                                if '_row_position' in dup_rows.columns:
+                                                                    print(f"│             row_position: {dup_rows['_row_position'].iloc[row_idx]:,}")
+                                                                if '_thread_start_pos' in dup_rows.columns and '_thread_end_pos' in dup_rows.columns:
+                                                                    start_pos = dup_rows['_thread_start_pos'].iloc[row_idx]
+                                                                    end_pos = dup_rows['_thread_end_pos'].iloc[row_idx]
+                                                                    print(f"│             thread_range: [{start_pos:,} - {end_pos:,}]")
+                                                            except:
+                                                                pass
+                                                    
+                                                    print(f"│           ")
+                                                    
+                                                    # 元の詳細表示も維持（簡略版）
+                                                    for tid in sorted(thread_ids):
+                                                        tid_rows = dup_rows[dup_rows['_thread_id'] == tid]
+                                                        print(f"│           └─ thread_id={tid}: {len(tid_rows)}行")
+                                            else:
+                                                for key, count in dup_keys.items():
+                                                    print(f"│   └─ {key_column_name}={key}: {count}回出現")
+                                        
+                                        all_dfs.append(df)
+                                except Exception as e:
+                                    print(f"├─ {pf.name}: 読み込みエラー - {e}")
+                            
+                            # 全チャンクを結合して重複チェック
+                            if all_dfs:
+                                print(f"\n【チャンク間の重複チェック】")
+                                all_df = cudf.concat(all_dfs)
+                                total_all = len(all_df)
+                                unique_all = all_df[key_column_name].nunique()
+                                total_duplicates = total_all - unique_all
+                                
+                                print(f"├─ 全チャンク合計行数: {total_all:,}")
+                                print(f"├─ ユニークキー数: {unique_all:,}")
+                                print(f"├─ 総重複数: {total_duplicates:,}")
+                                
+                                # チャンク内重複の合計
+                                chunk_duplicates = sum(info['duplicates'] for info in duplicate_info.values())
+                                inter_chunk_duplicates = total_duplicates - chunk_duplicates
+                                
+                                if inter_chunk_duplicates > 0:
+                                    print(f"└─ チャンク間重複: {inter_chunk_duplicates:,}個")
+                                    
+                                    # チャンク間で重複しているキーの特定
+                                    key_appearances = {}
+                                    for i, df in enumerate(all_dfs):
+                                        for key in df[key_column_name].unique().to_pandas():
+                                            if key not in key_appearances:
+                                                key_appearances[key] = []
+                                            key_appearances[key].append(i)
+                                    
+                                    # 複数チャンクに出現するキー
+                                    multi_chunk_keys = {k: v for k, v in key_appearances.items() if len(v) > 1}
+                                    if multi_chunk_keys:
+                                        print(f"\n    チャンク間重複キーの例（最初の5個）:")
+                                        
+                                        # thread_id情報があるかチェック
+                                        has_thread_id = any('_thread_id' in df.columns for df in all_dfs)
+                                        
+                                        for j, (key, chunks) in enumerate(list(multi_chunk_keys.items())[:5]):
+                                            print(f"    └─ {key_column_name}={key}: チャンク{chunks}に出現")
+                                            
+                                            # thread_id情報があれば詳細表示
+                                            if has_thread_id:
+                                                for chunk_idx in chunks:
+                                                    df = all_dfs[chunk_idx]
+                                                    if '_thread_id' in df.columns:
+                                                        # Decimal列の場合はint64に変換
+                                                        if hasattr(df[key_column_name].dtype, 'precision'):
+                                                            key_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                        else:
+                                                            key_rows = df[df[key_column_name] == key]
+                                                        thread_ids = key_rows['_thread_id'].unique().to_pandas()
+                                                        print(f"        └─ チャンク{chunk_idx}: thread_id={sorted(thread_ids)}")
+                                
+                                # メモリ解放
+                                del all_df
+                                del all_dfs
             except Exception as e:
                 print(f"PostgreSQL行数取得エラー: {e}")
         

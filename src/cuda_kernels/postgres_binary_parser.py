@@ -479,6 +479,230 @@ def parse_rows_and_fields_lite(
 
 
 @cuda.jit
+def parse_rows_and_fields_lite_with_thread_ids(
+    raw_data,
+    header_size,
+    ncols,
+
+    # 出力配列（直接書き込み）
+    row_positions,      # uint64[max_rows] - 行開始位置
+    field_offsets,      # uint32[max_rows, ncols] - 行開始位置からの相対オフセット
+    field_lengths,      # int32[max_rows, ncols] - フィールド長
+    thread_ids,         # int32[max_rows] - 各行を処理したスレッドID
+    row_count,          # int32[1] - 検出行数
+
+    # 設定
+    thread_stride,
+    max_rows,
+    fixed_field_lengths
+):
+    """
+    軽量統合カーネル: thread_ids記録機能付き
+    
+    テストモード用：各行を処理したスレッドIDを記録
+    """
+
+    # 最小限の共有メモリ（<1KB）
+    block_count = cuda.shared.array(1, int32)
+
+    # スレッド・ブロック情報
+    tid = cuda.blockIdx.x * cuda.gridDim.y * cuda.blockDim.x + \
+          cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+    local_tid = cuda.threadIdx.x
+
+    # 共有メモリ初期化
+    if local_tid == 0:
+        block_count[0] = 0
+
+    cuda.syncthreads()
+
+    # 担当範囲計算
+    start_pos = uint64(header_size + tid * thread_stride)
+    end_pos = uint64(header_size + (tid + 1) * thread_stride)
+
+    if start_pos >= raw_data.size:
+        return
+
+    # ローカル結果バッファ（従来版と同じサイズ）
+    local_positions = cuda.local.array(256, uint64)
+    local_field_offsets = cuda.local.array((256, 17), uint32)  # 相対オフセット用にuint32に変更
+    local_field_lengths = cuda.local.array((256, 17), int32)
+    local_count = 0
+
+    pos = uint64(start_pos)
+
+    # 統合処理ループ: 行検出+フィールド抽出を同時実行
+    while pos < end_pos:
+
+        # === 1. 行ヘッダ検出 ===
+        candidate_pos = read_uint16_simd16_lite(raw_data, pos, end_pos, ncols)
+
+        if candidate_pos <= -2:  # データ終端
+            break
+        elif candidate_pos == -1:  # 行ヘッダ未発見
+            pos += 15
+            continue
+        elif candidate_pos >= end_pos:  # 担当範囲外
+            break
+
+        # === 2. 行検証+フィールド抽出の統合実行 ===
+        is_valid, row_end = validate_and_extract_fields_lite(
+            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            local_field_offsets[local_count],  # この行のフィールド配列
+            local_field_lengths[local_count]   # この行のフィールド配列
+        )
+
+        if is_valid:
+            # 境界を越える行も処理する
+            # 行の開始が担当範囲内なら、終了が範囲外でも処理
+            if local_count < 256:  # 配列境界チェック
+                local_positions[local_count] = uint64(candidate_pos)
+                local_count += 1
+
+            # 次の行へジャンプ（境界チェック改善）
+            if row_end > 0:
+                pos = row_end
+            else:
+                pos = candidate_pos + 1
+        else:
+            # 検証失敗時は1バイト進む
+            pos = candidate_pos + 1
+
+    # === 3. 結果を直接グローバルメモリに書き込み ===
+    if local_count > 0:
+        # スレッドローカルの結果をatomic操作で確保
+        base_idx = cuda.atomic.add(row_count, 0, local_count)
+
+        for i in range(local_count):
+            global_idx = base_idx + i
+            if global_idx < max_rows:
+                # 行位置
+                row_positions[global_idx] = local_positions[i]
+                
+                # スレッドIDを記録
+                thread_ids[global_idx] = tid
+
+                # フィールド情報
+                for j in range(min(ncols, 17)):
+                    field_offsets[global_idx, j] = local_field_offsets[i, j]  # uint32相対オフセット
+                    field_lengths[global_idx, j] = local_field_lengths[i, j]
+
+
+@cuda.jit
+def parse_rows_and_fields_lite_with_full_debug(
+    raw_data,
+    header_size,
+    ncols,
+
+    # 出力配列（直接書き込み）
+    row_positions,      # uint64[max_rows] - 行開始位置
+    field_offsets,      # uint32[max_rows, ncols] - 行開始位置からの相対オフセット
+    field_lengths,      # int32[max_rows, ncols] - フィールド長
+    thread_ids,         # int32[max_rows] - 各行を処理したスレッドID
+    thread_start_positions,  # uint64[max_rows] - 各行を処理したスレッドの開始位置
+    thread_end_positions,    # uint64[max_rows] - 各行を処理したスレッドの終了位置
+    row_count,          # int32[1] - 検出行数
+
+    # 設定
+    thread_stride,
+    max_rows,
+    fixed_field_lengths
+):
+    """
+    完全デバッグ版カーネル: thread_ids + start/end positions記録
+    
+    テストモード用：各行を処理したスレッドの詳細情報を記録
+    """
+
+    # 最小限の共有メモリ（<1KB）
+    block_count = cuda.shared.array(1, int32)
+
+    # スレッド・ブロック情報
+    tid = cuda.blockIdx.x * cuda.gridDim.y * cuda.blockDim.x + \
+          cuda.blockIdx.y * cuda.blockDim.x + cuda.threadIdx.x
+    local_tid = cuda.threadIdx.x
+
+    # 共有メモリ初期化
+    if local_tid == 0:
+        block_count[0] = 0
+
+    cuda.syncthreads()
+
+    # 担当範囲計算
+    start_pos = uint64(header_size + tid * thread_stride)
+    end_pos = uint64(header_size + (tid + 1) * thread_stride)
+
+    if start_pos >= raw_data.size:
+        return
+
+    # ローカル結果バッファ（従来版と同じサイズ）
+    local_positions = cuda.local.array(256, uint64)
+    local_field_offsets = cuda.local.array((256, 17), uint32)  # 相対オフセット用にuint32に変更
+    local_field_lengths = cuda.local.array((256, 17), int32)
+    local_count = 0
+
+    pos = uint64(start_pos)
+
+    # 統合処理ループ: 行検出+フィールド抽出を同時実行
+    while pos < end_pos:
+
+        # === 1. 行ヘッダ検出 ===
+        candidate_pos = read_uint16_simd16_lite(raw_data, pos, end_pos, ncols)
+
+        if candidate_pos <= -2:  # データ終端
+            break
+        elif candidate_pos == -1:  # 行ヘッダ未発見
+            pos += 15
+            continue
+        elif candidate_pos >= end_pos:  # 担当範囲外
+            break
+
+        # === 2. 行検証+フィールド抽出の統合実行 ===
+        is_valid, row_end = validate_and_extract_fields_lite(
+            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            local_field_offsets[local_count],  # この行のフィールド配列
+            local_field_lengths[local_count]   # この行のフィールド配列
+        )
+
+        if is_valid:
+            # 境界を越える行も処理する
+            # 行の開始が担当範囲内なら、終了が範囲外でも処理
+            if local_count < 256:  # 配列境界チェック
+                local_positions[local_count] = uint64(candidate_pos)
+                local_count += 1
+
+            # 次の行へジャンプ（境界チェック改善）
+            if row_end > 0:
+                pos = row_end
+            else:
+                pos = candidate_pos + 1
+        else:
+            # 検証失敗時は1バイト進む
+            pos = candidate_pos + 1
+
+    # === 3. 結果を直接グローバルメモリに書き込み ===
+    if local_count > 0:
+        # スレッドローカルの結果をatomic操作で確保
+        base_idx = cuda.atomic.add(row_count, 0, local_count)
+
+        for i in range(local_count):
+            global_idx = base_idx + i
+            if global_idx < max_rows:
+                # 行位置
+                row_positions[global_idx] = local_positions[i]
+                
+                # スレッド情報を記録
+                thread_ids[global_idx] = tid
+                thread_start_positions[global_idx] = start_pos
+                thread_end_positions[global_idx] = end_pos
+
+                # フィールド情報
+                for j in range(min(ncols, 17)):
+                    field_offsets[global_idx, j] = local_field_offsets[i, j]  # uint32相対オフセット
+                    field_lengths[global_idx, j] = local_field_lengths[i, j]
+
+
+@cuda.jit
 def parse_rows_and_fields_lite_debug(
     raw_data,
     header_size,
@@ -891,8 +1115,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     # 推定行数を計算
     estimated_rows = data_size // estimated_row_size
     
-    # バッファサイズは推定行数に少しのマージンを追加（20%程度）
-    max_rows = int(estimated_rows * 1.2)
+    # バッファサイズは推定行数に少しのマージンを追加（80%程度）
+    max_rows = int(estimated_rows * 1.8)
     
     # 最後のチャンクの場合は、さらに余裕を持たせる
     if test_mode and os.environ.get('GPUPGPARSER_LAST_CHUNK', '0') == '1':
@@ -930,6 +1154,15 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     field_offsets = cuda.device_array((max_rows, ncols), np.uint32)  # 相対オフセット用にuint32に変更
     field_lengths = cuda.device_array((max_rows, ncols), np.int32)
     row_count = cuda.to_device(np.array([0], dtype=np.int32))
+    
+    # テストモード時にデバッグ配列を追加
+    thread_ids = None
+    thread_start_positions = None
+    thread_end_positions = None
+    if test_mode:
+        thread_ids = cuda.device_array(max_rows, np.int32)
+        thread_start_positions = cuda.device_array(max_rows, np.uint64)
+        thread_end_positions = cuda.device_array(max_rows, np.uint64)
     
     # row_positionsを明示的に初期化（未使用領域を識別可能にする）
     # CuPyを使用して効率的に初期化
@@ -1052,12 +1285,12 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"{prefix} " + "="*60 + "\n")
     
     if test_mode:
-        # テストモードではデバッグカーネルを使用
-        parse_rows_and_fields_lite_debug[grid_2d, threads_per_block](
+        # テストモードでは完全デバッグカーネルを使用
+        parse_rows_and_fields_lite_with_full_debug[grid_2d, threads_per_block](
             raw_dev, header_size, ncols,
-            row_positions, field_offsets, field_lengths, row_count,
-            thread_stride, max_rows, fixed_field_lengths_dev,
-            thread_debug_info, actual_threads  # デバッグ用追加パラメータ
+            row_positions, field_offsets, field_lengths, 
+            thread_ids, thread_start_positions, thread_end_positions, row_count,
+            thread_stride, max_rows, fixed_field_lengths_dev
         )
     else:
         # 本番用カーネル（性能影響なし）
@@ -1166,6 +1399,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"{prefix}           実際の処理行数: {min(nrow, max_rows):,}行")
 
     if nrow == 0:
+        if test_mode:
+            return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), cuda.device_array(0, np.int32), cuda.device_array(0, np.uint64), cuda.device_array(0, np.uint64)
         return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
     
     # テストモードで負の行位置を分析（現在はコメントアウト）
@@ -1228,23 +1463,16 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 print(f"{prefix} [NO SORT] 処理完了: {valid_rows}行, {sort_time:.3f}秒")
             
             # テストモードの場合、デバッグ情報も返す
-            if test_mode and debug_info_array is not None:
-                debug_count = int(debug_count_array.copy_to_host()[0])
-                debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
-                
-                # 負の行位置デバッグ情報も取得
-                neg_debug_host = None
-                if negative_pos_debug is not None and negative_pos_count is not None:
-                    neg_count = int(negative_pos_count.copy_to_host()[0])
-                    if neg_count > 0:
-                        neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
-                
-                return final_row_positions, final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
+            if test_mode:
+                final_thread_ids = thread_ids[:valid_rows] if thread_ids is not None else None
+                final_thread_start_pos = thread_start_positions[:valid_rows] if thread_start_positions is not None else None
+                final_thread_end_pos = thread_end_positions[:valid_rows] if thread_end_positions is not None else None
+                return final_row_positions, final_field_offsets, final_field_lengths, final_thread_ids, final_thread_start_pos, final_thread_end_pos
             
             return final_row_positions, final_field_offsets, final_field_lengths
         else:
             if test_mode:
-                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), None, None
+                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), cuda.device_array(0, np.int32), cuda.device_array(0, np.uint64), cuda.device_array(0, np.uint64)
             return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
         
         # CPUソートフォールバック
@@ -1275,27 +1503,20 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
             print(f"⚠️ CPUソート完了: {len(sort_indices)}行, {sort_time:.3f}秒（GPU→CPU→GPU転送含む）")
             
             # テストモードの場合、デバッグ情報も返す
-            if test_mode and debug_info_array is not None:
-                debug_count = int(debug_count_array.copy_to_host()[0])
-                debug_info_host = debug_info_array[:debug_count].copy_to_host() if debug_count > 0 else None
-                
-                # 負の行位置デバッグ情報も取得
-                neg_debug_host = None
-                if negative_pos_debug is not None and negative_pos_count is not None:
-                    neg_count = int(negative_pos_count.copy_to_host()[0])
-                    if neg_count > 0:
-                        neg_debug_host = negative_pos_debug[:neg_count].copy_to_host()
-                
-                return final_row_positions, final_field_offsets, final_field_lengths, debug_info_host, neg_debug_host
+            if test_mode:
+                final_thread_ids = thread_ids[:valid_rows] if thread_ids is not None else None
+                final_thread_start_pos = thread_start_positions[:valid_rows] if thread_start_positions is not None else None
+                final_thread_end_pos = thread_end_positions[:valid_rows] if thread_end_positions is not None else None
+                return final_row_positions, final_field_offsets, final_field_lengths, final_thread_ids, final_thread_start_pos, final_thread_end_pos
             
             return final_row_positions, final_field_offsets, final_field_lengths
         else:
             if test_mode:
-                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), None, None
+                return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), cuda.device_array(0, np.int32), cuda.device_array(0, np.uint64), cuda.device_array(0, np.uint64)
             return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32)
     else:
         if test_mode:
-            return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32), None, None
+            return cuda.device_array(0, np.uint64), cuda.device_array((0, ncols), np.uint32), cuda.device_array((0, ncols), np.int32), cuda.device_array(0, np.int32), cuda.device_array(0, np.uint64), cuda.device_array(0, np.uint64)
         return cuda.device_array((0, ncols), np.uint64), cuda.device_array((0, ncols), np.int32)
 
 # エイリアス関数（後方互換性）
