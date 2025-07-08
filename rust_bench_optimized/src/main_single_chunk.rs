@@ -157,8 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("ページ範囲: {} - {}", chunk_start_page, chunk_end_page);
     }
     
-    // チャンクファイルを作成
-    let chunk_path = format!("{}/chunk_{}.bin", OUTPUT_DIR, chunk_id);
+    // チャンクファイルを作成（テーブル名を含む）
+    let chunk_path = format!("{}/{}_chunk_{}.bin", OUTPUT_DIR, table_name, chunk_id);
     let file = File::create(&chunk_path)?;
     file.sync_all()?;
     

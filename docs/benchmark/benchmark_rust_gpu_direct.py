@@ -143,7 +143,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 chunk_file = result['chunk_file']
             else:
                 rust_time = time.time() - rust_start
-                chunk_file = f"{OUTPUT_DIR}/chunk_{chunk_id}.bin"
+                chunk_file = f"{OUTPUT_DIR}/{TABLE_NAME}_chunk_{chunk_id}.bin"
                 file_size = os.path.getsize(chunk_file)
             
             chunk_info = {
@@ -217,7 +217,7 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             header_size = detect_pg_header_size(header_sample)
             
             # 直接抽出処理
-            chunk_output = f"output/chunk_{chunk_id}_queue.parquet"
+            chunk_output = f"output/{TABLE_NAME}_chunk_{chunk_id}_queue.parquet"
             
             # チャンクIDと最後のチャンクかどうかを環境変数で設定
             os.environ['GPUPGPARSER_CURRENT_CHUNK'] = str(chunk_id)
