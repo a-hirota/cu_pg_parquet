@@ -69,7 +69,7 @@ def setup_rmm_pool():
         print(f"⚠️ RMM初期化警告: {e}")
 
 
-def get_postgresql_metadata():
+def get_postgresql_metadata(table_name):
     """PostgreSQLからテーブルメタデータを取得"""
     dsn = os.environ.get("GPUPASER_PG_DSN")
     if not dsn:
@@ -77,8 +77,8 @@ def get_postgresql_metadata():
     
     conn = psycopg.connect(dsn)
     try:
-        print(f"PostgreSQLメタデータを取得中 (テーブル: {TABLE_NAME})...")
-        columns = fetch_column_meta(conn, f"SELECT * FROM {TABLE_NAME}")
+        print(f"PostgreSQLメタデータを取得中 (テーブル: {table_name})...")
+        columns = fetch_column_meta(conn, f"SELECT * FROM {table_name}")
         print(f"✅ メタデータ取得完了: {len(columns)} 列")
         
         
@@ -99,7 +99,7 @@ def cleanup_files(total_chunks=8):
             os.remove(f)
 
 
-def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue):
+def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue, table_name: str):
     """Rust転送を実行するProducerスレッド"""
     for chunk_id in range(total_chunks):
         if shutdown_flag.is_set():
@@ -143,7 +143,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 chunk_file = result['chunk_file']
             else:
                 rust_time = time.time() - rust_start
-                chunk_file = f"{OUTPUT_DIR}/{TABLE_NAME}_chunk_{chunk_id}.bin"
+                chunk_file = f"{OUTPUT_DIR}/{table_name}_chunk_{chunk_id}.bin"
                 file_size = os.path.getsize(chunk_file)
             
             chunk_info = {
@@ -169,7 +169,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
     print("[Producer] 全チャンク転送完了")
 
 
-def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int):
+def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int, table_name: str):
     """GPU処理を実行するConsumerスレッド"""
     while not shutdown_flag.is_set():
         try:
@@ -217,7 +217,7 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             header_size = detect_pg_header_size(header_sample)
             
             # 直接抽出処理
-            chunk_output = f"output/{TABLE_NAME}_chunk_{chunk_id}_queue.parquet"
+            chunk_output = f"output/{table_name}_chunk_{chunk_id}_queue.parquet"
             
             # チャンクIDと最後のチャンクかどうかを環境変数で設定
             os.environ['GPUPGPARSER_CURRENT_CHUNK'] = str(chunk_id)
@@ -347,7 +347,7 @@ def validate_parquet_output(file_path: str, num_rows: int = 5, gpu_rows: int = N
         return False
 
 
-def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
+def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_name: str):
     """真の並列パイプライン実行"""
     # キューとスレッド管理
     chunk_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -358,14 +358,14 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int):
     # Producerスレッド開始
     producer_thread = threading.Thread(
         target=rust_producer,
-        args=(chunk_queue, total_chunks, stats_queue)
+        args=(chunk_queue, total_chunks, stats_queue, table_name)
     )
     producer_thread.start()
     
     # Consumerスレッド開始（1つのみ - GPUメモリ制約）
     consumer_thread = threading.Thread(
         target=gpu_consumer,
-        args=(chunk_queue, columns, 1, stats_queue, total_chunks)
+        args=(chunk_queue, columns, 1, stats_queue, total_chunks, table_name)
     )
     consumer_thread.start()
     
@@ -411,6 +411,8 @@ def main(total_chunks=8, table_name=None, test_mode=False):
     global TABLE_NAME
     if table_name:
         TABLE_NAME = table_name
+    else:
+        table_name = TABLE_NAME  # デフォルト値を使用
     
     # テストモードの場合、GPU特性を表示
     if test_mode:
@@ -434,14 +436,14 @@ def main(total_chunks=8, table_name=None, test_mode=False):
     cleanup_files(total_chunks)
     
     # PostgreSQLからメタデータを取得
-    columns = get_postgresql_metadata()
+    columns = get_postgresql_metadata(table_name)
     
     try:
         # 並列パイプライン実行
         print("\n並列処理を開始します...")
         print("=" * 80)
         
-        results = run_parallel_pipeline(columns, total_chunks)
+        results = run_parallel_pipeline(columns, total_chunks, table_name)
         
         # 最終統計を構造化表示
         total_gb = results['total_size'] / 1024**3
@@ -487,7 +489,7 @@ def main(total_chunks=8, table_name=None, test_mode=False):
         raise
     finally:
         # 性能測定完了後、サンプル検証を実行
-        sample_parquet = "output/chunk_0_queue.parquet"
+        sample_parquet = f"output/{table_name}_chunk_0_queue.parquet"
         if os.path.exists(sample_parquet):
             # chunk_0のGPU処理行数を取得
             gpu_rows_chunk0 = gpu_row_counts.get(0, None)
@@ -497,7 +499,7 @@ def main(total_chunks=8, table_name=None, test_mode=False):
         # 全Parquetファイルの実際の行数を確認
         print("\n【Parquetファイル統計】")
         actual_total_rows = 0
-        parquet_files = sorted(Path("output").glob("chunk_*_queue.parquet"))
+        parquet_files = sorted(Path("output").glob(f"{table_name}_chunk_*_queue.parquet"))
         for pf in parquet_files:
             try:
                 table = pq.read_table(pf)

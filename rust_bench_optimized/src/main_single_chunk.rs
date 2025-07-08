@@ -27,6 +27,7 @@ struct WorkerMeta {
     id: usize,
     offset: u64,
     size: u64,
+    actual_size: u64,  // 実際に書き込んだバイト数
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -160,6 +161,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // チャンクファイルを作成（テーブル名を含む）
     let chunk_path = format!("{}/{}_chunk_{}.bin", OUTPUT_DIR, table_name, chunk_id);
     let file = File::create(&chunk_path)?;
+    
+    // ファイルサイズを事前確保（断片化防止）
+    // 推定サイズ: ページ数 × 8KB × 1.5（マージン）
+    let estimated_size = ((chunk_end_page - chunk_start_page) as u64) * 8192 * 3 / 2;
+    file.set_len(estimated_size)?;
     file.sync_all()?;
     
     let chunk_file = Arc::new(file);
@@ -341,6 +347,7 @@ async fn process_range(
             id: worker_id,
             offset: worker_start_offset.unwrap_or(0),
             size: worker_bytes,
+            actual_size: worker_bytes,  // 実際に書き込んだバイト数
         });
     }
     
