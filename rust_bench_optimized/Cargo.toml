@@ -31,6 +31,10 @@ path = "src/main_sequential.rs"
 name = "pg_fast_copy_env"
 path = "src/main_env.rs"
 
+[[bin]]
+name = "pg_fast_copy_single_copy"
+path = "src/main_single_copy.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -1285,12 +1285,12 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"{prefix} " + "="*60 + "\n")
     
     if test_mode:
-        # テストモードではデバッグカーネルを使用
-        parse_rows_and_fields_lite_debug[grid_2d, threads_per_block](
+        # テストモードでは完全デバッグ版カーネルを使用
+        parse_rows_and_fields_lite_with_full_debug[grid_2d, threads_per_block](
             raw_dev, header_size, ncols,
-            row_positions, field_offsets, field_lengths, row_count,
-            thread_stride, max_rows, fixed_field_lengths_dev,
-            thread_debug_info, actual_threads
+            row_positions, field_offsets, field_lengths, 
+            thread_ids, thread_start_positions, thread_end_positions, row_count,
+            thread_stride, max_rows, fixed_field_lengths_dev
         )
     else:
         # 本番用カーネル（性能影響なし）
