@@ -10,6 +10,13 @@ import time
 import sys
 from pathlib import Path
 import gc
+import pandas as pd
+
+# pandas表示設定を全列表示に変更
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.width', None)
+pd.set_option('display.max_colwidth', None)
 
 def check_gpu_environment():
     """GPU環境の確認"""
@@ -21,7 +28,10 @@ def check_gpu_environment():
         
         for i in range(device_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+            # nvmlDeviceGetNameの戻り値の型をチェック
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode('utf-8')
             mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             print(f"  GPU {i}: {name}")
             print(f"    メモリ: {mem_info.total / 1024**3:.1f} GB (使用中: {mem_info.used / 1024**3:.1f} GB)")
@@ -101,21 +111,32 @@ def display_sample_data(df, n_rows=10, name=""):
     print(f"\n【先頭{n_rows}行】")
     if isinstance(df, dask_cudf.DataFrame):
         # Daskの場合
-        print(df.head(n_rows))
+        sample_df = df.head(n_rows)
+        # pandasに変換して全列表示
+        print(sample_df.to_pandas().to_string())
     else:
         # 通常のcuDFの場合
-        print(df.head(n_rows))
+        # pandasに変換して全列表示
+        print(df.head(n_rows).to_pandas().to_string())
     
     # 基本統計量（数値列のみ）
     print("\n【基本統計量】")
     try:
-        numeric_cols = df.select_dtypes(include=['number']).columns
+        # cuDFのselect_dtypesは'number'ではなく具体的な型を指定する必要がある
+        numeric_types = ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64', 'float32', 'float64']
+        numeric_cols = []
+        
+        for col in df.columns:
+            if str(df[col].dtype) in numeric_types:
+                numeric_cols.append(col)
+        
         if len(numeric_cols) > 0:
             if isinstance(df, dask_cudf.DataFrame):
                 stats = df[numeric_cols].describe().compute()
+                print(stats.to_pandas().to_string())
             else:
                 stats = df[numeric_cols].describe()
-            print(stats)
+                print(stats.to_pandas().to_string())
         else:
             print("  数値列がありません")
     except Exception as e:
@@ -130,11 +151,23 @@ def process_large_parquet_files():
     print("\n【GPU環境確認】")
     check_gpu_environment()
     
-    # 2. ファイルパスの設定
-    file_paths = [
-        "output/customer_chunk_0_queue.parquet",
-        "output/customer_chunk_1_queue.parquet"
-    ]
+    # 2. outputディレクトリ内の全parquetファイルを取得
+    output_dir = Path("output")
+    if not output_dir.exists():
+        print(f"\n✗ outputディレクトリが見つかりません: {output_dir}")
+        return
+        
+    file_paths = sorted(output_dir.glob("*.parquet"))
+    
+    if not file_paths:
+        print(f"\n✗ {output_dir}ディレクトリ内にparquetファイルが見つかりません")
+        return
+        
+    print(f"\n【検出されたファイル】")
+    print(f"ディレクトリ: {output_dir}")
+    print(f"ファイル数: {len(file_paths)}")
+    for file_path in file_paths:
+        print(f"  - {file_path.name}")
     
     # 3. ファイルサイズの確認（大規模データ判定）
     total_size = 0
@@ -161,73 +194,12 @@ def process_large_parquet_files():
     # 6. 各ファイルのサンプル表示
     for i, (df, file_path) in enumerate(zip(dfs, file_paths)):
         display_sample_data(df, n_rows=5, name=f"ファイル{i} ({Path(file_path).name})")
-    
-    # 7. 並列処理での結合例（必要に応じて）
-    if len(dfs) == 2:
-        print("\n【データ結合例】")
-        try:
-            # 共通カラムの確認
-            common_cols = set(dfs[0].columns) & set(dfs[1].columns)
-            print(f"共通カラム: {common_cols}")
-            
-            # 垂直結合（行方向）の例
-            if use_dask:
-                combined_df = dask_cudf.concat(dfs, axis=0)
-                print(f"\n結合後のサイズ: 約{len(dfs[0]) + len(dfs[1]):,} 行")
-            else:
-                combined_df = cudf.concat(dfs, axis=0)
-                print(f"\n結合後のサイズ: {combined_df.shape[0]:,} 行 × {combined_df.shape[1]} 列")
-                
-        except Exception as e:
-            print(f"結合エラー: {e}")
-    
-    # 8. メモリクリーンアップ
-    print("\n【クリーンアップ】")
-    del dfs
-    gc.collect()
-    cudf._lib.nvtx.nvtx_range_pop()  # GPUメモリ解放
-    print("✓ 処理完了")
 
-def advanced_operations_example():
-    """高度な操作の例"""
-    print("\n" + "="*60)
-    print("📈 高度な操作例（参考）")
-    print("="*60)
-    
-    example_code = """
-# 1. 条件フィルタリング（GPU高速処理）
-filtered_df = df[df['column_name'] > threshold]
-
-# 2. グループ集計
-grouped = df.groupby('category').agg({
-    'value': ['sum', 'mean', 'count'],
-    'amount': 'sum'
-})
-
-# 3. 並列ソート
-sorted_df = df.sort_values(['col1', 'col2'], ascending=[True, False])
-
-# 4. カスタム関数の適用（GPU最適化）
-df['new_col'] = df.apply_rows(custom_gpu_function, 
-                              incols=['col1', 'col2'],
-                              outcols={'new_col': 'float32'})
-
-# 5. 大規模JOIN（ハッシュJOIN on GPU）
-merged = df1.merge(df2, on='key', how='inner')
-
-# 6. CPU/GPU間のデータ転送
-pandas_df = cudf_df.to_pandas()  # GPU → CPU
-cudf_df = cudf.from_pandas(pandas_df)  # CPU → GPU
-"""
-    print(example_code)
 
 if __name__ == "__main__":
     try:
         # メイン処理実行
         process_large_parquet_files()
-        
-        # 高度な操作例の表示
-        advanced_operations_example()
         
     except ImportError as e:
         print(f"\n✗ インポートエラー: {e}")
