@@ -1,0 +1,9 @@
+{
+  "timestamp": "20250710_214303",
+  "table_name": "customer",
+  "total_chunks": 2,
+  "saved_chunks": 2,
+  "note": "Binary files saved before deletion in gpu_consumer",
+  "parallel_connections": 8,
+  "command": "python cu_pg_parquet.py --test --table customer --parallel 8 --chunks 2"
+}
