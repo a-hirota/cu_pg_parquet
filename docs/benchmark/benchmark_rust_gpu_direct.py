@@ -87,16 +87,83 @@ def get_postgresql_metadata(table_name):
         conn.close()
 
 
-def cleanup_files(total_chunks=8):
-    """ファイルをクリーンアップ"""
+def cleanup_files(total_chunks=8, table_name=None, test_mode=False, save_binaries=False):
+    """ファイルをクリーンアップ（テストモード時は保存オプション付き）"""
+    # テーブル名が指定されていない場合はグローバル変数を使用
+    if table_name is None:
+        table_name = TABLE_NAME
+    
+    # テストモードで保存する場合
+    if save_binaries:
+        from datetime import datetime
+        import shutil
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = f"test_binaries/{timestamp}"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        print(f"\n📁 テストモード: バイナリファイルを保存中...")
+        
+        # チャンクファイルを保存
+        saved_files = []
+        for i in range(total_chunks):
+            src = f"{OUTPUT_DIR}/{table_name}_chunk_{i}.bin"
+            if os.path.exists(src):
+                dst = f"{save_dir}/{table_name}_chunk_{i}.bin"
+                shutil.copy2(src, dst)
+                saved_files.append(f"{table_name}_chunk_{i}.bin")
+                print(f"  ✓ {table_name}_chunk_{i}.bin を保存")
+            else:
+                print(f"  ❌ {table_name}_chunk_{i}.bin が見つかりません")
+        
+        # メタファイルも保存
+        meta_src = f"{OUTPUT_DIR}/{table_name}_meta_0.json"
+        if os.path.exists(meta_src):
+            shutil.copy2(meta_src, f"{save_dir}/{table_name}_meta_0.json")
+            print(f"  ✓ {table_name}_meta_0.json を保存")
+        else:
+            print(f"  ❌ {table_name}_meta_0.json が見つかりません")
+        
+        if saved_files:
+            print(f"📁 バイナリファイルを {save_dir} に保存しました")
+            
+            # 実行情報をメタデータファイルとして保存
+            import json
+            metadata = {
+                "timestamp": timestamp,
+                "table_name": table_name,
+                "total_chunks": total_chunks,
+                "saved_files": saved_files,
+                "parallel_connections": os.environ.get('RUST_PARALLEL_CONNECTIONS', 'unknown'),
+                "output_dir": OUTPUT_DIR,
+                "test_mode": test_mode
+            }
+            
+            metadata_path = f"{save_dir}/execution_metadata.json"
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            print(f"  ✓ execution_metadata.json を保存")
+    
+    # 通常のクリーンアップ処理
     files = [
-        f"{OUTPUT_DIR}/{TABLE_NAME}_meta_0.json",
-        f"{OUTPUT_DIR}/{TABLE_NAME}_data_0.ready"
-    ] + [f"{OUTPUT_DIR}/chunk_{i}.bin" for i in range(total_chunks)]
+        f"{OUTPUT_DIR}/{table_name}_meta_0.json",
+        f"{OUTPUT_DIR}/{table_name}_data_0.ready"
+    ] + [f"{OUTPUT_DIR}/{table_name}_chunk_{i}.bin" for i in range(total_chunks)]
     
     for f in files:
         if os.path.exists(f):
             os.remove(f)
+    
+    # 追加の安全対策: OUTPUT_DIR内の全ての.binファイルをクリーンアップ（テーブル名が一致するもののみ）
+    try:
+        output_path = Path(OUTPUT_DIR)
+        if output_path.exists():
+            # このテーブルに関連する全ての.binファイルを削除
+            for bin_file in output_path.glob(f"{table_name}_*.bin"):
+                if bin_file.is_file():
+                    bin_file.unlink()
+    except Exception as e:
+        print(f"⚠️ 追加クリーンアップ中の警告: {e}")
 
 
 def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue, table_name: str):
@@ -169,7 +236,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
     print("[Producer] 全チャンク転送完了")
 
 
-def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int, table_name: str):
+def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int, table_name: str, test_mode: bool = False):
     """GPU処理を実行するConsumerスレッド"""
     while not shutdown_flag.is_set():
         try:
@@ -196,6 +263,42 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             # kvikio+RMMで直接GPU転送
             transfer_start = time.time()
             
+            # テストモードの場合、読み込み前にバイナリファイルを保存
+            if test_mode:
+                from datetime import datetime
+                import shutil
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_dir = f"test_binaries/{timestamp}"
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # チャンクファイルを保存
+                dst = f"{save_dir}/{table_name}_chunk_{chunk_id}.bin"
+                shutil.copy2(chunk_file, dst)
+                print(f"[Consumer-{consumer_id}] テストモード: {dst} を保存")
+                
+                # メタファイルも保存（チャンク0の時のみ）
+                if chunk_id == 0:
+                    meta_src = f"{OUTPUT_DIR}/{table_name}_meta_0.json"
+                    if os.path.exists(meta_src):
+                        shutil.copy2(meta_src, f"{save_dir}/{table_name}_meta_0.json")
+                        print(f"[Consumer-{consumer_id}] テストモード: {table_name}_meta_0.json を保存")
+                
+                # 実行情報をメタデータファイルとして保存（チャンク0の時のみ）
+                if chunk_id == 0:
+                    import json
+                    metadata = {
+                        "timestamp": timestamp,
+                        "table_name": table_name,
+                        "total_chunks": total_chunks,
+                        "parallel_connections": int(os.environ.get('RUST_PARALLEL_CONNECTIONS', 16)),
+                        "command": f"python cu_pg_parquet.py --test --table {table_name} --parallel {int(os.environ.get('RUST_PARALLEL_CONNECTIONS', 16))} --chunks {total_chunks}"
+                    }
+                    with open(f"{save_dir}/execution_metadata.json", "w") as f:
+                        json.dump(metadata, f, indent=2)
+                    print(f"[Consumer-{consumer_id}] テストモード: execution_metadata.json を保存")
+                    print(f"📁 バイナリファイルを {save_dir} に保存しました")
+            
             # RMM DeviceBufferを使用
             gpu_buffer = rmm.DeviceBuffer(size=file_size)
             
@@ -206,6 +309,12 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             
             if bytes_read != file_size:
                 raise RuntimeError(f"読み込みサイズ不一致: {bytes_read} != {file_size}")
+            
+            # ファイル存在確認（kvikio読み込み後）
+            if os.path.exists(chunk_file):
+                print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} はまだ存在します")
+            else:
+                print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} が削除されました")
             
             # numba cuda配列に変換（ゼロコピー）
             raw_dev = cuda.as_cuda_array(gpu_buffer).view(dtype=np.uint8)
@@ -243,6 +352,12 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             
             # 処理統計
             rows = len(cudf_df) if cudf_df is not None else 0
+            
+            # ファイル存在確認（GPU処理後）
+            if os.path.exists(chunk_file):
+                print(f"[Consumer-{consumer_id}] GPU処理後: {chunk_file} はまだ存在します")
+            else:
+                print(f"[Consumer-{consumer_id}] GPU処理後: {chunk_file} が削除されました")
             
             # GPU処理行数を保存
             gpu_row_counts[chunk_id] = rows
@@ -432,8 +547,8 @@ def main(total_chunks=8, table_name=None, test_mode=False):
         print(f"❌ CUDA context エラー: {e}")
         return
     
-    # クリーンアップ
-    cleanup_files(total_chunks)
+    # クリーンアップ（開始時は保存しない）
+    cleanup_files(total_chunks, table_name, test_mode=test_mode, save_binaries=False)
     
     # PostgreSQLからメタデータを取得
     columns = get_postgresql_metadata(table_name)
@@ -721,7 +836,19 @@ def main(total_chunks=8, table_name=None, test_mode=False):
         if actual_total_rows != results['total_rows']:
             print(f"\n⚠️  行数不一致: GPU報告値 {results['total_rows']:,} vs Parquet実際値 {actual_total_rows:,}")
         
-        cleanup_files(total_chunks)
+        # ファイルの存在確認
+        print("\n📁 バイナリファイル存在確認:")
+        for i in range(total_chunks):
+            bin_file = f"{OUTPUT_DIR}/{table_name}_chunk_{i}.bin"
+            exists = os.path.exists(bin_file)
+            if exists:
+                size = os.path.getsize(bin_file) / (1024**3)
+                print(f"  ✓ {table_name}_chunk_{i}.bin: {size:.2f} GB")
+            else:
+                print(f"  ❌ {table_name}_chunk_{i}.bin: 存在しません")
+        
+        # 終了時のクリーンアップ（テストモードでは保存してから削除）
+        cleanup_files(total_chunks, table_name, test_mode=test_mode, save_binaries=True)
 
 
 if __name__ == "__main__":

@@ -334,7 +334,9 @@ def validate_and_extract_fields_lite(
 
         # フィールド情報を即座に出力配列に記録
         if flen == 0xFFFFFFFF:  # NULL
-            field_offsets_out[field_idx] = uint32(0)  # uint32にキャスト
+            # NULLでも正しいオフセットを記録（pos+4の位置）
+            relative_offset = uint32((pos + 4) - row_start)
+            field_offsets_out[field_idx] = relative_offset
             field_lengths_out[field_idx] = -1
             pos += 4
         else:

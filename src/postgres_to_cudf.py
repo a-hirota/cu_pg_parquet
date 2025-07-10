@@ -415,7 +415,7 @@ class DirectColumnExtractor:
             # 出力位置
             dst_offset = row * col_size
             
-            if is_null or src_offset == 0:
+            if is_null:
                 # NULLの場合はゼロで埋める
                 for i in range(col_size):
                     if dst_offset + i < output_buffer.size:
@@ -483,7 +483,7 @@ class DirectColumnExtractor:
             # 出力位置（16バイト）
             dst_offset = row * 16
             
-            if is_null or src_offset == 0:
+            if is_null:
                 # NULLの場合はゼロで埋める
                 for i in range(16):
                     if dst_offset + i < output_buffer.size:
@@ -549,17 +549,17 @@ class DirectColumnExtractor:
                 
                 # weightによる調整
                 # weightは基数10000での最上位桁の位置を示す
-                # weight=0: 1～9999、weight=1: 10000～99990000
+                # weight=0: 1～9999、weight=1: 10000～99999999
                 # 実際の値 = Σ(digits[i] * 10000^(weight-i))
                 # 
-                # 最下位桁の位置を計算：weight - (nd - 1)
-                # これを10000^n倍する必要がある
-                if weight > 0:
-                    # 10000^weightだけ乗算が必要
-                    # ただし、すでに桁を順番に処理しているので、
-                    # 最下位桁の位置分だけ追加で乗算
-                    lowest_digit_weight = weight - (nd - 1)
-                    for _ in range(lowest_digit_weight):
+                # 各桁は既に順番に処理されているので、
+                # 最下位桁が10000^0の位置にある
+                # weightは最上位桁の位置なので、nd桁の数値全体を
+                # 10000^(weight-nd+1)倍する必要がある
+                if weight >= nd:
+                    # 全体を10000^(weight-nd+1)倍
+                    multiplier_count = weight - nd + 1
+                    for _ in range(multiplier_count):
                         val_hi, val_lo = _mul128_u64_fast(val_hi, val_lo, 10000)
                 
                 # スケール調整
