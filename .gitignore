@@ -49,6 +49,7 @@ Thumbs.db
 archive/
 old/
 backup/
+test_binaries/
 
 # Project specific - Generated data and logs  
 *.parquet
