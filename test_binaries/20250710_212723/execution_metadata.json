@@ -1,9 +1,0 @@
-{
-  "timestamp": "20250710_212723",
-  "table_name": "customer",
-  "total_chunks": 2,
-  "saved_chunks": 0,
-  "note": "Some chunks may have already been processed and deleted",
-  "parallel_connections": 8,
-  "command": "python cu_pg_parquet.py --test --table customer --parallel 8 --chunks 2"
-}

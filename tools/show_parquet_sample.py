@@ -111,114 +111,154 @@ def check_corrupted_string(s):
     # 制御文字が多い、または異常に長い場合は破損と判定
     return control_chars > 2 or len(s) > 100
 
-def display_sample_data(df, n_rows=10, name="", thread_id=None, file_path=None):
+def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value=None, file_path=None, thread_id=None):
     """サンプルデータの表示"""
     print(f"\n{'='*60}")
     print(f"📊 サンプルデータ{' - ' + name if name else ''}")
     print(f"{'='*60}")
     
-    # thread_idでフィルタリング
-    if thread_id is not None and '_thread_id' in df.columns:
-        print(f"\n【Thread ID {thread_id} でフィルタリング】")
-        filtered_df = df[df['_thread_id'] == thread_id]
-        
-        if len(filtered_df) == 0:
-            print(f"  ⚠️ Thread ID {thread_id} のレコードが見つかりません")
-            # 存在するthread_idの範囲を表示
-            if not isinstance(df, dask_cudf.DataFrame):
-                unique_threads = df['_thread_id'].unique().to_pandas()
-                print(f"  存在するThread ID: {min(unique_threads):,} 〜 {max(unique_threads):,}")
-                print(f"  ユニークなThread ID数: {len(unique_threads):,}")
-            return
+    # 旧形式のthread_idサポート（互換性のため）
+    if thread_id is not None and filter_column is None:
+        filter_column = '_thread_id'
+        filter_value = str(thread_id)
+    
+    # カラムでフィルタリング
+    if filter_column is not None and filter_value is not None:
+        if filter_column in df.columns:
+            print(f"\n【{filter_column} = {filter_value} でフィルタリング】")
+            
+            # データ型に応じて値を変換
+            dtype_str = str(df[filter_column].dtype)
+            original_filter_value = filter_value
+            
+            try:
+                # 数値型への変換を試みる
+                if dtype_str in ['int8', 'int16', 'int32', 'int64']:
+                    filter_value = int(filter_value)
+                elif dtype_str in ['float32', 'float64']:
+                    filter_value = float(filter_value)
+                elif 'decimal' in dtype_str.lower():
+                    # Decimal型の場合はintに変換（cuDFのdecimal比較の互換性のため）
+                    filter_value = int(filter_value)
+                elif dtype_str == 'object' or 'string' in dtype_str.lower():
+                    # 文字列型の場合は文字列のまま
+                    filter_value = str(filter_value)
+                else:
+                    # その他の型は可能な限り元の値を使用
+                    pass
+            except (ValueError, TypeError) as e:
+                print(f"  警告: 値の変換に失敗しました ({original_filter_value} -> {dtype_str}): {e}")
+                # 変換に失敗した場合は元の値を使用
+            
+            # cuDFでのフィルタリング
+            mask = df[filter_column] == filter_value
+            filtered_df = df[mask]
+            
+            if len(filtered_df) == 0:
+                print(f"  ⚠️ {filter_column} = {filter_value} のレコードが見つかりません")
+                # 存在する値の範囲を表示
+                if not isinstance(df, dask_cudf.DataFrame):
+                    try:
+                        unique_values = df[filter_column].unique().to_pandas()
+                        if len(unique_values) <= 20:
+                            print(f"  存在する値: {sorted(unique_values)}")
+                        else:
+                            # 数値型の場合は最小値と最大値を表示
+                            if str(df[filter_column].dtype) in ['int8', 'int16', 'int32', 'int64', 'float32', 'float64']:
+                                min_val = df[filter_column].min()
+                                max_val = df[filter_column].max()
+                                # cuDFのScalarを処理
+                                if hasattr(min_val, 'compute'):
+                                    min_val = min_val.compute()
+                                if hasattr(max_val, 'compute'):
+                                    max_val = max_val.compute()
+                                print(f"  値の範囲: {min_val} 〜 {max_val}")
+                            print(f"  ユニークな値の数: {len(unique_values):,}")
+                    except:
+                        pass
+                return
+            else:
+                print(f"  ✓ {len(filtered_df):,} 件のレコードが見つかりました")
+                df = filtered_df
         else:
-            print(f"  ✓ {len(filtered_df):,} 件のレコードが見つかりました")
-            df = filtered_df
-    elif thread_id is not None:
-        print(f"  ⚠️ _thread_id カラムが存在しません")
-        print(f"  利用可能なカラム: {', '.join(df.columns)}")
+            print(f"  ⚠️ '{filter_column}' カラムが存在しません")
+            print(f"  利用可能なカラム: {', '.join(df.columns)}")
+            return
     
     # データ型情報
     print("\n【カラム情報】")
     for col, dtype in df.dtypes.items():
         print(f"  {col}: {dtype}")
     
-    # 表示する行数の調整（thread_idフィルタリング時は全件表示）
-    if thread_id is not None:
-        display_rows = len(df)
-        print(f"\n【Thread ID {thread_id} の全 {display_rows} 行】")
+    # 表示する行数の調整（フィルタリング時は全件表示）
+    if filter_column is not None and filter_value is not None:
+        display_rows = min(len(df), 100)  # フィルタリング時は最大100行まで
+        if display_rows < len(df):
+            print(f"\n【{filter_column} = {filter_value} の最初の {display_rows} 行（全 {len(df)} 行中）】")
+        else:
+            print(f"\n【{filter_column} = {filter_value} の全 {display_rows} 行】")
     else:
         display_rows = min(n_rows, len(df))
         print(f"\n【先頭{display_rows}行】")
     
-    # データの表示（破損チェック付き）
+    # データの表示
     try:
-        # PyArrowで直接読み込んで安全に表示
-        import pyarrow.parquet as pq
-        import pyarrow as pa
-        
-        if file_path and thread_id is not None:
-            # PyArrowで直接読み込み
-            table = pq.read_table(file_path)
+        # フィルタリング時の詳細表示
+        if filter_column is not None and filter_value is not None and len(df) > 0:
+            # cuDFからPandasに変換して表示
+            if isinstance(df, dask_cudf.DataFrame):
+                display_df = df.head(display_rows).to_pandas()
+            else:
+                display_df = df.head(display_rows).to_pandas()
             
-            # thread_idでフィルタリング
-            if '_thread_id' in table.column_names:
-                thread_col = table.column('_thread_id')
-                mask = pa.compute.equal(thread_col, pa.scalar(thread_id))
-                filtered_table = table.filter(mask)
+            # decimal128型を文字列に変換
+            for col in display_df.columns:
+                if 'decimal' in str(df[col].dtype).lower():
+                    display_df[col] = display_df[col].astype(str)
+            
+            # 詳細表示モード
+            for idx, row in display_df.iterrows():
+                print(f"\n  --- レコード {idx + 1} ---")
                 
-                # 各行を表示
-                for row_idx in range(min(filtered_table.num_rows, display_rows)):
-                    print(f"\n  --- レコード {row_idx + 1} ---")
+                field_shift_detected = False
+                
+                for col_name in display_df.columns:
+                    value = row[col_name]
                     
-                    field_shift_detected = False
+                    # 値を安全に表示
+                    if pd.isna(value):
+                        display_value = "NULL"
+                    else:
+                        display_value = str(value)
                     
-                    for col_name in filtered_table.column_names:
-                        try:
-                            col_data = filtered_table.column(col_name)
-                            value = col_data[row_idx].as_py()
-                            
-                            # customerテーブルの場合のフィールドシフト検出
-                            if 'customer' in str(file_path).lower():
-                                if col_name == 'c_custkey' and value == 0:
-                                    field_shift_detected = True
-                                    print(f"  ⚠️ {col_name}: {value} [フィールドシフトの可能性]")
-                                elif col_name == 'c_name' and not str(value).startswith('Customer#'):
-                                    print(f"  ⚠️ {col_name}: {value} [c_addressの値の可能性]")
-                                elif isinstance(value, str):
-                                    print(f"  {col_name}: {value}")
-                                else:
-                                    print(f"  {col_name}: {value}")
-                            else:
-                                print(f"  {col_name}: {value}")
-                                
-                        except UnicodeDecodeError:
-                            print(f"  ❌ {col_name}: [UnicodeDecodeError - 破損データ]")
-                        except Exception as e:
-                            print(f"  ❌ {col_name}: [{type(e).__name__}]")
-                    
-                    if field_shift_detected:
-                        print(f"\n  🔴 フィールドシフトが検出されました（c_custkeyから順に1つずつ前にシフト）")
+                    # customerテーブルの場合のフィールドシフト検出
+                    if 'customer' in str(file_path).lower() if file_path else False:
+                        if col_name == 'c_custkey' and str(value) == '0':
+                            field_shift_detected = True
+                            print(f"  ⚠️ {col_name}: {display_value} [フィールドシフトの可能性]")
+                        elif col_name == 'c_name' and not str(value).startswith('Customer#'):
+                            print(f"  ⚠️ {col_name}: {display_value} [c_addressの値の可能性]")
+                        else:
+                            print(f"  {col_name}: {display_value}")
+                    else:
+                        print(f"  {col_name}: {display_value}")
+                
+                if field_shift_detected:
+                    print(f"\n  🔴 フィールドシフトが検出されました（c_custkeyから順に1つずつ前にシフト）")
         else:
-            # 通常の表示（thread_id指定なしの場合）
+            # 通常の表示（フィルタ指定なしの場合）
             if isinstance(df, dask_cudf.DataFrame):
                 sample_df = df.head(display_rows).to_pandas()
             else:
                 sample_df = df.head(display_rows).to_pandas()
             
+            # decimal128型を文字列に変換
+            for col in sample_df.columns:
+                if 'decimal' in str(df[col].dtype).lower():
+                    sample_df[col] = sample_df[col].astype(str)
+            
             print(sample_df.to_string())
                 
-    except ImportError:
-        # PyArrowがない場合は従来の方法
-        print("\n  [PyArrowなしでの表示]")
-        try:
-            if isinstance(df, dask_cudf.DataFrame):
-                sample_df = df.head(display_rows).to_pandas()
-            else:
-                sample_df = df.head(display_rows).to_pandas()
-            print(sample_df.to_string())
-        except Exception as e:
-            print(f"\n  ❌ データ表示エラー: {type(e).__name__}")
-            print(f"     {str(e)[:200]}...")
     except Exception as e:
         print(f"\n  ❌ データ表示エラー: {type(e).__name__}")
         print(f"     {str(e)[:200]}...")
@@ -258,13 +298,13 @@ def display_sample_data(df, n_rows=10, name="", thread_id=None, file_path=None):
     except Exception as e:
         print(f"  統計量計算エラー: {e}")
 
-def process_large_parquet_files(thread_id=None, target_dir=None):
+def process_large_parquet_files(filter_column=None, filter_value=None, target_dir=None):
     """メイン処理フロー"""
     print("🚀 cuDF Parquetファイル処理開始")
     print("="*60)
     
-    if thread_id is not None:
-        print(f"\n🔍 Thread ID {thread_id} を検索します")
+    if filter_column is not None and filter_value is not None:
+        print(f"\n🔍 {filter_column} = {filter_value} を検索します")
     
     # 1. GPU環境確認
     print("\n【GPU環境確認】")
@@ -320,7 +360,8 @@ def process_large_parquet_files(thread_id=None, target_dir=None):
     
     # 6. 各ファイルのサンプル表示
     for i, (df, file_path) in enumerate(zip(dfs, file_paths)):
-        display_sample_data(df, n_rows=5, name=f"ファイル{i} ({Path(file_path).name})", thread_id=thread_id, file_path=file_path)
+        display_sample_data(df, n_rows=5, name=f"ファイル{i} ({Path(file_path).name})", 
+                          filter_column=filter_column, filter_value=filter_value, file_path=file_path)
 
 
 def parse_args():
@@ -333,21 +374,33 @@ def parse_args():
   # 通常の表示
   python show_parquet_sample.py
   
-  # 特定のthread_idでフィルタリング
+  # 特定のthread_idでフィルタリング（旧形式、互換性のため残す）
   python show_parquet_sample.py --thread_id 1852295
+  
+  # 任意のカラムでフィルタリング
+  python show_parquet_sample.py --filter _thread_id=1852295
+  python show_parquet_sample.py --filter c_custkey=3045312
+  python show_parquet_sample.py --filter c_name="Customer#003045312"
+  python show_parquet_sample.py --filter c_nation="JAPAN"
   
   # 特定のディレクトリを指定
   python show_parquet_sample.py --dir /path/to/parquet/files
   
   # 組み合わせ
-  python show_parquet_sample.py --thread_id 1852295 --dir .
+  python show_parquet_sample.py --filter c_region="ASIA" --dir .
         '''
     )
     
     parser.add_argument(
         '--thread_id',
         type=int,
-        help='フィルタリングするthread_id'
+        help='フィルタリングするthread_id（非推奨: --filter _thread_id=値 を使用してください）'
+    )
+    
+    parser.add_argument(
+        '--filter',
+        type=str,
+        help='フィルタリング条件（形式: カラム名=値）'
     )
     
     parser.add_argument(
@@ -364,9 +417,29 @@ if __name__ == "__main__":
         # コマンドライン引数のパース
         args = parse_args()
         
+        # フィルタリング条件の解析
+        filter_column = None
+        filter_value = None
+        
+        if args.filter:
+            # --filter カラム名=値 の形式をパース
+            if '=' in args.filter:
+                filter_column, filter_value = args.filter.split('=', 1)
+                # 引用符を除去
+                filter_value = filter_value.strip('"\'')
+            else:
+                print(f"✗ フィルタ形式が正しくありません: {args.filter}")
+                print("  正しい形式: --filter カラム名=値")
+                sys.exit(1)
+        elif args.thread_id is not None:
+            # 旧形式の --thread_id をサポート（互換性のため）
+            filter_column = '_thread_id'
+            filter_value = str(args.thread_id)
+        
         # メイン処理実行
         process_large_parquet_files(
-            thread_id=args.thread_id,
+            filter_column=filter_column,
+            filter_value=filter_value,
             target_dir=args.dir
         )
         

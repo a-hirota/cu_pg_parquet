@@ -228,13 +228,13 @@ class DirectProcessor:
         )
         
         # テストモードの場合、デバッグ情報も返される
-        if test_mode and len(parse_result) >= 4:
+        if test_mode and len(parse_result) == 6:
             row_positions_dev = parse_result[0]
             field_offsets_dev = parse_result[1]
             field_lengths_dev = parse_result[2]
-            thread_ids_dev = parse_result[3] if len(parse_result) > 3 else None
-            thread_start_positions_dev = parse_result[4] if len(parse_result) > 4 else None
-            thread_end_positions_dev = parse_result[5] if len(parse_result) > 5 else None
+            thread_ids_dev = parse_result[3]
+            thread_start_positions_dev = parse_result[4]
+            thread_end_positions_dev = parse_result[5]
         else:
             row_positions_dev = parse_result[0]
             field_offsets_dev = parse_result[1]

@@ -301,10 +301,56 @@ def read_uint16_simd16_lite(raw_data, pos, end_pos, ncols):
     return -1
 
 @cuda.jit(device=True, inline=True)
+def is_valid_decimal_header(raw_data, data_start, field_length):
+    """
+    PostgreSQL decimal/numeric型のヘッダーを検証
+    
+    Args:
+        raw_data: 生データ配列
+        data_start: フィールドデータの開始位置（長さフィールドの後）
+        field_length: フィールド長
+    
+    Returns:
+        bool: 有効なdecimalヘッダーならTrue
+    """
+    # 最低8バイト必要（ヘッダーサイズ）
+    if field_length < 8:
+        return False
+    
+    if data_start + 8 > raw_data.size:
+        return False
+    
+    idx = int32(data_start)
+    
+    # ndigits (bytes 0-1): must equal (field_length - 8) / 2
+    ndigits = (raw_data[idx] << 8) | raw_data[idx + 1]
+    expected_ndigits = (field_length - 8) // 2
+    
+    # ndigitsの妥当性チェック
+    # PostgreSQLのnumericは最大1000桁まで対応だが、実用的には100桁程度
+    if ndigits != expected_ndigits or ndigits < 0 or ndigits > 100:
+        return False
+    
+    # sign (bytes 4-5): must be one of the valid values
+    sign = (raw_data[idx + 4] << 8) | raw_data[idx + 5]
+    
+    # Valid sign values:
+    # 0x0000 = positive
+    # 0x4000 = negative  
+    # 0xC000 = NaN
+    # 0xD000 = +Infinity (実際にはPostgreSQLでは使用されない)
+    # 0xF000 = -Infinity (実際にはPostgreSQLでは使用されない)
+    if sign != 0x0000 and sign != 0x4000 and sign != 0xC000:
+        return False
+    
+    return True
+
+@cuda.jit(device=True, inline=True)
 def validate_and_extract_fields_lite(
     raw_data, row_start, expected_cols, fixed_field_lengths,
     field_offsets_out,  # この行のフィールド相対オフセット配列（uint32）
-    field_lengths_out   # この行のフィールド長配列
+    field_lengths_out,  # この行のフィールド長配列
+    column_pg_oids      # int32[ncols] - 各列のPostgreSQL OID
 ):
     """
     行検証とフィールド抽出を同時実行（軽量版）
@@ -355,6 +401,15 @@ def validate_and_extract_fields_lite(
             if pos + 4 + flen > raw_data.size:
                 return False, -6
 
+            # PostgreSQL numeric型（OID 1700）の場合、追加検証
+            if (field_idx < expected_cols and 
+                column_pg_oids[field_idx] == 1700 and 
+                flen >= 8):
+                # numeric型のヘッダー検証
+                if not is_valid_decimal_header(raw_data, pos + 4, flen):
+                    # 無効なnumericヘッダー
+                    return False, -7
+
             # フィールド情報記録（相対オフセットとして保存）
             # 注意: row_startからの相対位置を計算
             relative_offset = uint32((pos + 4) - row_start)
@@ -386,7 +441,8 @@ def parse_rows_and_fields_lite(
     # 設定
     thread_stride,
     max_rows,
-    fixed_field_lengths
+    fixed_field_lengths,
+    column_pg_oids      # int32[ncols] - 各列のPostgreSQL OID
 ):
     """
     軽量統合カーネル: 共有メモリ使用量を最小化
@@ -444,7 +500,8 @@ def parse_rows_and_fields_lite(
         is_valid, row_end = validate_and_extract_fields_lite(
             raw_data, candidate_pos, ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
-            local_field_lengths[local_count]   # この行のフィールド配列
+            local_field_lengths[local_count],  # この行のフィールド配列
+            column_pg_oids                     # PostgreSQL OID配列
         )
 
         if is_valid:
@@ -551,7 +608,8 @@ def parse_rows_and_fields_lite_with_thread_ids(
         is_valid, row_end = validate_and_extract_fields_lite(
             raw_data, candidate_pos, ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
-            local_field_lengths[local_count]   # この行のフィールド配列
+            local_field_lengths[local_count],  # この行のフィールド配列
+            column_pg_oids                     # PostgreSQL OID配列
         )
 
         if is_valid:
@@ -663,7 +721,8 @@ def parse_rows_and_fields_lite_with_full_debug(
         is_valid, row_end = validate_and_extract_fields_lite(
             raw_data, candidate_pos, ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
-            local_field_lengths[local_count]   # この行のフィールド配列
+            local_field_lengths[local_count],  # この行のフィールド配列
+            column_pg_oids                     # PostgreSQL OID配列
         )
 
         if is_valid:
@@ -723,7 +782,15 @@ def parse_rows_and_fields_lite_debug(
     
     # デバッグ用
     thread_debug_info,  # 各スレッドのデバッグ情報 [tid, start_pos, end_pos, row_count]
-    total_threads       # 総スレッド数
+    total_threads,      # 総スレッド数
+    
+    # スレッド情報配列
+    thread_ids,         # int32[max_rows] - 各行を処理したスレッドID
+    thread_start_positions,  # uint64[max_rows] - 各行のスレッド開始位置
+    thread_end_positions,    # uint64[max_rows] - 各行のスレッド終了位置
+    
+    # 型情報
+    column_pg_oids      # int32[ncols] - 各列のPostgreSQL OID
 ):
     """
     デバッグ版カーネル: スレッド情報を記録
@@ -784,7 +851,8 @@ def parse_rows_and_fields_lite_debug(
         is_valid, row_end = validate_and_extract_fields_lite(
             raw_data, candidate_pos, ncols, fixed_field_lengths,
             local_field_offsets[local_count],
-            local_field_lengths[local_count]
+            local_field_lengths[local_count],
+            column_pg_oids
         )
 
         if is_valid:
@@ -810,6 +878,11 @@ def parse_rows_and_fields_lite_debug(
             if global_idx < max_rows:
                 # 行位置
                 row_positions[global_idx] = local_positions[i]
+                
+                # スレッド情報を記録
+                thread_ids[global_idx] = tid
+                thread_start_positions[global_idx] = start_pos
+                thread_end_positions[global_idx] = end_pos
 
                 # フィールド情報
                 for j in range(min(ncols, 17)):
@@ -1033,19 +1106,23 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     ncols = len(columns)
     data_size = raw_dev.size - header_size
 
-    # 固定長フィールド情報
+    # 固定長フィールド情報と型情報
     try:
         from ..types import PG_OID_TO_BINARY_SIZE
     except ImportError:
         from src.types import PG_OID_TO_BINARY_SIZE
 
     fixed_field_lengths = np.full(ncols, -1, dtype=np.int32)
+    column_pg_oids = np.zeros(ncols, dtype=np.int32)  # PostgreSQL OIDを格納
+    
     for i, column in enumerate(columns):
         pg_binary_size = PG_OID_TO_BINARY_SIZE.get(column.pg_oid)
         if pg_binary_size is not None:
             fixed_field_lengths[i] = pg_binary_size
+        column_pg_oids[i] = column.pg_oid  # OIDを保存
 
     fixed_field_lengths_dev = cuda.to_device(fixed_field_lengths)
+    column_pg_oids_dev = cuda.to_device(column_pg_oids)
 
     # 推定行サイズ計算
     estimated_row_size = estimate_row_size_from_columns(columns)
@@ -1054,6 +1131,19 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
         prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
         print(f"{prefix} [DEBUG] 推定行サイズ: {estimated_row_size} バイト (列数: {ncols})")
+        
+        # 可変長フィールドのデバッグ出力
+        variable_fields = []
+        decimal_fields = []
+        for i, column in enumerate(columns):
+            if fixed_field_lengths[i] == -1:
+                variable_fields.append(f"{column.name}(idx={i}, oid={column.pg_oid})")
+            if column.pg_oid == 1700:  # numeric型
+                decimal_fields.append(f"{column.name}(idx={i})")
+        if variable_fields:
+            print(f"{prefix} [DEBUG] 可変長フィールド: {', '.join(variable_fields[:3])}{'...' if len(variable_fields) > 3 else ''}")
+        if decimal_fields:
+            print(f"{prefix} [DEBUG] numeric型フィールド: {', '.join(decimal_fields)}")
 
     # グリッド設定（2次元グリッドで大規模データ対応）
     props = get_device_properties()
@@ -1292,14 +1382,17 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
             raw_dev, header_size, ncols,
             row_positions, field_offsets, field_lengths, row_count,
             thread_stride, max_rows, fixed_field_lengths_dev,
-            thread_debug_info, actual_threads
+            thread_debug_info, actual_threads,
+            thread_ids, thread_start_positions, thread_end_positions,
+            column_pg_oids_dev
         )
     else:
         # 本番用カーネル（性能影響なし）
         parse_rows_and_fields_lite[grid_2d, threads_per_block](
             raw_dev, header_size, ncols,
             row_positions, field_offsets, field_lengths, row_count,
-            thread_stride, max_rows, fixed_field_lengths_dev
+            thread_stride, max_rows, fixed_field_lengths_dev,
+            column_pg_oids_dev
         )
     cuda.synchronize()
 
