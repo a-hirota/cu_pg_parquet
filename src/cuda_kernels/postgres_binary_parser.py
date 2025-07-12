@@ -294,10 +294,10 @@ def read_uint16_simd16_lite(raw_data, pos, end_pos, ncols):
     for i in range(0, max_offset):
         if pos + i + 1 > end_pos:
             return -3    
-        idx = int32(pos + i)
+        idx = pos + i
         num_fields = (raw_data[idx] << 8) | raw_data[idx + 1]        
         if num_fields == ncols:
-            return int32(pos + i)
+            return int64(pos + i)
     return -1
 
 @cuda.jit(device=True, inline=True)
@@ -320,7 +320,7 @@ def is_valid_decimal_header(raw_data, data_start, field_length):
     if data_start + 8 > raw_data.size:
         return False
     
-    idx = int32(data_start)
+    idx = data_start
     
     # ndigits (bytes 0-1): must equal (field_length - 8) / 2
     ndigits = (raw_data[idx] << 8) | raw_data[idx + 1]
@@ -359,7 +359,7 @@ def validate_and_extract_fields_lite(
         return False, -1
 
     # フィールド数確認
-    row_start_idx = int32(row_start)
+    row_start_idx = row_start
     num_fields = (raw_data[row_start_idx] << 8) | raw_data[row_start_idx + 1]
     if num_fields != expected_cols:
         return False, -2
@@ -372,7 +372,7 @@ def validate_and_extract_fields_lite(
             return False, -3
 
         # フィールド長読み取り
-        pos_idx = int32(pos)
+        pos_idx = pos
         flen = (
             int32(raw_data[pos_idx]) << 24 | int32(raw_data[pos_idx+1]) << 16 |
             int32(raw_data[pos_idx+2]) << 8 | int32(raw_data[pos_idx+3])
@@ -419,7 +419,7 @@ def validate_and_extract_fields_lite(
 
     # 次行ヘッダ検証
     if pos + 2 <= raw_data.size:
-        pos_idx2 = int32(pos)
+        pos_idx2 = pos
         next_header = (raw_data[pos_idx2] << 8) | raw_data[pos_idx2 + 1]
         if next_header != expected_cols and next_header != 0xFFFF:
             return False, -8
