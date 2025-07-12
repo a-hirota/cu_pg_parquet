@@ -364,9 +364,21 @@ async fn process_range_parallel(
         }
     }
     
-    // 最後の残りバッファをすべて書き込み
+    // 最後の残りバッファをすべて書き込み（終端マーカー確認）
     for chunk_id in 0..CHUNKS {
         if !chunk_buffers[chunk_id].is_empty() {
+            // PostgreSQL COPY BINARYの終端マーカー（0xFFFF）が含まれているか確認
+            let len = chunk_buffers[chunk_id].len();
+            let has_termination = len >= 2 && 
+                chunk_buffers[chunk_id][len-2] == 0xFF && 
+                chunk_buffers[chunk_id][len-1] == 0xFF;
+            
+            if !has_termination {
+                // 終端マーカーを追加
+                chunk_buffers[chunk_id].push(0xFF);
+                chunk_buffers[chunk_id].push(0xFF);
+            }
+            
             let offset = worker_offsets[chunk_id].fetch_add(
                 chunk_buffers[chunk_id].len() as u64, 
                 Ordering::Relaxed

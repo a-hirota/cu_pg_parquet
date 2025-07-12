@@ -318,8 +318,23 @@ async fn process_range(
         }
     }
     
-    // 残りのデータを書き込み
+    // 残りのデータを書き込み（終端マーカー確認）
     if !write_buffer.is_empty() {
+        // PostgreSQL COPY BINARYの終端マーカー（0xFFFF）が含まれているか確認
+        let len = write_buffer.len();
+        let has_termination = len >= 2 && write_buffer[len-2] == 0xFF && write_buffer[len-1] == 0xFF;
+        
+        if !has_termination {
+            if is_test_mode {
+                println!("ワーカー{}: 警告 - 終端マーカー(0xFFFF)が見つかりません。追加します。", worker_id);
+            }
+            // 終端マーカーを追加
+            write_buffer.push(0xFF);
+            write_buffer.push(0xFF);
+        } else if is_test_mode {
+            println!("ワーカー{}: 終端マーカー(0xFFFF)を確認しました。", worker_id);
+        }
+        
         let bytes_to_write = write_buffer.len();
         let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
         
