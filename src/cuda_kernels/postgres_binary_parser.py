@@ -1156,7 +1156,21 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
     
     # データサイズと推定行サイズから必要なスレッド数を計算
     estimated_rows = data_size // estimated_row_size
-    target_threads = estimated_rows  # 1行1スレッドから開始
+    
+    # 環境変数から1スレッドあたりの処理行数を取得（デフォルト: 32行）
+    rows_per_thread = int(os.environ.get('GPUPGPARSER_ROWS_PER_THREAD', '32'))
+    blocks_per_sm = int(os.environ.get('GPUPGPARSER_BLOCKS_PER_SM', '4'))
+    
+    # 最適なスレッド数を計算
+    optimal_threads = sm_count * blocks_per_sm * threads_per_block
+    
+    # ターゲットスレッド数を計算（最小でもoptimal_threads、最大でも4倍まで）
+    if rows_per_thread > 1:
+        target_threads = max(estimated_rows // rows_per_thread, optimal_threads)
+        target_threads = min(target_threads, optimal_threads * 4)
+    else:
+        # 従来モード（1行1スレッド）
+        target_threads = estimated_rows
     
     # グリッドサイズ計算
     blocks_x = min((target_threads + threads_per_block - 1) // threads_per_block, max_blocks_x)
@@ -1166,6 +1180,8 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
         prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
         print(f"{prefix} [GRID計算] target_threads={target_threads:,}, blocks_x={blocks_x:,}, blocks_y計算値={blocks_y:,}")
+        if rows_per_thread > 1:
+            print(f"{prefix} [GRID計算] rows_per_thread={rows_per_thread}, optimal_threads={optimal_threads:,}, blocks_per_sm={blocks_per_sm}")
     
     # Y次元制限チェック
     if blocks_y > max_blocks_y:
@@ -1197,8 +1213,13 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         return None, None, None, None, None
     
     thread_stride = (data_size + actual_threads - 1) // actual_threads
+    
+    # スレッドストライドを行サイズの倍数に調整（行境界でアライメント）
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
+    else:
+        # 行サイズの倍数に切り上げ
+        thread_stride = ((thread_stride + estimated_row_size - 1) // estimated_row_size) * estimated_row_size
     
     
     # thread_strideが大きい場合のワーニング（制限はしない）
@@ -1385,6 +1406,9 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"{prefix} Thread Stride:           {thread_stride:,} bytes")
         print(f"{prefix} Estimated Rows:          {estimated_rows:,}")
         print(f"{prefix} Estimated Rows/Thread:   {thread_stride//estimated_row_size:.1f}")
+        if rows_per_thread > 1:
+            print(f"{prefix} Optimization Mode:       {rows_per_thread} rows/thread target")
+            print(f"{prefix} Thread Reduction:        {estimated_rows:,} → {target_threads:,} ({(1-target_threads/estimated_rows)*100:.1f}% reduction)")
         print(f"{prefix} " + "="*60 + "\n")
     
     if test_mode:
