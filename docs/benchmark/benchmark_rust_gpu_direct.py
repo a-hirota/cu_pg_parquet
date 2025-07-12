@@ -224,11 +224,12 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             if bytes_read != file_size:
                 raise RuntimeError(f"読み込みサイズ不一致: {bytes_read} != {file_size}")
             
-            # ファイル存在確認（kvikio読み込み後）
-            if os.path.exists(chunk_file):
-                print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} はまだ存在します")
-            else:
-                print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} が削除されました")
+            # ファイル存在確認（kvikio読み込み後） - テストモードのみ
+            if os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
+                if os.path.exists(chunk_file):
+                    print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} はまだ存在します")
+                else:
+                    print(f"[Consumer-{consumer_id}] kvikio読み込み後: {chunk_file} が削除されました")
             
             # numba cuda配列に変換（ゼロコピー）
             raw_dev = cuda.as_cuda_array(gpu_buffer).view(dtype=np.uint8)
@@ -408,6 +409,13 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_na
     )
     producer_thread.start()
     
+    # GPUウォーミングアップ（Producer開始と同時に実行）
+    warmup_thread = threading.Thread(
+        target=gpu_warmup,
+        args=(columns,)
+    )
+    warmup_thread.start()
+    
     # Consumerスレッド開始（1つのみ - GPUメモリ制約）
     consumer_thread = threading.Thread(
         target=gpu_consumer,
@@ -423,6 +431,7 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_na
     total_size = 0
     
     # スレッドの終了を待機しながら統計を収集
+    warmup_thread.join()  # ウォーミングアップ完了を待つ
     producer_thread.join()
     consumer_thread.join()
     
@@ -451,6 +460,86 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_na
         'total_size': total_size,
         'processed_chunks': len(chunk_stats)
     }
+
+
+def gpu_warmup(columns):
+    """GPUウォーミングアップ - JITコンパイルとCUDA初期化"""
+    try:
+        print("\n🔥 GPUウォーミングアップ中...")
+        
+        # PostgreSQL COPY BINARYヘッダー（19バイト）
+        header = [
+            0x50, 0x47, 0x43, 0x4F, 0x50, 0x59, 0x0A, 0xFF, 0x0D, 0x0A, 0x00,  # PGCOPY
+            0x00, 0x00, 0x00, 0x00,  # flags
+            0x00, 0x00, 0x00, 0x00   # header extension
+        ]
+        
+        # 1行分のダミーデータ（17列）を作成
+        row_data = []
+        row_data.extend([0x00, 0x11])  # 17フィールド
+        
+        for i in range(17):
+            if i < 8:  # 数値フィールド（int64）
+                row_data.extend([0x00, 0x00, 0x00, 0x08])  # 長さ8
+                row_data.extend([0x00] * 8)  # 8バイトのゼロ
+            else:  # 文字列フィールド
+                row_data.extend([0x00, 0x00, 0x00, 0x04])  # 長さ4
+                row_data.extend([0x54, 0x45, 0x53, 0x54])  # "TEST"
+        
+        # ダミーデータ作成（100KB程度 - より現実的なサイズ）
+        dummy_list = header + row_data * 1000  # 1000行分
+        # 終端マーカー追加（0xFFFF）
+        dummy_list.extend([0xFF, 0xFF])
+        dummy_data = np.array(dummy_list, dtype=np.uint8)
+        
+        # GPU処理実行（JITコンパイルとCUDA初期化）
+        # 実際の処理と同じ環境変数を設定
+        os.environ['GPUPGPARSER_ROWS_PER_THREAD'] = os.environ.get('GPUPGPARSER_ROWS_PER_THREAD', '32')
+        os.environ['GPUPGPARSER_STRING_ROWS_PER_THREAD'] = os.environ.get('GPUPGPARSER_STRING_ROWS_PER_THREAD', '1')
+        
+        # GPU転送
+        import cupy as cp
+        gpu_buffer = cp.asarray(dummy_data).view(dtype=cp.uint8)
+        raw_dev = cuda.as_cuda_array(gpu_buffer).view(dtype=np.uint8)
+        
+        # ヘッダーサイズ検出
+        header_size = detect_pg_header_size(dummy_data)
+        
+        # DirectColumnExtractorを使用して処理
+        from src.postgres_to_cudf import DirectColumnExtractor
+        from src.cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2_lite
+        
+        # GPUパースカーネルを直接実行（JITコンパイル確実に実行）
+        row_positions, field_offsets, field_lengths = parse_binary_chunk_gpu_ultra_fast_v2_lite(
+            raw_dev, columns, header_size, debug=False, test_mode=False
+        )
+        
+        # ExtractorでcuDF DataFrame作成（データ抽出）
+        extractor = DirectColumnExtractor()
+        
+        # 固定長列と文字列列の処理（JITコンパイル）
+        fixed_dfs = extractor.extract_fixed_columns(
+            raw_dev, columns, row_positions, field_offsets, field_lengths
+        )
+        
+        # 最小限のcuDF結合操作
+        import cudf
+        if fixed_dfs:
+            cudf_df = cudf.concat(fixed_dfs, axis=1)
+        
+        # 結果を破棄
+        if fixed_dfs:
+            del cudf_df
+        del row_positions
+        del field_offsets
+        del field_lengths
+        del gpu_buffer
+        del raw_dev
+        
+        print("✅ GPUウォーミングアップ完了\n")
+        
+    except Exception as e:
+        print(f"⚠️  GPUウォーミングアップ警告: {e}\n")
 
 
 def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=None):

@@ -12,7 +12,7 @@ import warnings
 import numpy as np
 import cupy as cp
 import cudf
-from numba import cuda
+from numba import cuda, int32, uint32
 import pylibcudf as plc
 import rmm
 from numba import uint8
@@ -976,13 +976,16 @@ class DirectColumnExtractor:
                 max_blocks_x = self.device_props.get('max_grid_dim_x', 2147483647)
                 max_blocks_y = self.device_props.get('max_grid_dim_y', 65535)
                 
-                # まずは1行/1スレッドで計算
-                total_threads_needed = rows
+                # 環境変数から文字列処理の最適化パラメータを取得
+                string_rows_per_thread = int(os.environ.get('GPUPGPARSER_STRING_ROWS_PER_THREAD', '1'))
+                
+                # スレッド数計算（デフォルト1行/スレッド）
+                total_threads_needed = (rows + string_rows_per_thread - 1) // string_rows_per_thread
                 blocks_x = min((total_threads_needed + threads_per_block - 1) // threads_per_block, max_blocks_x)
                 blocks_y = (total_threads_needed + blocks_x * threads_per_block - 1) // (blocks_x * threads_per_block)
                 
-                # Y次元の制限を超える場合は各スレッドが複数行処理
-                rows_per_thread = 1
+                # Y次元の制限を超える場合は各スレッドがさらに多くの行を処理
+                rows_per_thread = string_rows_per_thread
                 if blocks_y > max_blocks_y:
                     # 最大グリッドサイズでの総スレッド数
                     max_total_threads = max_blocks_x * max_blocks_y * threads_per_block
@@ -1007,6 +1010,9 @@ class DirectColumnExtractor:
                     print(f"{prefix} Total Threads: {blocks_x * blocks_y * threads_per_block:,}")
                     print(f"{prefix} Rows per Thread: {rows_per_thread}")
                     print(f"{prefix} Total Rows: {rows:,}")
+                    if string_rows_per_thread > 1:
+                        print(f"{prefix} Optimization: {string_rows_per_thread} rows/thread target")
+                        print(f"{prefix} Thread Reduction: {rows:,} → {total_threads_needed:,} ({(1-total_threads_needed/rows)*100:.1f}% reduction)")
                     print(f"{prefix} ============================================================\n")
                 
                 @cuda.jit
@@ -1069,7 +1075,7 @@ class DirectColumnExtractor:
                 ):
                     """
                     シンプルな直接コピーカーネル（2次元グリッド対応）
-                    デバッグ用に最もシンプルな実装
+                    最もシンプルな実装
                     """
                     # 2次元グリッドからスレッドIDを計算
                     tid = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x + \
