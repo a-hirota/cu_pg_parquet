@@ -299,16 +299,13 @@ async fn process_range(
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
         
-        // 最初の書き込み時に0xFFFFを追加（ただし、オフセット0の場合は除く）
+        // 最初の書き込み時に0xFFFFを追加
         if is_first_write {
-            let current_offset = worker_offset.load(Ordering::SeqCst);
-            if current_offset > 0 {
-                if is_test_mode {
-                    println!("ワーカー{}: オフセット{}で0xFFFFを追加", worker_id, current_offset);
-                }
-                write_buffer.push(0xFF);
-                write_buffer.push(0xFF);
+            if is_test_mode {
+                println!("ワーカー{}: 0xFFFFを追加", worker_id);
             }
+            write_buffer.push(0xFF);
+            write_buffer.push(0xFF);
             is_first_write = false;
         }
         
@@ -334,20 +331,17 @@ async fn process_range(
     
     // 残りのデータを書き込み
     if !write_buffer.is_empty() {
-        // 最初の書き込みで、まだ0xFFFFを追加していない場合は追加（ただし、オフセット0の場合は除く）
+        // 最初の書き込みで、まだ0xFFFFを追加していない場合は追加
         if is_first_write {
-            let current_offset = worker_offset.load(Ordering::SeqCst);
-            if current_offset > 0 {
-                if is_test_mode {
-                    println!("ワーカー{}: 最後の書き込みでオフセット{}で0xFFFFを追加", worker_id, current_offset);
-                }
-                // バッファの先頭に0xFFFFを挿入
-                let mut new_buffer = Vec::with_capacity(write_buffer.len() + 2);
-                new_buffer.push(0xFF);
-                new_buffer.push(0xFF);
-                new_buffer.extend_from_slice(&write_buffer);
-                write_buffer = new_buffer;
+            if is_test_mode {
+                println!("ワーカー{}: 最後の書き込みで0xFFFFを追加", worker_id);
             }
+            // バッファの先頭に0xFFFFを挿入
+            let mut new_buffer = Vec::with_capacity(write_buffer.len() + 2);
+            new_buffer.push(0xFF);
+            new_buffer.push(0xFF);
+            new_buffer.extend_from_slice(&write_buffer);
+            write_buffer = new_buffer;
         }
         
         let bytes_to_write = write_buffer.len();

@@ -329,13 +329,10 @@ async fn process_range_parallel(
         let chunk_id = current_chunk % CHUNKS;
         current_chunk += 1;
         
-        // このチャンクへの最初の書き込みの場合、0xFFFFを追加（ただし、オフセット0の場合は除く）
+        // このチャンクへの最初の書き込みの場合、0xFFFFを追加
         if first_write_to_chunk[chunk_id] {
-            let current_offset = worker_offsets[chunk_id].load(Ordering::Relaxed);
-            if current_offset > 0 {
-                chunk_buffers[chunk_id].push(0xFF);
-                chunk_buffers[chunk_id].push(0xFF);
-            }
+            chunk_buffers[chunk_id].push(0xFF);
+            chunk_buffers[chunk_id].push(0xFF);
             first_write_to_chunk[chunk_id] = false;
         }
         
@@ -380,17 +377,14 @@ async fn process_range_parallel(
     // 最後の残りバッファをすべて書き込み
     for chunk_id in 0..CHUNKS {
         if !chunk_buffers[chunk_id].is_empty() {
-            // このチャンクへの最初の書き込みの場合、0xFFFFを追加（ただし、オフセット0の場合は除く）
+            // このチャンクへの最初の書き込みの場合、0xFFFFを追加
             if first_write_to_chunk[chunk_id] {
-                let current_offset = worker_offsets[chunk_id].load(Ordering::Relaxed);
-                if current_offset > 0 {
-                    // バッファの先頭に0xFFFFを挿入
-                    let mut new_buffer = Vec::with_capacity(chunk_buffers[chunk_id].len() + 2);
-                    new_buffer.push(0xFF);
-                    new_buffer.push(0xFF);
-                    new_buffer.extend_from_slice(&chunk_buffers[chunk_id]);
-                    chunk_buffers[chunk_id] = new_buffer;
-                }
+                // バッファの先頭に0xFFFFを挿入
+                let mut new_buffer = Vec::with_capacity(chunk_buffers[chunk_id].len() + 2);
+                new_buffer.push(0xFF);
+                new_buffer.push(0xFF);
+                new_buffer.extend_from_slice(&chunk_buffers[chunk_id]);
+                chunk_buffers[chunk_id] = new_buffer;
                 first_write_to_chunk[chunk_id] = false;
             }
             
