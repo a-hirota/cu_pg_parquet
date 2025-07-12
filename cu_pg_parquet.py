@@ -84,6 +84,12 @@ def main():
         type=str,
         help="出力ディレクトリ（--output-dirのエイリアス）"
     )
+    parser.add_argument(
+        "--test-duplicate-keys",
+        type=str,
+        default=None,
+        help="テストモード時の重複チェックに使用する列名（カンマ区切り）。例: lo_orderkey,lo_linenumber"
+    )
     
     args = parser.parse_args()
     
@@ -125,6 +131,11 @@ def main():
     if args.test:
         os.environ["GPUPGPARSER_TEST_MODE"] = "1"
     
+    # --test-duplicate-keysが指定されているが--testがない場合は警告
+    if args.test_duplicate_keys and not args.test:
+        print("⚠️  警告: --test-duplicate-keysは--testと併用する必要があります。")
+        print("   --test-duplicate-keysオプションは無視されます。")
+    
     # テーブル名を環境変数に設定（Rust側でも使用）
     os.environ["TABLE_NAME"] = args.table
     
@@ -151,7 +162,12 @@ def main():
     
     try:
         # benchmark_rust_gpu_direct.pyのmain()を実行
-        benchmark_main(total_chunks=args.chunks, table_name=args.table, test_mode=args.test)
+        benchmark_main(
+            total_chunks=args.chunks, 
+            table_name=args.table, 
+            test_mode=args.test,
+            test_duplicate_keys=args.test_duplicate_keys if args.test else None
+        )
         elapsed_time = time.time() - start_time
         print(f"\n処理完了: {elapsed_time:.2f}秒")
         return 0

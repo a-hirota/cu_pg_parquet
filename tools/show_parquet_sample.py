@@ -402,7 +402,7 @@ def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value
     except Exception as e:
         print(f"  統計量計算エラー: {e}")
 
-def process_large_parquet_files(filter_column=None, filter_value=None, target_dir=None, sort_column=None):
+def process_large_parquet_files(filter_column=None, filter_value=None, target_dir=None, sort_column=None, file_path=None):
     """メイン処理フロー"""
     print("🚀 cuDF Parquetファイル処理開始")
     print("="*60)
@@ -417,29 +417,40 @@ def process_large_parquet_files(filter_column=None, filter_value=None, target_di
     print("\n【GPU環境確認】")
     check_gpu_environment()
     
-    # 2. ディレクトリ内の全parquetファイルを取得
-    if target_dir:
-        output_dir = Path(target_dir)
+    # 2. ファイルパスの決定
+    if file_path:
+        # --file オプションが指定された場合
+        file_paths = [Path(file_path)]
+        if not file_paths[0].exists():
+            print(f"\n✗ ファイルが見つかりません: {file_path}")
+            return
+        print(f"\n【指定ファイル】")
+        print(f"ファイル: {file_path}")
     else:
-        # デフォルトは現在のディレクトリまたはoutputディレクトリ
-        if Path("output").exists():
-            output_dir = Path("output")
+        # ディレクトリ内の全parquetファイルを取得
+        if target_dir:
+            output_dir = Path(target_dir)
         else:
-            output_dir = Path(".")
-    
-    if not output_dir.exists():
-        print(f"\n✗ ディレクトリが見つかりません: {output_dir}")
-        return
+            # デフォルトは現在のディレクトリまたはoutputディレクトリ
+            if Path("output").exists():
+                output_dir = Path("output")
+            else:
+                output_dir = Path(".")
         
-    file_paths = sorted(output_dir.glob("*.parquet"))
-    
-    if not file_paths:
-        print(f"\n✗ {output_dir}ディレクトリ内にparquetファイルが見つかりません")
-        return
+        if not output_dir.exists():
+            print(f"\n✗ ディレクトリが見つかりません: {output_dir}")
+            return
+            
+        file_paths = sorted(output_dir.glob("*.parquet"))
         
-    print(f"\n【検出されたファイル】")
-    print(f"ディレクトリ: {output_dir}")
-    print(f"ファイル数: {len(file_paths)}")
+        if not file_paths:
+            print(f"\n✗ {output_dir}ディレクトリ内にparquetファイルが見つかりません")
+            return
+        
+    if not file_path:
+        print(f"\n【検出されたファイル】")
+        print(f"ディレクトリ: {output_dir}")
+        print(f"ファイル数: {len(file_paths)}")
     for file_path in file_paths:
         print(f"  - {file_path.name}")
     
@@ -501,6 +512,10 @@ def parse_args():
   # 通常の表示
   python show_parquet_sample.py
   
+  # 特定のファイルを指定
+  python show_parquet_sample.py --file output/customer_chunk_0_queue.parquet
+  python show_parquet_sample.py --file /path/to/specific.parquet
+  
   # 特定のthread_idでフィルタリング（旧形式、互換性のため残す）
   python show_parquet_sample.py --thread_id 1852295
   
@@ -520,7 +535,7 @@ def parse_args():
   # 組み合わせ
   python show_parquet_sample.py --filter c_region="ASIA" --dir .
   python show_parquet_sample.py --sort c_custkey --filter c_nationkey=10
-  python show_parquet_sample.py --sort c_custkey --filter c_mktsegment="BUILDING"
+  python show_parquet_sample.py --file output/customer_chunk_0_queue.parquet --filter c_custkey=12345
         '''
     )
     
@@ -548,6 +563,12 @@ def parse_args():
         help='ソートするカラム名（整数型・decimal型対応）。複数ファイルは自動的に結合され、欠落値分析も実行されます'
     )
     
+    parser.add_argument(
+        '--file',
+        type=str,
+        help='読み込む特定のParquetファイルパス'
+    )
+    
     return parser.parse_args()
 
 
@@ -555,6 +576,13 @@ if __name__ == "__main__":
     try:
         # コマンドライン引数のパース
         args = parse_args()
+        
+        # --dirと--fileが同時に指定されていないかチェック
+        if args.dir and args.file:
+            print("✗ エラー: --dirと--fileは同時に指定できません")
+            print("  --dir: ディレクトリ内の全parquetファイルを処理")
+            print("  --file: 特定のファイルのみを処理")
+            sys.exit(1)
         
         # フィルタリング条件の解析
         filter_column = None
@@ -580,7 +608,8 @@ if __name__ == "__main__":
             filter_column=filter_column,
             filter_value=filter_value,
             target_dir=args.dir,
-            sort_column=args.sort
+            sort_column=args.sort,
+            file_path=args.file
         )
         
     except ImportError as e:

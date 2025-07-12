@@ -453,7 +453,7 @@ def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_na
     }
 
 
-def main(total_chunks=8, table_name=None, test_mode=False):
+def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=None):
     global TABLE_NAME
     if table_name:
         TABLE_NAME = table_name
@@ -574,18 +574,29 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                         else:
                             print(f"└─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
                             
-                        # テーブルのキー列を特定（通常は最初の列）
-                        cur.execute(f"""
-                            SELECT column_name 
-                            FROM information_schema.columns 
-                            WHERE table_name = '{table_name}' 
-                            AND ordinal_position = 1
-                        """)
-                        key_column = cur.fetchone()
+                        # 重複チェック用のキー列を決定
+                        key_columns = []
+                        if test_duplicate_keys:
+                            # カンマ区切りの文字列をリストに変換
+                            key_columns = [col.strip() for col in test_duplicate_keys.split(',')]
+                            if len(key_columns) > 1:
+                                print(f"\n【重複チェック（複合キー: {', '.join(key_columns)}）】")
+                            else:
+                                print(f"\n【重複チェック（キー列: {key_columns[0]}）】")
+                        else:
+                            # デフォルト: 最初の列を使用
+                            cur.execute(f"""
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_name = '{table_name}' 
+                                AND ordinal_position = 1
+                            """)
+                            result = cur.fetchone()
+                            if result:
+                                key_columns = [result[0]]
+                                print(f"\n【重複チェック（キー列: {key_columns[0]}）】")
                         
-                        if key_column:
-                            key_column_name = key_column[0]
-                            print(f"\n【重複チェック（キー列: {key_column_name}）】")
+                        if key_columns:
                             
                             # 全Parquetファイルを読み込んで重複をチェック
                             import cudf
@@ -595,29 +606,56 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                             for i, pf in enumerate(parquet_files):
                                 try:
                                     df = cudf.read_parquet(pf)
-                                    if key_column_name in df.columns:
-                                        # 各チャンク内の重複をチェック
-                                        total_rows = len(df)
+                                    
+                                    # 列の存在確認
+                                    missing_cols = [col for col in key_columns if col not in df.columns]
+                                    if missing_cols:
+                                        print(f"├─ {pf.name}: ⚠️ 警告 - 指定された列が見つかりません: {', '.join(missing_cols)}")
+                                        print(f"│   利用可能な列: {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}")
+                                        continue
+                                    
+                                    # 各チャンク内の重複をチェック
+                                    total_rows = len(df)
+                                    
+                                    if len(key_columns) == 1:
+                                        # 単一キーの場合
+                                        key_column_name = key_columns[0]
                                         unique_rows = df[key_column_name].nunique()
                                         duplicates_in_chunk = total_rows - unique_rows
+                                    else:
+                                        # 複合キーの場合
+                                        # 複合キーの値を結合した一時列を作成
+                                        df['_composite_key'] = df[key_columns[0]].astype(str)
+                                        for col in key_columns[1:]:
+                                            df['_composite_key'] = df['_composite_key'] + '_' + df[col].astype(str)
                                         
-                                        duplicate_info[pf.name] = {
-                                            'total': total_rows,
-                                            'unique': unique_rows,
-                                            'duplicates': duplicates_in_chunk
-                                        }
+                                        unique_rows = df['_composite_key'].nunique()
+                                        duplicates_in_chunk = total_rows - unique_rows
                                         
-                                        if duplicates_in_chunk > 0:
+                                    duplicate_info[pf.name] = {
+                                        'total': total_rows,
+                                        'unique': unique_rows,
+                                        'duplicates': duplicates_in_chunk
+                                    }
+                                    
+                                    if duplicates_in_chunk > 0:
                                             print(f"├─ {pf.name}: {duplicates_in_chunk:,}個の重複")
                                             # 重複キーの例を表示
                                             try:
-                                                # Decimal列の場合はint64に変換
-                                                if hasattr(df[key_column_name].dtype, 'precision'):
-                                                    key_series = df[key_column_name].astype('int64')
+                                                if len(key_columns) == 1:
+                                                    # 単一キーの場合
+                                                    key_column_name = key_columns[0]
+                                                    # Decimal列の場合はint64に変換
+                                                    if hasattr(df[key_column_name].dtype, 'precision'):
+                                                        key_series = df[key_column_name].astype('int64')
+                                                    else:
+                                                        key_series = df[key_column_name]
+                                                    key_counts = key_series.value_counts()
+                                                    dup_keys = key_counts[key_counts > 1].head(5)
                                                 else:
-                                                    key_series = df[key_column_name]
-                                                key_counts = key_series.value_counts()
-                                                dup_keys = key_counts[key_counts > 1].head(5)
+                                                    # 複合キーの場合
+                                                    key_counts = df['_composite_key'].value_counts()
+                                                    dup_keys = key_counts[key_counts > 1].head(5)
                                             except Exception as e:
                                                 print(f"│   └─ 重複キー分析エラー: {e}")
                                                 dup_keys = []
@@ -636,20 +674,31 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                                                     sample_count += 1
                                                     
                                                     # この重複キーを持つ行のthread_id情報を取得
-                                                    # Decimal列の場合はint64に変換
-                                                    if hasattr(df[key_column_name].dtype, 'precision'):
-                                                        dup_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                    if len(key_columns) == 1:
+                                                        # 単一キーの場合
+                                                        key_column_name = key_columns[0]
+                                                        # Decimal列の場合はint64に変換
+                                                        if hasattr(df[key_column_name].dtype, 'precision'):
+                                                            dup_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                        else:
+                                                            dup_rows = df[df[key_column_name] == key]
+                                                        print(f"│       └─ {key_column_name}={key}: {count}回出現")
                                                     else:
-                                                        dup_rows = df[df[key_column_name] == key]
+                                                        # 複合キーの場合
+                                                        dup_rows = df[df['_composite_key'] == key]
+                                                        # 複合キーを分解して表示
+                                                        key_parts = key.split('_')
+                                                        key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
+                                                        print(f"│       └─ {key_display}: {count}回出現")
+                                                    
                                                     thread_ids = dup_rows['_thread_id'].unique().to_pandas()
-                                                    print(f"│       └─ {key_column_name}={key}: {count}回出現")
                                                     print(f"│           処理スレッド: {sorted(thread_ids)}")
                                                     
                                                     # 全列データを表示（デバッグ列を除く）
                                                     print(f"│           ")
                                                     print(f"│           【全列データのサンプル表示】")
                                                     # デバッグ列を除外
-                                                    debug_cols = ['_thread_id', '_row_position', '_thread_start_pos', '_thread_end_pos']
+                                                    debug_cols = ['_thread_id', '_row_position', '_thread_start_pos', '_thread_end_pos', '_composite_key']
                                                     display_cols = [col for col in dup_rows.columns if col not in debug_cols]
                                                     
                                                     # 各行の全データを表示
@@ -700,10 +749,17 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                                                         tid_rows = dup_rows[dup_rows['_thread_id'] == tid]
                                                         print(f"│           └─ thread_id={tid}: {len(tid_rows)}行")
                                             else:
+                                                # thread_id情報がない場合
                                                 for key, count in dup_keys.items():
-                                                    print(f"│   └─ {key_column_name}={key}: {count}回出現")
-                                        
-                                        all_dfs.append(df)
+                                                    if len(key_columns) == 1:
+                                                        print(f"│   └─ {key_columns[0]}={key}: {count}回出現")
+                                                    else:
+                                                        # 複合キーを分解して表示
+                                                        key_parts = key.split('_')
+                                                        key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
+                                                        print(f"│   └─ {key_display}: {count}回出現")
+                                    
+                                    all_dfs.append(df)
                                 except Exception as e:
                                     print(f"├─ {pf.name}: 読み込みエラー - {e}")
                             
@@ -712,7 +768,18 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                                 print(f"\n【チャンク間の重複チェック】")
                                 all_df = cudf.concat(all_dfs)
                                 total_all = len(all_df)
-                                unique_all = all_df[key_column_name].nunique()
+                                
+                                if len(key_columns) == 1:
+                                    # 単一キーの場合
+                                    key_column_name = key_columns[0]
+                                    unique_all = all_df[key_column_name].nunique()
+                                else:
+                                    # 複合キーの場合 - 全データに対して_composite_keyを再作成
+                                    all_df['_composite_key'] = all_df[key_columns[0]].astype(str)
+                                    for col in key_columns[1:]:
+                                        all_df['_composite_key'] = all_df['_composite_key'] + '_' + all_df[col].astype(str)
+                                    unique_all = all_df['_composite_key'].nunique()
+                                
                                 total_duplicates = total_all - unique_all
                                 
                                 print(f"├─ 全チャンク合計行数: {total_all:,}")
@@ -729,7 +796,14 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                                     # チャンク間で重複しているキーの特定
                                     key_appearances = {}
                                     for i, df in enumerate(all_dfs):
-                                        for key in df[key_column_name].unique().to_pandas():
+                                        if len(key_columns) == 1:
+                                            # 単一キーの場合
+                                            unique_keys = df[key_columns[0]].unique().to_pandas()
+                                        else:
+                                            # 複合キーの場合
+                                            unique_keys = df['_composite_key'].unique().to_pandas()
+                                        
+                                        for key in unique_keys:
                                             if key not in key_appearances:
                                                 key_appearances[key] = []
                                             key_appearances[key].append(i)
@@ -743,18 +817,31 @@ def main(total_chunks=8, table_name=None, test_mode=False):
                                         has_thread_id = any('_thread_id' in df.columns for df in all_dfs)
                                         
                                         for j, (key, chunks) in enumerate(list(multi_chunk_keys.items())[:5]):
-                                            print(f"    └─ {key_column_name}={key}: チャンク{chunks}に出現")
+                                            if len(key_columns) == 1:
+                                                print(f"    └─ {key_columns[0]}={key}: チャンク{chunks}に出現")
+                                            else:
+                                                # 複合キーを分解して表示
+                                                key_parts = key.split('_')
+                                                key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
+                                                print(f"    └─ {key_display}: チャンク{chunks}に出現")
                                             
                                             # thread_id情報があれば詳細表示
                                             if has_thread_id:
                                                 for chunk_idx in chunks:
                                                     df = all_dfs[chunk_idx]
                                                     if '_thread_id' in df.columns:
-                                                        # Decimal列の場合はint64に変換
-                                                        if hasattr(df[key_column_name].dtype, 'precision'):
-                                                            key_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                        if len(key_columns) == 1:
+                                                            # 単一キーの場合
+                                                            key_column_name = key_columns[0]
+                                                            # Decimal列の場合はint64に変換
+                                                            if hasattr(df[key_column_name].dtype, 'precision'):
+                                                                key_rows = df[df[key_column_name].astype('int64') == int(key)]
+                                                            else:
+                                                                key_rows = df[df[key_column_name] == key]
                                                         else:
-                                                            key_rows = df[df[key_column_name] == key]
+                                                            # 複合キーの場合
+                                                            key_rows = df[df['_composite_key'] == key]
+                                                        
                                                         thread_ids = key_rows['_thread_id'].unique().to_pandas()
                                                         print(f"        └─ チャンク{chunk_idx}: thread_id={sorted(thread_ids)}")
                                 
