@@ -111,7 +111,7 @@ def check_corrupted_string(s):
     # 制御文字が多い、または異常に長い場合は破損と判定
     return control_chars > 2 or len(s) > 100
 
-def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value=None, file_path=None, thread_id=None):
+def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value=None, file_path=None, thread_id=None, sort_column=None):
     """サンプルデータの表示"""
     print(f"\n{'='*60}")
     print(f"📊 サンプルデータ{' - ' + name if name else ''}")
@@ -189,6 +189,110 @@ def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value
     print("\n【カラム情報】")
     for col, dtype in df.dtypes.items():
         print(f"  {col}: {dtype}")
+    
+    # ソート処理と欠落値チェック
+    if sort_column is not None:
+        if sort_column not in df.columns:
+            print(f"\n⚠️ ソートカラム '{sort_column}' が存在しません")
+        else:
+            dtype_str = str(df[sort_column].dtype)
+            # 整数型とdecimal型をサポート
+            if dtype_str in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64'] or 'decimal' in dtype_str.lower():
+                print(f"\n【{sort_column} でソート中...】")
+                
+                # ソート実行
+                if isinstance(df, dask_cudf.DataFrame):
+                    df = df.sort_values(sort_column).persist()
+                else:
+                    df = df.sort_values(sort_column)
+                
+                # 欠落値の分析
+                print(f"\n【{sort_column} の欠落値分析】")
+                if isinstance(df, dask_cudf.DataFrame):
+                    col_values = df[sort_column].compute()
+                else:
+                    col_values = df[sort_column]
+                
+                # 最小値と最大値を取得
+                # decimal型の場合は適切に処理
+                if 'decimal' in dtype_str.lower():
+                    # cuDFのdecimalをPandasに変換してから処理
+                    col_pandas = col_values.to_pandas()
+                    min_val = int(col_pandas.min())
+                    max_val = int(col_pandas.max())
+                else:
+                    min_val = int(col_values.min())
+                    max_val = int(col_values.max())
+                actual_count = len(col_values)
+                
+                print(f"  最小値: {min_val:,}")
+                print(f"  最大値: {max_val:,}")
+                print(f"  実際の行数: {actual_count:,}")
+                
+                # 期待される行数（連続する整数の場合）
+                expected_count = max_val - min_val + 1
+                print(f"  期待される行数: {expected_count:,} (連続する整数の場合)")
+                
+                if expected_count != actual_count:
+                    missing_count = expected_count - actual_count
+                    print(f"  欠落数: {missing_count:,}")
+                    
+                    # 欠落値を特定（データセットサイズに応じて）
+                    if expected_count < 20000000:  # 2000万件未満の場合は詳細分析
+                        # GPU上で効率的に欠落値を見つける
+                        print(f"  欠落値を分析中... (期待値: {expected_count:,} 個)")
+                        if 'decimal' in dtype_str.lower():
+                            # decimal型の場合はすでにPandasに変換済み
+                            all_values_set = set(int(v) for v in col_pandas)
+                        else:
+                            all_values_set = set(col_values.to_pandas())
+                        expected_values = set(range(min_val, max_val + 1))
+                        missing_values = sorted(expected_values - all_values_set)
+                        print(f"  分析完了！")
+                        
+                        if len(missing_values) <= 100:
+                            print(f"  欠落値: {missing_values}")
+                        elif len(missing_values) <= 10000:
+                            # 欠落値が多い場合は、最初と最後の一部を表示
+                            print(f"  欠落値（最初の50個）: {missing_values[:50]}")
+                            print(f"  欠落値（最後の50個）: {missing_values[-50:]}")
+                            print(f"  （合計 {len(missing_values):,} 個の欠落）")
+                        else:
+                            # 非常に多い場合は、分布の概要を表示
+                            print(f"\n  欠落値が多数（{len(missing_values):,}個）のため、分布の概要を表示:")
+                            
+                            # 連続した欠落範囲を検出
+                            ranges = []
+                            start = missing_values[0]
+                            end = missing_values[0]
+                            
+                            for i in range(1, len(missing_values)):
+                                if missing_values[i] == end + 1:
+                                    end = missing_values[i]
+                                else:
+                                    ranges.append((start, end))
+                                    start = missing_values[i]
+                                    end = missing_values[i]
+                            ranges.append((start, end))
+                            
+                            # 最初の10個の範囲を表示
+                            print(f"  主な欠落範囲（最初の10個）:")
+                            for i, (start, end) in enumerate(ranges[:10]):
+                                if start == end:
+                                    print(f"    {i+1}. {start:,}")
+                                else:
+                                    print(f"    {i+1}. {start:,} ～ {end:,} ({end - start + 1:,}個)")
+                            
+                            if len(ranges) > 10:
+                                print(f"  ... 他 {len(ranges) - 10:,} 個の欠落範囲")
+                    else:
+                        print("  (データが大きいため詳細な欠落値分析はスキップ)")
+                else:
+                    print("  ✓ 欠落なし（連続した整数値）")
+                
+                print()
+            else:
+                print(f"\n⚠️ ソートは整数型およびdecimal型カラムのみサポートされています。{sort_column} の型は {dtype_str} です")
     
     # 表示する行数の調整（フィルタリング時は全件表示）
     if filter_column is not None and filter_value is not None:
@@ -298,13 +402,16 @@ def display_sample_data(df, n_rows=10, name="", filter_column=None, filter_value
     except Exception as e:
         print(f"  統計量計算エラー: {e}")
 
-def process_large_parquet_files(filter_column=None, filter_value=None, target_dir=None):
+def process_large_parquet_files(filter_column=None, filter_value=None, target_dir=None, sort_column=None):
     """メイン処理フロー"""
     print("🚀 cuDF Parquetファイル処理開始")
     print("="*60)
     
     if filter_column is not None and filter_value is not None:
         print(f"\n🔍 {filter_column} = {filter_value} を検索します")
+    
+    if sort_column is not None:
+        print(f"\n📊 {sort_column} でソートして欠落値を分析します")
     
     # 1. GPU環境確認
     print("\n【GPU環境確認】")
@@ -358,10 +465,30 @@ def process_large_parquet_files(filter_column=None, filter_value=None, target_di
         print("\n✗ 読み込み可能なファイルがありませんでした")
         return
     
-    # 6. 各ファイルのサンプル表示
-    for i, (df, file_path) in enumerate(zip(dfs, file_paths)):
-        display_sample_data(df, n_rows=5, name=f"ファイル{i} ({Path(file_path).name})", 
-                          filter_column=filter_column, filter_value=filter_value, file_path=file_path)
+    # 6. ファイルの処理（ソート時は自動的に結合）
+    if sort_column and len(dfs) > 1:
+        # 複数ファイルを結合してソート
+        print("\n【ファイル結合中...】")
+        if use_dask:
+            # Dask DataFrameの場合
+            combined_df = dask_cudf.concat(dfs)
+            print(f"✓ {len(dfs)} ファイルを結合しました")
+        else:
+            # 通常のcuDF DataFrameの場合
+            combined_df = cudf.concat(dfs, ignore_index=True)
+            print(f"✓ {len(dfs)} ファイルを結合しました")
+            print(f"  結合後のサイズ: {len(combined_df):,} 行")
+        
+        # 結合したデータを表示
+        display_sample_data(combined_df, n_rows=10, name="結合データ", 
+                          filter_column=filter_column, filter_value=filter_value, 
+                          file_path=None, sort_column=sort_column)
+    else:
+        # 各ファイルを個別に表示（ソートなし、または単一ファイルの場合）
+        for i, (df, file_path) in enumerate(zip(dfs, file_paths)):
+            display_sample_data(df, n_rows=5, name=f"ファイル{i} ({Path(file_path).name})", 
+                              filter_column=filter_column, filter_value=filter_value, file_path=file_path,
+                              sort_column=sort_column)
 
 
 def parse_args():
@@ -383,11 +510,17 @@ def parse_args():
   python show_parquet_sample.py --filter c_name="Customer#003045312"
   python show_parquet_sample.py --filter c_nation="JAPAN"
   
+  # 整数カラムでソートして欠落値をチェック（複数ファイルは自動結合）
+  python show_parquet_sample.py --sort c_custkey
+  python show_parquet_sample.py --sort l_orderkey
+  
   # 特定のディレクトリを指定
   python show_parquet_sample.py --dir /path/to/parquet/files
   
   # 組み合わせ
   python show_parquet_sample.py --filter c_region="ASIA" --dir .
+  python show_parquet_sample.py --sort c_custkey --filter c_nationkey=10
+  python show_parquet_sample.py --sort c_custkey --filter c_mktsegment="BUILDING"
         '''
     )
     
@@ -407,6 +540,12 @@ def parse_args():
         '--dir',
         type=str,
         help='Parquetファイルが格納されているディレクトリ（デフォルト: outputまたは現在のディレクトリ）'
+    )
+    
+    parser.add_argument(
+        '--sort',
+        type=str,
+        help='ソートするカラム名（整数型・decimal型対応）。複数ファイルは自動的に結合され、欠落値分析も実行されます'
     )
     
     return parser.parse_args()
@@ -440,7 +579,8 @@ if __name__ == "__main__":
         process_large_parquet_files(
             filter_column=filter_column,
             filter_value=filter_value,
-            target_dir=args.dir
+            target_dir=args.dir,
+            sort_column=args.sort
         )
         
     except ImportError as e:
