@@ -278,6 +278,7 @@ async fn process_range(
     // 注意: worker_start_offsetは最初の書き込み時に決定される
     let mut worker_start_offset: Option<u64> = None;
     let mut worker_bytes = 0u64;
+    let mut is_first_write = true;
     
     // デバッグ情報（テストモード時のみ）
     let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
@@ -297,6 +298,19 @@ async fn process_range(
     
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
+        
+        // 最初の書き込み時に0xFFFFを追加（ただし、オフセット0の場合は除く）
+        if is_first_write {
+            let current_offset = worker_offset.load(Ordering::SeqCst);
+            if current_offset > 0 {
+                if is_test_mode {
+                    println!("ワーカー{}: オフセット{}で0xFFFFを追加", worker_id, current_offset);
+                }
+                write_buffer.push(0xFF);
+                write_buffer.push(0xFF);
+            }
+            is_first_write = false;
+        }
         
         write_buffer.extend_from_slice(&chunk);
         
@@ -318,21 +332,22 @@ async fn process_range(
         }
     }
     
-    // 残りのデータを書き込み（終端マーカー確認）
+    // 残りのデータを書き込み
     if !write_buffer.is_empty() {
-        // PostgreSQL COPY BINARYの終端マーカー（0xFFFF）が含まれているか確認
-        let len = write_buffer.len();
-        let has_termination = len >= 2 && write_buffer[len-2] == 0xFF && write_buffer[len-1] == 0xFF;
-        
-        if !has_termination {
-            if is_test_mode {
-                println!("ワーカー{}: 警告 - 終端マーカー(0xFFFF)が見つかりません。追加します。", worker_id);
+        // 最初の書き込みで、まだ0xFFFFを追加していない場合は追加（ただし、オフセット0の場合は除く）
+        if is_first_write {
+            let current_offset = worker_offset.load(Ordering::SeqCst);
+            if current_offset > 0 {
+                if is_test_mode {
+                    println!("ワーカー{}: 最後の書き込みでオフセット{}で0xFFFFを追加", worker_id, current_offset);
+                }
+                // バッファの先頭に0xFFFFを挿入
+                let mut new_buffer = Vec::with_capacity(write_buffer.len() + 2);
+                new_buffer.push(0xFF);
+                new_buffer.push(0xFF);
+                new_buffer.extend_from_slice(&write_buffer);
+                write_buffer = new_buffer;
             }
-            // 終端マーカーを追加
-            write_buffer.push(0xFF);
-            write_buffer.push(0xFF);
-        } else if is_test_mode {
-            println!("ワーカー{}: 終端マーカー(0xFFFF)を確認しました。", worker_id);
         }
         
         let bytes_to_write = write_buffer.len();

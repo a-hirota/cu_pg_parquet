@@ -311,6 +311,9 @@ async fn process_range_parallel(
         .map(|_| Vec::with_capacity(BUFFER_SIZE))
         .collect();
     
+    // 各チャンクへの最初の書き込みを追跡
+    let mut first_write_to_chunk: Vec<bool> = vec![true; CHUNKS];
+    
     let mut worker_bytes = 0u64;
     let mut worker_chunks = 0u64;
     let mut current_chunk = 0;
@@ -325,6 +328,16 @@ async fn process_range_parallel(
         // 現在のチャンクIDを決定（ラウンドロビン）
         let chunk_id = current_chunk % CHUNKS;
         current_chunk += 1;
+        
+        // このチャンクへの最初の書き込みの場合、0xFFFFを追加（ただし、オフセット0の場合は除く）
+        if first_write_to_chunk[chunk_id] {
+            let current_offset = worker_offsets[chunk_id].load(Ordering::Relaxed);
+            if current_offset > 0 {
+                chunk_buffers[chunk_id].push(0xFF);
+                chunk_buffers[chunk_id].push(0xFF);
+            }
+            first_write_to_chunk[chunk_id] = false;
+        }
         
         // チャンクバッファに追加
         chunk_buffers[chunk_id].extend_from_slice(&chunk);
@@ -364,19 +377,21 @@ async fn process_range_parallel(
         }
     }
     
-    // 最後の残りバッファをすべて書き込み（終端マーカー確認）
+    // 最後の残りバッファをすべて書き込み
     for chunk_id in 0..CHUNKS {
         if !chunk_buffers[chunk_id].is_empty() {
-            // PostgreSQL COPY BINARYの終端マーカー（0xFFFF）が含まれているか確認
-            let len = chunk_buffers[chunk_id].len();
-            let has_termination = len >= 2 && 
-                chunk_buffers[chunk_id][len-2] == 0xFF && 
-                chunk_buffers[chunk_id][len-1] == 0xFF;
-            
-            if !has_termination {
-                // 終端マーカーを追加
-                chunk_buffers[chunk_id].push(0xFF);
-                chunk_buffers[chunk_id].push(0xFF);
+            // このチャンクへの最初の書き込みの場合、0xFFFFを追加（ただし、オフセット0の場合は除く）
+            if first_write_to_chunk[chunk_id] {
+                let current_offset = worker_offsets[chunk_id].load(Ordering::Relaxed);
+                if current_offset > 0 {
+                    // バッファの先頭に0xFFFFを挿入
+                    let mut new_buffer = Vec::with_capacity(chunk_buffers[chunk_id].len() + 2);
+                    new_buffer.push(0xFF);
+                    new_buffer.push(0xFF);
+                    new_buffer.extend_from_slice(&chunk_buffers[chunk_id]);
+                    chunk_buffers[chunk_id] = new_buffer;
+                }
+                first_write_to_chunk[chunk_id] = false;
             }
             
             let offset = worker_offsets[chunk_id].fetch_add(
