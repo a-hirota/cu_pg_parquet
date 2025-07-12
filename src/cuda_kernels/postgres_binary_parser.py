@@ -16,7 +16,7 @@ PostgreSQL Binary Parser (統合最適化版)
 - 統合最適化処理
 """
 
-from numba import cuda, int32, uint32, uint64, types
+from numba import cuda, int32, int64, uint32, uint64, types
 import numpy as np
 import time  # ソート時間計測用
 import os  # 環境変数のチェック用
@@ -287,18 +287,18 @@ def calculate_optimal_grid_sm_aware(data_size, estimated_row_size):
 def read_uint16_simd16_lite(raw_data, pos, end_pos, ncols):
     """行ヘッダ検出（軽量版）"""
     if pos + 1 > raw_data.size:
-        return -2
+        return int64(-2)
    
     max_offset = min(16, int32(raw_data.size - pos + 1))
     
     for i in range(0, max_offset):
         if pos + i + 1 > end_pos:
-            return -3    
-        idx = pos + i
+            return int64(-3)    
+        idx = uint64(pos + i)
         num_fields = (raw_data[idx] << 8) | raw_data[idx + 1]        
         if num_fields == ncols:
             return int64(pos + i)
-    return -1
+    return int64(-1)
 
 @cuda.jit(device=True, inline=True)
 def is_valid_decimal_header(raw_data, data_start, field_length):
@@ -320,7 +320,7 @@ def is_valid_decimal_header(raw_data, data_start, field_length):
     if data_start + 8 > raw_data.size:
         return False
     
-    idx = data_start
+    idx = uint64(data_start)
     
     # ndigits (bytes 0-1): must equal (field_length - 8) / 2
     ndigits = (raw_data[idx] << 8) | raw_data[idx + 1]
@@ -359,7 +359,7 @@ def validate_and_extract_fields_lite(
         return False, -1
 
     # フィールド数確認
-    row_start_idx = row_start
+    row_start_idx = uint64(row_start)
     num_fields = (raw_data[row_start_idx] << 8) | raw_data[row_start_idx + 1]
     if num_fields != expected_cols:
         return False, -2
@@ -372,7 +372,7 @@ def validate_and_extract_fields_lite(
             return False, -3
 
         # フィールド長読み取り
-        pos_idx = pos
+        pos_idx = uint64(pos)
         flen = (
             int32(raw_data[pos_idx]) << 24 | int32(raw_data[pos_idx+1]) << 16 |
             int32(raw_data[pos_idx+2]) << 8 | int32(raw_data[pos_idx+3])
@@ -419,7 +419,7 @@ def validate_and_extract_fields_lite(
 
     # 次行ヘッダ検証
     if pos + 2 <= raw_data.size:
-        pos_idx2 = pos
+        pos_idx2 = uint64(pos)
         next_header = (raw_data[pos_idx2] << 8) | raw_data[pos_idx2 + 1]
         if next_header != expected_cols and next_header != 0xFFFF:
             return False, -8
@@ -493,12 +493,12 @@ def parse_rows_and_fields_lite(
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
             continue
-        elif candidate_pos >= end_pos:  # 担当範囲外
+        elif candidate_pos >= 0 and candidate_pos >= int64(end_pos):  # 担当範囲外
             break
 
         # === 2. 行検証+フィールド抽出の統合実行 ===
         is_valid, row_end = validate_and_extract_fields_lite(
-            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            raw_data, uint64(candidate_pos), ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
             local_field_lengths[local_count],  # この行のフィールド配列
             column_pg_oids                     # PostgreSQL OID配列
@@ -515,10 +515,10 @@ def parse_rows_and_fields_lite(
             if row_end > 0:
                 pos = row_end
             else:
-                pos = candidate_pos + 1
+                pos = uint64(candidate_pos + 1)
         else:
             # 検証失敗時は1バイト進む
-            pos = candidate_pos + 1
+            pos = uint64(candidate_pos + 1)
 
     # === 3. 結果を直接グローバルメモリに書き込み ===
     if local_count > 0:
@@ -601,12 +601,12 @@ def parse_rows_and_fields_lite_with_thread_ids(
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
             continue
-        elif candidate_pos >= end_pos:  # 担当範囲外
+        elif candidate_pos >= 0 and candidate_pos >= int64(end_pos):  # 担当範囲外
             break
 
         # === 2. 行検証+フィールド抽出の統合実行 ===
         is_valid, row_end = validate_and_extract_fields_lite(
-            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            raw_data, uint64(candidate_pos), ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
             local_field_lengths[local_count],  # この行のフィールド配列
             column_pg_oids                     # PostgreSQL OID配列
@@ -623,10 +623,10 @@ def parse_rows_and_fields_lite_with_thread_ids(
             if row_end > 0:
                 pos = row_end
             else:
-                pos = candidate_pos + 1
+                pos = uint64(candidate_pos + 1)
         else:
             # 検証失敗時は1バイト進む
-            pos = candidate_pos + 1
+            pos = uint64(candidate_pos + 1)
 
     # === 3. 結果を直接グローバルメモリに書き込み ===
     if local_count > 0:
@@ -714,12 +714,12 @@ def parse_rows_and_fields_lite_with_full_debug(
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
             continue
-        elif candidate_pos >= end_pos:  # 担当範囲外
+        elif candidate_pos >= 0 and candidate_pos >= int64(end_pos):  # 担当範囲外
             break
 
         # === 2. 行検証+フィールド抽出の統合実行 ===
         is_valid, row_end = validate_and_extract_fields_lite(
-            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            raw_data, uint64(candidate_pos), ncols, fixed_field_lengths,
             local_field_offsets[local_count],  # この行のフィールド配列
             local_field_lengths[local_count],  # この行のフィールド配列
             column_pg_oids                     # PostgreSQL OID配列
@@ -736,10 +736,10 @@ def parse_rows_and_fields_lite_with_full_debug(
             if row_end > 0:
                 pos = row_end
             else:
-                pos = candidate_pos + 1
+                pos = uint64(candidate_pos + 1)
         else:
             # 検証失敗時は1バイト進む
-            pos = candidate_pos + 1
+            pos = uint64(candidate_pos + 1)
 
     # === 3. 結果を直接グローバルメモリに書き込み ===
     if local_count > 0:
@@ -844,12 +844,12 @@ def parse_rows_and_fields_lite_debug(
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
             continue
-        elif candidate_pos >= end_pos:  # 担当範囲外
+        elif candidate_pos >= 0 and candidate_pos >= int64(end_pos):  # 担当範囲外
             break
 
         # === 2. 行検証+フィールド抽出（統合） ===
         is_valid, row_end = validate_and_extract_fields_lite(
-            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            raw_data, uint64(candidate_pos), ncols, fixed_field_lengths,
             local_field_offsets[local_count],
             local_field_lengths[local_count],
             column_pg_oids
@@ -863,9 +863,9 @@ def parse_rows_and_fields_lite_debug(
             if row_end > 0:
                 pos = row_end
             else:
-                pos = candidate_pos + 1
+                pos = uint64(candidate_pos + 1)
         else:
-            pos = candidate_pos + 1
+            pos = uint64(candidate_pos + 1)
 
     # 結果を直接グローバルメモリに書き込み
     if local_count > 0:
@@ -1016,12 +1016,12 @@ def parse_rows_and_fields_lite_test(
         elif candidate_pos == -1:  # 行ヘッダ未発見
             pos += 15
             continue
-        elif candidate_pos >= end_pos:  # 担当範囲外
+        elif candidate_pos >= 0 and candidate_pos >= int64(end_pos):  # 担当範囲外
             break
         
         # 行検証+フィールド抽出
         is_valid, row_end = validate_and_extract_fields_lite(
-            raw_data, candidate_pos, ncols, fixed_field_lengths,
+            raw_data, uint64(candidate_pos), ncols, fixed_field_lengths,
             local_field_offsets[local_count],
             local_field_lengths[local_count]
         )
@@ -1071,9 +1071,9 @@ def parse_rows_and_fields_lite_test(
             if row_end > 0:
                 pos = row_end
             else:
-                pos = candidate_pos + 1
+                pos = uint64(candidate_pos + 1)
         else:
-            pos = candidate_pos + 1
+            pos = uint64(candidate_pos + 1)
     
     # 結果を直接グローバルメモリに書き込み
     if local_count > 0:
@@ -1188,12 +1188,22 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
         print(f"{prefix} [TEST] blocks_yを{old_blocks_y}から{test_blocks_y}に変更")
     
     actual_threads = blocks_x * blocks_y * threads_per_block
+    if actual_threads == 0 or data_size == 0:
+        # データサイズが0またはスレッド数が0の場合のエラー処理
+        if debug or test_mode:
+            chunk_id = int(os.environ.get('GPUPGPARSER_CURRENT_CHUNK', '-1'))
+            prefix = f"[Consumer-1]" if chunk_id >= 0 else ""
+            print(f"{prefix} エラー: actual_threads={actual_threads}, data_size={data_size}")
+        return None, None, None, None, None
+    
     thread_stride = (data_size + actual_threads - 1) // actual_threads
     if thread_stride < estimated_row_size:
         thread_stride = estimated_row_size
     
     
     # thread_strideが大きい場合のワーニング（制限はしない）
+    if estimated_row_size == 0:
+        estimated_row_size = 1  # ゼロ除算を防ぐ
     rows_per_thread = thread_stride // estimated_row_size
     if rows_per_thread > 200:
         if debug or test_mode:
@@ -1205,7 +1215,7 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 print(f"{prefix} ⚠️ CAUTION: ローカルバッファサイズ(256行)を超える可能性があります")
 
     # 推定行数を計算
-    estimated_rows = data_size // estimated_row_size
+    estimated_rows = data_size // estimated_row_size if estimated_row_size > 0 else 0
     
     # バッファサイズは推定行数に少しのマージンを追加（80%程度）
     max_rows = int(estimated_rows * 1.8)
@@ -1332,9 +1342,10 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
                 return
                 
             # どのスレッドが検出したか計算
-            thread_id = (row_pos - header_size) // thread_stride
-            if thread_id < thread_counts.size:
-                cuda.atomic.add(thread_counts, thread_id, 1)
+            if thread_stride > 0:
+                thread_id = (row_pos - header_size) // thread_stride
+                if thread_id < thread_counts.size:
+                    cuda.atomic.add(thread_counts, thread_id, 1)
         
         # [84]: 負の行位置フラグ（1=負の値検出）
         # [85-99]: 予備領域
