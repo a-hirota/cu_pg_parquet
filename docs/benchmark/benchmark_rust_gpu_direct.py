@@ -31,7 +31,14 @@ import pyarrow.parquet as pq
 
 TABLE_NAME = "lineorder"  # デフォルト値（実行時に上書きされる）
 OUTPUT_DIR = "/dev/shm"
-RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk"
+
+# スクリプトのディレクトリを基準に相対パスを解決
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+RUST_BINARY = os.environ.get('GPUPGPARSER_RUST_BINARY') or os.path.join(
+    project_root, "rust_bench_optimized/target/release/pg_fast_copy_single_chunk"
+)
+
 MAX_QUEUE_SIZE = 3  # キューの最大サイズ
 
 # グローバル変数

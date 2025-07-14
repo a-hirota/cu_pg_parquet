@@ -20,15 +20,22 @@ echo
 # Clean up old test files
 rm -rf test_binaries/*
 
+# Get script directory and project root
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+
+# Use environment variable or relative path
+RUST_BINARY="${GPUPGPARSER_RUST_BINARY:-$PROJECT_ROOT/rust_bench_optimized/target/release/pg_fast_copy_single_chunk}"
+
 # Run the single chunk processor
 echo "=== Running single chunk processor for chunk 0 ==="
 export CHUNK_ID="0"
-/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk
+"$RUST_BINARY"
 
 echo
 echo "=== Running single chunk processor for chunk 1 ==="
 export CHUNK_ID="1"
-/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_single_chunk
+"$RUST_BINARY"
 
 # Copy binaries for testing
 echo
@@ -43,7 +50,7 @@ echo "Binaries copied to: $test_dir"
 # Search for PGCOPY headers and check for 0xFFFF
 echo
 echo "=== Searching for PGCOPY headers without 0xFFFF ==="
-python3 /home/ubuntu/gpupgparser/tools/show_bin_rust.py --dir "$test_dir" --search "50 47 43 4F 50 59 0A FF 0D 0A"
+python3 "$PROJECT_ROOT/tools/show_bin_rust.py" --dir "$test_dir" --search "50 47 43 4F 50 59 0A FF 0D 0A"
 
 echo
 echo "=== Done ==="

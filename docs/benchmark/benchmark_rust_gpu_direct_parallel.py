@@ -27,7 +27,14 @@ from src.readPostgres.metadata import fetch_column_meta
 
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
-RUST_BINARY = "/home/ubuntu/gpupgparser/rust_bench_optimized/target/release/pg_fast_copy_optimized"
+
+# スクリプトのディレクトリを基準に相対パスを解決
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+RUST_BINARY = os.environ.get('GPUPGPARSER_RUST_BINARY') or os.path.join(
+    project_root, "rust_bench_optimized/target/release/pg_fast_copy_optimized"
+)
+
 TOTAL_CHUNKS = 8  # 8チャンク（各約6.6GB）
 
 

@@ -67,6 +67,10 @@ def run_test():
     return True
 
 if __name__ == "__main__":
-    os.chdir("/home/ubuntu/gpupgparser")
+    # プロジェクトルートに移動（相対パスで解決）
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    os.chdir(project_root)
+    
     success = run_test()
     sys.exit(0 if success else 1)
