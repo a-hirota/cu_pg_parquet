@@ -27,8 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 # benchmarkディレクトリからインポート
-sys.path.append(str(Path(__file__).parent / "docs" / "benchmark"))
-from benchmark_rust_gpu_direct import main as benchmark_main
+sys.path.append(str(Path(__file__).parent / "benchmarks"))
+from gpu_pipeline_benchmark import main as benchmark_main
 
 
 def main():

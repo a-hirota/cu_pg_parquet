@@ -25,7 +25,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # Use environment variable or relative path
-RUST_BINARY="${GPUPGPARSER_RUST_BINARY:-$PROJECT_ROOT/rust_bench_optimized/target/release/pg_fast_copy_single_chunk}"
+RUST_BINARY="${GPUPGPARSER_RUST_BINARY:-$PROJECT_ROOT/rust_pg_binary_extractor/target/release/pg_chunk_extractor}"
 
 # Run the single chunk processor
 echo "=== Running single chunk processor for chunk 0 ==="

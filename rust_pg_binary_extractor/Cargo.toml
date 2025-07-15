@@ -1,0 +1,41 @@
+[package]
+name = "pg_binary_extractor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"] }
+futures-util = "0.3"
+bytes = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "pg_parallel_extractor"
+path = "src/main.rs"
+
+[[bin]]
+name = "pg_sequential_extractor"
+path = "src/main_sequential_chunks.rs"
+
+[[bin]]
+name = "pg_chunk_extractor"
+path = "src/main_single_chunk.rs"
+
+[[bin]]
+name = "pg_fixed_extractor"
+path = "src/main_sequential.rs"
+
+[[bin]]
+name = "pg_env_extractor"
+path = "src/main_env.rs"
+
+[[bin]]
+name = "pg_single_extractor"
+path = "src/main_single_copy.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
