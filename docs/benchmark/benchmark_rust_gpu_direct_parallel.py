@@ -23,7 +23,6 @@ import glob
 from src.types import ColumnMeta
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
 from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
-from src.readPostgres.metadata import fetch_column_meta
 
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
@@ -60,27 +59,38 @@ def setup_rmm_pool():
         print(f"⚠️ RMM初期化警告: {e}")
 
 
-def get_postgresql_metadata():
-    """PostgreSQLからテーブルメタデータを取得"""
-    dsn = os.environ.get("GPUPASER_PG_DSN")
-    if not dsn:
-        raise RuntimeError("環境変数 GPUPASER_PG_DSN が設定されていません")
+def convert_rust_metadata_to_column_meta(rust_columns):
+    """Rust出力のメタデータをColumnMetaオブジェクトに変換"""
+    columns = []
+    for col in rust_columns:
+        # Rust側のarrow_typeをarrow_idに変換
+        arrow_type_map = {
+            'int32': 6,  # INT32
+            'int64': 7,  # INT64
+            'float32': 10,  # FLOAT
+            'float64': 11,  # DOUBLE
+            'decimal128': 23,  # DECIMAL128
+            'string': 13,  # STRING
+            'date32': 16,  # DATE32
+            'timestamp[ns]': 18,  # TIMESTAMP
+            'timestamp[ns, tz=UTC]': 18,  # TIMESTAMP
+            'bool': 1,  # BOOL
+        }
+        
+        arrow_id = arrow_type_map.get(col['arrow_type'], 0)  # UNKNOWN = 0
+        
+        # ColumnMetaオブジェクトを作成
+        meta = ColumnMeta(
+            name=col['name'],
+            pg_oid=col['pg_oid'],
+            pg_typmod=-1,  # Rustから取得できないため、デフォルト値
+            arrow_id=arrow_id,
+            elem_size=0,  # 必要に応じて設定
+            arrow_param=None  # 必要に応じて設定
+        )
+        columns.append(meta)
     
-    import psycopg
-    conn = psycopg.connect(dsn)
-    try:
-        print("PostgreSQLメタデータを取得中...")
-        columns = fetch_column_meta(conn, f"SELECT * FROM {TABLE_NAME}")
-        print(f"✅ メタデータ取得完了: {len(columns)} 列")
-        
-        # デバッグ：Decimal列の情報を表示
-        for col in columns:
-            if col.arrow_id == 5:  # DECIMAL128
-                print(f"  Decimal列 {col.name}: arrow_param={col.arrow_param}")
-        
-        return columns
-    finally:
-        conn.close()
+    return columns
 
 
 def cleanup_files():

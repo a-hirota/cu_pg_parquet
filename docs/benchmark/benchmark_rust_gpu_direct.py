@@ -15,7 +15,6 @@ import cupy as cp
 import kvikio
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-import psycopg
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,7 +25,6 @@ import pandas as pd
 from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
 from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
 from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
-from src.readPostgres.metadata import fetch_column_meta
 import pyarrow.parquet as pq
 
 TABLE_NAME = "lineorder"  # デフォルト値（実行時に上書きされる）
@@ -76,22 +74,58 @@ def setup_rmm_pool():
         print(f"⚠️ RMM初期化警告: {e}")
 
 
-def get_postgresql_metadata(table_name):
-    """PostgreSQLからテーブルメタデータを取得"""
-    dsn = os.environ.get("GPUPASER_PG_DSN")
-    if not dsn:
-        raise RuntimeError("環境変数 GPUPASER_PG_DSN が設定されていません")
+def convert_rust_metadata_to_column_meta(rust_columns):
+    """Rust出力のメタデータをColumnMetaオブジェクトに変換"""
+    # src/types.pyから必要な定数をインポート
+    from src.types import (
+        INT16, INT32, INT64, FLOAT32, FLOAT64, DECIMAL128,
+        UTF8, BINARY, DATE32, TS64_US, BOOL
+    )
     
-    conn = psycopg.connect(dsn)
-    try:
-        print(f"PostgreSQLメタデータを取得中 (テーブル: {table_name})...")
-        columns = fetch_column_meta(conn, f"SELECT * FROM {table_name}")
-        print(f"✅ メタデータ取得完了: {len(columns)} 列")
+    columns = []
+    for col in rust_columns:
+        # Rust側のarrow_typeを正しいarrow_idに変換
+        arrow_type_map = {
+            'int16': (INT16, 2),          # INT16 = 0, elem_size = 2
+            'int32': (INT32, 4),          # INT32 = 1, elem_size = 4
+            'int64': (INT64, 8),          # INT64 = 2, elem_size = 8
+            'float32': (FLOAT32, 4),      # FLOAT32 = 3, elem_size = 4
+            'float64': (FLOAT64, 8),      # FLOAT64 = 4, elem_size = 8
+            'decimal128': (DECIMAL128, 16), # DECIMAL128 = 5, elem_size = 16
+            'string': (UTF8, None),       # UTF8 = 6, elem_size = None (可変長)
+            'binary': (BINARY, None),     # BINARY = 7, elem_size = None (可変長)
+            'date32': (DATE32, 4),        # DATE32 = 8, elem_size = 4
+            'timestamp[ns]': (TS64_US, 8),       # TS64_US = 9, elem_size = 8
+            'timestamp[ns, tz=UTC]': (TS64_US, 8), # TS64_US = 9, elem_size = 8
+            'bool': (BOOL, 1),            # BOOL = 10, elem_size = 1
+        }
         
+        arrow_type = col['arrow_type']
+        arrow_id, elem_size = arrow_type_map.get(arrow_type, (UNKNOWN, None))
         
-        return columns
-    finally:
-        conn.close()
+        # elem_sizeがNoneの場合は0に変換（可変長を示す）
+        if elem_size is None:
+            elem_size = 0
+        
+        # arrow_paramの設定（DECIMAL128の場合はデフォルト値を設定）
+        arrow_param = None
+        if arrow_id == DECIMAL128:
+            # Rustからprecision/scaleが渡されていない場合はデフォルト値を使用
+            # PostgreSQL numericのデフォルトは(38, 0)
+            arrow_param = (38, 0)
+        
+        # ColumnMetaオブジェクトを作成
+        meta = ColumnMeta(
+            name=col['name'],
+            pg_oid=col['pg_oid'],
+            pg_typmod=-1,  # Rustから取得できないため、デフォルト値
+            arrow_id=arrow_id,
+            elem_size=elem_size,
+            arrow_param=arrow_param
+        )
+        columns.append(meta)
+    
+    return columns
 
 
 def cleanup_files(total_chunks=8, table_name=None):
@@ -122,7 +156,7 @@ def cleanup_files(total_chunks=8, table_name=None):
         print(f"⚠️ 追加クリーンアップ中の警告: {e}")
 
 
-def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue, table_name: str):
+def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queue.Queue, table_name: str, metadata_queue: queue.Queue):
     """Rust転送を実行するProducerスレッド"""
     for chunk_id in range(total_chunks):
         if shutdown_flag.is_set():
@@ -134,6 +168,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
             env = os.environ.copy()
             env['CHUNK_ID'] = str(chunk_id)
             env['TOTAL_CHUNKS'] = str(total_chunks)
+            env['TABLE_NAME'] = table_name
             
             rust_start = time.time()
             process = subprocess.run(
@@ -147,16 +182,30 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 print(f"❌ Rustエラー: {process.stderr}")
                 continue
             
+            # デバッグ: Rustの全出力を確認
+            if os.environ.get("GPUPGPARSER_TEST_MODE") == "1" and chunk_id == 0:
+                print(f"[Producer] Rust stdout長さ: {len(process.stdout)}文字")
+                print(f"[Producer] Rust stderr: {process.stderr}" if process.stderr else "[Producer] stderrは空")
+            
             # テストモードの場合、Rustの出力を表示
             if os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
                 for line in process.stdout.split('\n'):
                     if 'チャンク' in line or 'ページ' in line or 'COPY範囲' in line:
                         print(f"[Rust Debug] {line}")
+                # JSON出力を確認
+                if "===CHUNK_RESULT_JSON===" not in process.stdout:
+                    print("[Producer] 警告: RustからJSON出力がありません")
+                    print(f"[Producer] Rust出力の末尾100文字: ...{process.stdout[-100:]}")
             
             # JSON結果を抽出
             output = process.stdout
             json_start = output.find("===CHUNK_RESULT_JSON===")
             json_end = output.find("===END_CHUNK_RESULT_JSON===")
+            
+            # デバッグ: 最初のチャンクでJSONが見つからない場合
+            if chunk_id == 0 and json_start == -1 and os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
+                print(f"[Producer] Rust stdout全体:\n{output}")
+                print(f"[Producer] JSON検索結果: start={json_start}, end={json_end}")
             
             if json_start != -1 and json_end != -1:
                 json_str = output[json_start + len("===CHUNK_RESULT_JSON==="):json_end].strip()
@@ -164,6 +213,10 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
                 rust_time = result['elapsed_seconds']
                 file_size = result['total_bytes']
                 chunk_file = result['chunk_file']
+                
+                # 最初のチャンクの場合、メタデータも抽出して保存
+                if chunk_id == 0 and 'columns' in result:
+                    metadata_queue.put(result['columns'])
             else:
                 rust_time = time.time() - rust_start
                 chunk_file = f"{OUTPUT_DIR}/{table_name}_chunk_{chunk_id}.bin"
@@ -401,22 +454,36 @@ def validate_parquet_output(file_path: str, num_rows: int = 5, gpu_rows: int = N
         return False
 
 
-def run_parallel_pipeline(columns: List[ColumnMeta], total_chunks: int, table_name: str, test_mode: bool = False):
+def run_parallel_pipeline(total_chunks: int, table_name: str, test_mode: bool = False):
     """真の並列パイプライン実行"""
     # キューとスレッド管理
     chunk_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
     stats_queue = queue.Queue()
+    metadata_queue = queue.Queue()
     
     start_time = time.time()
     
     # Producerスレッド開始
     producer_thread = threading.Thread(
         target=rust_producer,
-        args=(chunk_queue, total_chunks, stats_queue, table_name)
+        args=(chunk_queue, total_chunks, stats_queue, table_name, metadata_queue)
     )
     producer_thread.start()
     
-    # GPUウォーミングアップ（Producer開始と同時に実行）
+    # 最初のチャンクからメタデータを取得
+    print("メタデータを取得中...")
+    try:
+        rust_metadata = metadata_queue.get(timeout=30)  # 30秒タイムアウト
+        columns = convert_rust_metadata_to_column_meta(rust_metadata)
+        print(f"✅ メタデータ取得完了: {len(columns)} 列")
+    except queue.Empty:
+        print("❌ メタデータ取得タイムアウト")
+        print("ヒント: RustバイナリがJSONを出力しているか確認してください")
+        # Producerスレッドの終了を待つ
+        producer_thread.join()
+        raise RuntimeError("メタデータ取得に失敗しました")
+    
+    # GPUウォーミングアップ（メタデータ取得後）
     warmup_thread = threading.Thread(
         target=gpu_warmup,
         args=(columns,)
@@ -512,8 +579,7 @@ def gpu_warmup(columns):
         # ヘッダーサイズ検出
         header_size = detect_pg_header_size(dummy_data)
         
-        # DirectColumnExtractorを使用して処理
-        from src.postgres_to_cudf import DirectColumnExtractor
+        # シンプルなカーネル実行でJITコンパイルをトリガー
         from src.cuda_kernels.postgres_binary_parser import parse_binary_chunk_gpu_ultra_fast_v2_lite
         
         # GPUパースカーネルを直接実行（JITコンパイル確実に実行）
@@ -521,22 +587,7 @@ def gpu_warmup(columns):
             raw_dev, columns, header_size, debug=False, test_mode=False
         )
         
-        # ExtractorでcuDF DataFrame作成（データ抽出）
-        extractor = DirectColumnExtractor()
-        
-        # 固定長列と文字列列の処理（JITコンパイル）
-        fixed_dfs = extractor.extract_fixed_columns(
-            raw_dev, columns, row_positions, field_offsets, field_lengths
-        )
-        
-        # 最小限のcuDF結合操作
-        import cudf
-        if fixed_dfs:
-            cudf_df = cudf.concat(fixed_dfs, axis=1)
-        
         # 結果を破棄
-        if fixed_dfs:
-            del cudf_df
         del row_positions
         del field_offsets
         del field_lengths
@@ -577,15 +628,12 @@ def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=N
     # クリーンアップ
     cleanup_files(total_chunks, table_name)
     
-    # PostgreSQLからメタデータを取得
-    columns = get_postgresql_metadata(table_name)
-    
     try:
         # 並列パイプライン実行
         print("\n並列処理を開始します...")
         print("=" * 80)
         
-        results = run_parallel_pipeline(columns, total_chunks, table_name, test_mode)
+        results = run_parallel_pipeline(total_chunks, table_name, test_mode)
         
         # 最終統計を構造化表示
         total_gb = results['total_size'] / 1024**3
@@ -603,8 +651,14 @@ def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=N
         
         # 処理時間内訳
         print(f"\n【処理時間内訳】")
-        print(f"├─ Rust転送合計: {results['total_rust_time']:.2f}秒 ({total_gb / results['total_rust_time']:.2f} GB/秒)")
-        print(f"└─ GPU処理合計: {results['total_gpu_time']:.2f}秒 ({total_gb / results['total_gpu_time']:.2f} GB/秒)")
+        if results['total_rust_time'] > 0:
+            print(f"├─ Rust転送合計: {results['total_rust_time']:.2f}秒 ({total_gb / results['total_rust_time']:.2f} GB/秒)")
+        else:
+            print(f"├─ Rust転送合計: {results['total_rust_time']:.2f}秒")
+        if results['total_gpu_time'] > 0:
+            print(f"└─ GPU処理合計: {results['total_gpu_time']:.2f}秒 ({total_gb / results['total_gpu_time']:.2f} GB/秒)")
+        else:
+            print(f"└─ GPU処理合計: {results['total_gpu_time']:.2f}秒")
         print(f"   └─ kvikio転送: {results['total_transfer_time']:.2f}秒")
         
         
@@ -654,298 +708,13 @@ def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=N
         # --testモードの場合、PostgreSQLテーブル行数と比較
         if os.environ.get("GPUPGPARSER_TEST_MODE") == "1":
             print("\n【PostgreSQLテーブル行数との比較】")
-            try:
-                # PostgreSQLのテーブル行数を取得
-                dsn = os.environ.get("GPUPASER_PG_DSN", "")
-                with psycopg.connect(dsn) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
-                        pg_row_count = cur.fetchone()[0]
-                        print(f"psql -c \"SELECT COUNT(*) FROM {table_name};\"の結果: {pg_row_count:,} 行")
-                        
-                        # 比較結果を表示
-                        print(f"\n📊 Parquet全ファイル検証: ")
-                        if actual_total_rows == pg_row_count:
-                            print(f"└─ 行数: {actual_total_rows:,} OK (psqlと一致)")
-                        else:
-                            print(f"└─ 行数: {actual_total_rows:,} NG (psqlと不一致:{pg_row_count:,})")
-                            
-                        # 重複チェック用のキー列を決定
-                        key_columns = []
-                        if test_duplicate_keys:
-                            # カンマ区切りの文字列をリストに変換
-                            key_columns = [col.strip() for col in test_duplicate_keys.split(',')]
-                            if len(key_columns) > 1:
-                                print(f"\n【重複チェック（複合キー: {', '.join(key_columns)}）】")
-                            else:
-                                print(f"\n【重複チェック（キー列: {key_columns[0]}）】")
-                        else:
-                            # デフォルト: 最初の列を使用
-                            cur.execute(f"""
-                                SELECT column_name 
-                                FROM information_schema.columns 
-                                WHERE table_name = '{table_name}' 
-                                AND ordinal_position = 1
-                            """)
-                            result = cur.fetchone()
-                            if result:
-                                key_columns = [result[0]]
-                                print(f"\n【重複チェック（キー列: {key_columns[0]}）】")
-                        
-                        if key_columns:
-                            
-                            # 全Parquetファイルを読み込んで重複をチェック
-                            import cudf
-                            all_dfs = []
-                            duplicate_info = {}
-                            
-                            for i, pf in enumerate(parquet_files):
-                                try:
-                                    df = cudf.read_parquet(pf)
-                                    
-                                    # 列の存在確認
-                                    missing_cols = [col for col in key_columns if col not in df.columns]
-                                    if missing_cols:
-                                        print(f"├─ {pf.name}: ⚠️ 警告 - 指定された列が見つかりません: {', '.join(missing_cols)}")
-                                        print(f"│   利用可能な列: {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}")
-                                        continue
-                                    
-                                    # 各チャンク内の重複をチェック
-                                    total_rows = len(df)
-                                    
-                                    if len(key_columns) == 1:
-                                        # 単一キーの場合
-                                        key_column_name = key_columns[0]
-                                        unique_rows = df[key_column_name].nunique()
-                                        duplicates_in_chunk = total_rows - unique_rows
-                                    else:
-                                        # 複合キーの場合
-                                        # 複合キーの値を結合した一時列を作成
-                                        df['_composite_key'] = df[key_columns[0]].astype(str)
-                                        for col in key_columns[1:]:
-                                            df['_composite_key'] = df['_composite_key'] + '_' + df[col].astype(str)
-                                        
-                                        unique_rows = df['_composite_key'].nunique()
-                                        duplicates_in_chunk = total_rows - unique_rows
-                                        
-                                    duplicate_info[pf.name] = {
-                                        'total': total_rows,
-                                        'unique': unique_rows,
-                                        'duplicates': duplicates_in_chunk
-                                    }
-                                    
-                                    if duplicates_in_chunk > 0:
-                                            print(f"├─ {pf.name}: {duplicates_in_chunk:,}個の重複")
-                                            # 重複キーの例を表示
-                                            try:
-                                                if len(key_columns) == 1:
-                                                    # 単一キーの場合
-                                                    key_column_name = key_columns[0]
-                                                    # Decimal列の場合はint64に変換
-                                                    if hasattr(df[key_column_name].dtype, 'precision'):
-                                                        key_series = df[key_column_name].astype('int64')
-                                                    else:
-                                                        key_series = df[key_column_name]
-                                                    key_counts = key_series.value_counts()
-                                                    dup_keys = key_counts[key_counts > 1].head(5)
-                                                else:
-                                                    # 複合キーの場合
-                                                    key_counts = df['_composite_key'].value_counts()
-                                                    dup_keys = key_counts[key_counts > 1].head(5)
-                                            except Exception as e:
-                                                print(f"│   └─ 重複キー分析エラー: {e}")
-                                                dup_keys = []
-                                            
-                                            # thread_id情報があれば詳細表示
-                                            if '_thread_id' in df.columns and len(dup_keys) > 0:
-                                                print(f"│   └─ スレッドID情報付き重複分析:")
-                                                # dup_keysをpandasに変換してiterableにする
-                                                dup_keys_items = dup_keys.to_pandas().items()
-                                                
-                                                # 最初の3つの重複キーについて全列データを表示
-                                                sample_count = 0
-                                                for key, count in dup_keys_items:
-                                                    if sample_count >= 3:  # 最初の3つのみ
-                                                        break
-                                                    sample_count += 1
-                                                    
-                                                    # この重複キーを持つ行のthread_id情報を取得
-                                                    if len(key_columns) == 1:
-                                                        # 単一キーの場合
-                                                        key_column_name = key_columns[0]
-                                                        # Decimal列の場合はint64に変換
-                                                        if hasattr(df[key_column_name].dtype, 'precision'):
-                                                            dup_rows = df[df[key_column_name].astype('int64') == int(key)]
-                                                        else:
-                                                            dup_rows = df[df[key_column_name] == key]
-                                                        print(f"│       └─ {key_column_name}={key}: {count}回出現")
-                                                    else:
-                                                        # 複合キーの場合
-                                                        dup_rows = df[df['_composite_key'] == key]
-                                                        # 複合キーを分解して表示
-                                                        key_parts = key.split('_')
-                                                        key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
-                                                        print(f"│       └─ {key_display}: {count}回出現")
-                                                    
-                                                    thread_ids = dup_rows['_thread_id'].unique().to_pandas()
-                                                    print(f"│           処理スレッド: {sorted(thread_ids)}")
-                                                    
-                                                    # 全列データを表示（デバッグ列を除く）
-                                                    print(f"│           ")
-                                                    print(f"│           【全列データのサンプル表示】")
-                                                    # デバッグ列を除外
-                                                    debug_cols = ['_thread_id', '_row_position', '_thread_start_pos', '_thread_end_pos', '_composite_key']
-                                                    display_cols = [col for col in dup_rows.columns if col not in debug_cols]
-                                                    
-                                                    # 各行の全データを表示
-                                                    for row_idx in range(min(len(dup_rows), count)):  # 全ての重複行を表示
-                                                        print(f"│           ")
-                                                        print(f"│           行{row_idx + 1}:")
-                                                        
-                                                        # 基本データの表示 - 簡単な方法で
-                                                        for col in display_cols:
-                                                            try:
-                                                                # dup_rowsから直接値を取得
-                                                                value = dup_rows[col].iloc[row_idx]
-                                                                
-                                                                # 文字列の場合は長さも表示
-                                                                if pd.api.types.is_string_dtype(dup_rows[col].dtype):
-                                                                    # 末尾の空白を可視化
-                                                                    str_value = str(value)
-                                                                    visible_value = str_value.replace(' ', '·')
-                                                                    print(f"│             {col}: '{str_value}' (長さ: {len(str_value)}, 表示: '{visible_value}')")
-                                                                else:
-                                                                    print(f"│             {col}: {value}")
-                                                            except Exception as e:
-                                                                # エラーの場合は単純な文字列表現を試す
-                                                                try:
-                                                                    simple_value = str(dup_rows[col].iloc[row_idx])
-                                                                    print(f"│             {col}: {simple_value}")
-                                                                except:
-                                                                    print(f"│             {col}: (表示エラー)")
-                                                        
-                                                        # デバッグ情報の表示
-                                                        if '_thread_id' in dup_rows.columns:
-                                                            print(f"│             ---")
-                                                            try:
-                                                                print(f"│             thread_id: {dup_rows['_thread_id'].iloc[row_idx]}")
-                                                                if '_row_position' in dup_rows.columns:
-                                                                    print(f"│             row_position: {dup_rows['_row_position'].iloc[row_idx]:,}")
-                                                                if '_thread_start_pos' in dup_rows.columns and '_thread_end_pos' in dup_rows.columns:
-                                                                    start_pos = dup_rows['_thread_start_pos'].iloc[row_idx]
-                                                                    end_pos = dup_rows['_thread_end_pos'].iloc[row_idx]
-                                                                    print(f"│             thread_range: [{start_pos:,} - {end_pos:,}]")
-                                                            except:
-                                                                pass
-                                                    
-                                                    print(f"│           ")
-                                                    
-                                                    # 元の詳細表示も維持（簡略版）
-                                                    for tid in sorted(thread_ids):
-                                                        tid_rows = dup_rows[dup_rows['_thread_id'] == tid]
-                                                        print(f"│           └─ thread_id={tid}: {len(tid_rows)}行")
-                                            else:
-                                                # thread_id情報がない場合
-                                                for key, count in dup_keys.items():
-                                                    if len(key_columns) == 1:
-                                                        print(f"│   └─ {key_columns[0]}={key}: {count}回出現")
-                                                    else:
-                                                        # 複合キーを分解して表示
-                                                        key_parts = key.split('_')
-                                                        key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
-                                                        print(f"│   └─ {key_display}: {count}回出現")
-                                    
-                                    all_dfs.append(df)
-                                except Exception as e:
-                                    print(f"├─ {pf.name}: 読み込みエラー - {e}")
-                            
-                            # 全チャンクを結合して重複チェック
-                            if all_dfs:
-                                print(f"\n【チャンク間の重複チェック】")
-                                all_df = cudf.concat(all_dfs)
-                                total_all = len(all_df)
-                                
-                                if len(key_columns) == 1:
-                                    # 単一キーの場合
-                                    key_column_name = key_columns[0]
-                                    unique_all = all_df[key_column_name].nunique()
-                                else:
-                                    # 複合キーの場合 - 全データに対して_composite_keyを再作成
-                                    all_df['_composite_key'] = all_df[key_columns[0]].astype(str)
-                                    for col in key_columns[1:]:
-                                        all_df['_composite_key'] = all_df['_composite_key'] + '_' + all_df[col].astype(str)
-                                    unique_all = all_df['_composite_key'].nunique()
-                                
-                                total_duplicates = total_all - unique_all
-                                
-                                print(f"├─ 全チャンク合計行数: {total_all:,}")
-                                print(f"├─ ユニークキー数: {unique_all:,}")
-                                print(f"├─ 総重複数: {total_duplicates:,}")
-                                
-                                # チャンク内重複の合計
-                                chunk_duplicates = sum(info['duplicates'] for info in duplicate_info.values())
-                                inter_chunk_duplicates = total_duplicates - chunk_duplicates
-                                
-                                if inter_chunk_duplicates > 0:
-                                    print(f"└─ チャンク間重複: {inter_chunk_duplicates:,}個")
-                                    
-                                    # チャンク間で重複しているキーの特定
-                                    key_appearances = {}
-                                    for i, df in enumerate(all_dfs):
-                                        if len(key_columns) == 1:
-                                            # 単一キーの場合
-                                            unique_keys = df[key_columns[0]].unique().to_pandas()
-                                        else:
-                                            # 複合キーの場合
-                                            unique_keys = df['_composite_key'].unique().to_pandas()
-                                        
-                                        for key in unique_keys:
-                                            if key not in key_appearances:
-                                                key_appearances[key] = []
-                                            key_appearances[key].append(i)
-                                    
-                                    # 複数チャンクに出現するキー
-                                    multi_chunk_keys = {k: v for k, v in key_appearances.items() if len(v) > 1}
-                                    if multi_chunk_keys:
-                                        print(f"\n    チャンク間重複キーの例（最初の5個）:")
-                                        
-                                        # thread_id情報があるかチェック
-                                        has_thread_id = any('_thread_id' in df.columns for df in all_dfs)
-                                        
-                                        for j, (key, chunks) in enumerate(list(multi_chunk_keys.items())[:5]):
-                                            if len(key_columns) == 1:
-                                                print(f"    └─ {key_columns[0]}={key}: チャンク{chunks}に出現")
-                                            else:
-                                                # 複合キーを分解して表示
-                                                key_parts = key.split('_')
-                                                key_display = ', '.join([f"{k}={v}" for k, v in zip(key_columns, key_parts)])
-                                                print(f"    └─ {key_display}: チャンク{chunks}に出現")
-                                            
-                                            # thread_id情報があれば詳細表示
-                                            if has_thread_id:
-                                                for chunk_idx in chunks:
-                                                    df = all_dfs[chunk_idx]
-                                                    if '_thread_id' in df.columns:
-                                                        if len(key_columns) == 1:
-                                                            # 単一キーの場合
-                                                            key_column_name = key_columns[0]
-                                                            # Decimal列の場合はint64に変換
-                                                            if hasattr(df[key_column_name].dtype, 'precision'):
-                                                                key_rows = df[df[key_column_name].astype('int64') == int(key)]
-                                                            else:
-                                                                key_rows = df[df[key_column_name] == key]
-                                                        else:
-                                                            # 複合キーの場合
-                                                            key_rows = df[df['_composite_key'] == key]
-                                                        
-                                                        thread_ids = key_rows['_thread_id'].unique().to_pandas()
-                                                        print(f"        └─ チャンク{chunk_idx}: thread_id={sorted(thread_ids)}")
-                                
-                                # メモリ解放
-                                del all_df
-                                del all_dfs
-            except Exception as e:
-                print(f"PostgreSQL行数取得エラー: {e}")
+            print("※ psycopg依存を削除したため、この機能は一時的に無効です")
+            # TODO: Rustバイナリから行数情報を取得するか、別の方法を実装
+            
+            # 重複チェックは一時的に無効化（psycopg依存のため）
+            if test_duplicate_keys:
+                print("\n【重複チェック】")
+                print("※ psycopg依存を削除したため、この機能は一時的に無効です")
         
         if actual_total_rows != results['total_rows']:
             print(f"\n⚠️  行数不一致: GPU報告値 {results['total_rows']:,} vs Parquet実際値 {actual_total_rows:,}")
