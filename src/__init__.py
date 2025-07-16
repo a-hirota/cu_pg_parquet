@@ -22,7 +22,6 @@ from .write_parquet_from_cudf import (
 )
 
 # 基盤コンポーネント
-from .readPostgres.metadata import fetch_column_meta
 from .types import ColumnMeta, PG_OID_TO_ARROW
 
 __version__ = "0.3.0"  # Direct版
@@ -39,7 +38,6 @@ __all__ = [
     "write_cudf_to_parquet_with_options",
     
     # 基盤
-    "fetch_column_meta",
     "ColumnMeta",
     "PG_OID_TO_ARROW",
 ]
