@@ -15,7 +15,7 @@ const CHUNKS: usize = 8;  // チャンク数（各約6.6GB - GPUメモリに最�
 const BUFFER_SIZE: usize = 64 * 1024 * 1024;  // 64MBバッファ
 const OUTPUT_DIR: &str = "/dev/shm";  // 出力ディレクトリ（高速RAMディスク）
 const META_PATH: &str = "/dev/shm/lineorder_meta.json";  // メタデータ出力先
-const ESTIMATED_ROWS: u64 = 600_003_000;  // lineorderテーブルの実際の行数
+// const ESTIMATED_ROWS: u64 = 600_003_000;  // lineorderテーブルの実際の行数
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ColumnMeta {

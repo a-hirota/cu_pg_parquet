@@ -4,12 +4,10 @@ use futures_util::StreamExt;
 use tokio::task::JoinSet;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::fs::{File, OpenOptions, remove_file};
-use std::io::Write;
+use std::fs::File;
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
 
 const PARALLEL_CONNECTIONS: usize = 16;  // 並列接続数
 const CHUNKS: usize = 4;  // チャンク数
@@ -273,13 +271,13 @@ async fn process_range_for_chunk(
     let stream = client.copy_out(&copy_query).await?;
     futures_util::pin_mut!(stream);
     
-    let mut chunk_count = 0u64;
+    let mut _chunk_count = 0u64;
     
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
         
         write_buffer.extend_from_slice(&chunk);
-        chunk_count += 1;
+        _chunk_count += 1;
         
         if write_buffer.len() >= BUFFER_SIZE {
             let bytes_to_write = write_buffer.len();
