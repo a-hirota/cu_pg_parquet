@@ -79,7 +79,7 @@ def convert_rust_metadata_to_column_meta(rust_columns):
     # src/types.pyから必要な定数をインポート
     from src.types import (
         INT16, INT32, INT64, FLOAT32, FLOAT64, DECIMAL128,
-        UTF8, BINARY, DATE32, TS64_US, BOOL
+        UTF8, BINARY, TS64_S, TS64_US, BOOL
     )
     
     columns = []
@@ -94,7 +94,7 @@ def convert_rust_metadata_to_column_meta(rust_columns):
             'decimal128': (DECIMAL128, 16), # DECIMAL128 = 5, elem_size = 16
             'string': (UTF8, None),       # UTF8 = 6, elem_size = None (可変長)
             'binary': (BINARY, None),     # BINARY = 7, elem_size = None (可変長)
-            'date32': (DATE32, 4),        # DATE32 = 8, elem_size = 4
+            'timestamp_s': (TS64_S, 8),    # TS64_S = 8, elem_size = 8
             'timestamp[ns]': (TS64_US, 8),       # TS64_US = 9, elem_size = 8
             'timestamp[ns, tz=UTC]': (TS64_US, 8), # TS64_US = 9, elem_size = 8
             'bool': (BOOL, 1),            # BOOL = 10, elem_size = 1

@@ -156,6 +156,7 @@ fn map_to_arrow_type(oid: u32) -> String {
         1700 => "decimal",
         25 => "text",
         1043 => "varchar",
+        1082 => "timestamp_s",  // date型をtimestamp_sとして扱う
         _ => "unknown",
     }.to_string()
 }

@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "float8" => "float64",
             "numeric" => "decimal128",
             "text" | "varchar" | "char" | "bpchar" => "utf8",
-            "date" => "date32",
+            "date" => "timestamp_s",
             "timestamp" | "timestamptz" => "timestamp[us]",
             "bool" => "bool",
             _ => "unknown"

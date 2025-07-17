@@ -9,7 +9,7 @@ INT16, INT32, INT64 = 0, 1, 2
 FLOAT32, FLOAT64 = 3, 4
 DECIMAL128 = 5
 UTF8, BINARY = 6, 7
-DATE32, TS64_US = 8, 9
+TS64_S, TS64_US = 8, 9  # DATE32を削除し、TS64_Sを追加
 BOOL = 10
 UNKNOWN = 255
 
@@ -41,7 +41,7 @@ PG_OID_TO_ARROW: Dict[int, Tuple[int, Optional[int]]] = {
     1042: (UTF8, None),   # bpchar
     1043: (UTF8, None),   # varchar
     17:  (BINARY, None),  # bytea
-    1082: (DATE32, 4),    # date
+    1082: (TS64_S, 8),    # date → timestamp seconds として扱う
     1114: (TS64_US, 8),   # timestamp without time zone
     1184: (TS64_US, 8),   # timestamp with time zone
 }
@@ -54,7 +54,7 @@ PG_OID_TO_BINARY_SIZE: Dict[int, Optional[int]] = {
     700: 4,       # float4 / real - 固定4バイト
     701: 8,       # float8 / double precision - 固定8バイト
     16: 1,        # boolean - 固定1バイト
-    1082: 4,      # date - 固定4バイト
+    1082: 4,      # date - PostgreSQLバイナリでは固定4バイト（2000-01-01からの日数）
     1114: 8,      # timestamp without time zone - 固定8バイト
     1184: 8,      # timestamp with time zone - 固定8バイト
     1700: None,   # numeric - 可変長
@@ -66,6 +66,6 @@ PG_OID_TO_BINARY_SIZE: Dict[int, Optional[int]] = {
 
 __all__ = [
     "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64", "DECIMAL128",
-    "UTF8", "BINARY", "DATE32", "TS64_US", "BOOL", "UNKNOWN",
+    "UTF8", "BINARY", "TS64_S", "TS64_US", "BOOL", "UNKNOWN",
     "ColumnMeta", "PG_OID_TO_ARROW", "PG_OID_TO_BINARY_SIZE",
 ]

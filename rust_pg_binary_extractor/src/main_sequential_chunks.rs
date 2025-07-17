@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "numeric" | "decimal" => "decimal128",
             "character" | "char" => "string",
             "character varying" | "varchar" | "text" => "string",
-            "date" => "date32",
+            "date" => "timestamp_s",
             "timestamp" | "timestamp without time zone" => "timestamp[ns]",
             "timestamp with time zone" => "timestamp[ns, tz=UTC]",
             "boolean" => "bool",

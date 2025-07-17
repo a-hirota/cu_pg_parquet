@@ -20,7 +20,7 @@ import os
 
 from .types import (
     ColumnMeta, INT16, INT32, INT64, FLOAT32, FLOAT64, DECIMAL128,
-    UTF8, BINARY, DATE32, TS64_US, BOOL, UNKNOWN
+    UTF8, BINARY, TS64_S, TS64_US, BOOL, UNKNOWN
 )
 from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
@@ -251,9 +251,9 @@ class DirectColumnExtractor:
             else:
                 # メタデータがない場合のデフォルト
                 precision, decimal_scale = 38, 0
-        elif col.arrow_id == INT32 or col.arrow_id == FLOAT32 or col.arrow_id == DATE32:
+        elif col.arrow_id == INT32 or col.arrow_id == FLOAT32:
             col_size = 4
-        elif col.arrow_id == INT64 or col.arrow_id == FLOAT64 or col.arrow_id == TS64_US:
+        elif col.arrow_id == INT64 or col.arrow_id == FLOAT64 or col.arrow_id == TS64_US or col.arrow_id == TS64_S:
             col_size = 8
         elif col.arrow_id == INT16:
             col_size = 2
@@ -422,8 +422,8 @@ class DirectColumnExtractor:
                         output_buffer[dst_offset + i] = 0
             else:
                 # データをコピー（エンディアン変換）
-                # INT32=1, FLOAT32=3, DATE32=9
-                if arrow_type == 1 or arrow_type == 3 or arrow_type == 9:
+                # INT32=1, FLOAT32=3
+                if arrow_type == 1 or arrow_type == 3:
                     # 4バイト型：ビッグエンディアン→リトルエンディアン
                     if src_offset + 4 <= raw_data.size and dst_offset + 4 <= output_buffer.size:
                         output_buffer[dst_offset] = raw_data[src_offset + 3]
@@ -431,8 +431,8 @@ class DirectColumnExtractor:
                         output_buffer[dst_offset + 2] = raw_data[src_offset + 1]
                         output_buffer[dst_offset + 3] = raw_data[src_offset]
                 
-                # INT64=2, FLOAT64=4, TS64_US=10
-                elif arrow_type == 2 or arrow_type == 4 or arrow_type == 10:
+                # INT64=2, FLOAT64=4, TS64_US=9
+                elif arrow_type == 2 or arrow_type == 4 or arrow_type == 9:
                     # 8バイト型：ビッグエンディアン→リトルエンディアン
                     if src_offset + 8 <= raw_data.size and dst_offset + 8 <= output_buffer.size:
                         for i in range(8):
@@ -445,8 +445,33 @@ class DirectColumnExtractor:
                         output_buffer[dst_offset] = raw_data[src_offset + 1]
                         output_buffer[dst_offset + 1] = raw_data[src_offset]
                 
-                # BOOL=8
+                # TS64_S=8 (PostgreSQL date型からの変換)
                 elif arrow_type == 8:
+                    # PostgreSQL date型は4バイトで2000-01-01からの日数
+                    # これをUnix epochからの秒数に変換
+                    if src_offset + 4 <= raw_data.size and dst_offset + 8 <= output_buffer.size:
+                        # 4バイトのビッグエンディアン整数を読み取り（符号なし）
+                        days_since_2000_unsigned = (raw_data[src_offset] << 24) | \
+                                                 (raw_data[src_offset + 1] << 16) | \
+                                                 (raw_data[src_offset + 2] << 8) | \
+                                                 raw_data[src_offset + 3]
+                        
+                        # 符号付き32ビット整数として解釈
+                        if days_since_2000_unsigned >= 0x80000000:
+                            days_since_2000 = days_since_2000_unsigned - 0x100000000
+                        else:
+                            days_since_2000 = days_since_2000_unsigned
+                        
+                        # 2000-01-01 00:00:00 UTCのUnix timestampは946684800秒
+                        # 日数を秒数に変換して、2000-01-01のタイムスタンプを加算
+                        seconds_since_epoch = np.int64(946684800 + days_since_2000 * 86400)
+                        
+                        # 8バイトのリトルエンディアンとして書き込み
+                        for i in range(8):
+                            output_buffer[dst_offset + i] = (seconds_since_epoch >> (i * 8)) & 0xFF
+                
+                # BOOL=10
+                elif arrow_type == 10:
                     # 1バイト型：そのままコピー
                     if src_offset < raw_data.size and dst_offset < output_buffer.size:
                         output_buffer[dst_offset] = raw_data[src_offset]
@@ -616,8 +641,8 @@ class DirectColumnExtractor:
                 dt = plc.types.DataType(plc.types.TypeId.FLOAT32)
             elif col.arrow_id == FLOAT64:
                 dt = plc.types.DataType(plc.types.TypeId.FLOAT64)
-            elif col.arrow_id == DATE32:
-                dt = plc.types.DataType(plc.types.TypeId.DATE32)
+            elif col.arrow_id == TS64_S:
+                dt = plc.types.DataType(plc.types.TypeId.TIMESTAMP_SECONDS)
             elif col.arrow_id == BOOL:
                 dt = plc.types.DataType(plc.types.TypeId.BOOL8)
             elif col.arrow_id == INT16:
@@ -667,10 +692,10 @@ class DirectColumnExtractor:
             elif col.arrow_id == FLOAT64:
                 col_size = 8
                 dtype = cp.float64
-            elif col.arrow_id == INT32 or col.arrow_id == DATE32:
+            elif col.arrow_id == INT32:
                 col_size = 4
                 dtype = cp.int32
-            elif col.arrow_id == INT64 or col.arrow_id == TS64_US:
+            elif col.arrow_id == INT64 or col.arrow_id == TS64_US or col.arrow_id == TS64_S:
                 col_size = 8
                 dtype = cp.int64
             elif col.arrow_id == INT16:
@@ -694,9 +719,9 @@ class DirectColumnExtractor:
                 )
             )
             
-            # DATE32の特殊処理
-            if col.arrow_id == DATE32:
-                return cudf.Series(data_cupy, dtype='datetime64[D]')
+            # Timestamp型の特殊処理
+            if col.arrow_id == TS64_S:
+                return cudf.Series(data_cupy, dtype='datetime64[s]')
             elif col.arrow_id == TS64_US:
                 return cudf.Series(data_cupy, dtype='datetime64[us]')
             else:
