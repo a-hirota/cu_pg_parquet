@@ -11,7 +11,7 @@ from numba.cuda import atomic
 import math
 
 @cuda.jit
-def find_row_start_offsets_parallel_optimized(
+def find_row_start_offsets_parallel(
     raw_data, 
     row_offsets, 
     total_rows_found, 
@@ -72,7 +72,7 @@ def find_row_start_offsets_parallel_optimized(
 
 
 @cuda.jit
-def count_rows_parallel_optimized(raw_data, row_counter, data_size, stride_size=1024):
+def count_rows_parallel(raw_data, row_counter, data_size, stride_size=1024):
     """
     並列化された行数カウントカーネル
     
@@ -118,7 +118,7 @@ def count_rows_parallel_optimized(raw_data, row_counter, data_size, stride_size=
 
 
 @cuda.jit
-def extract_fields_coalesced_optimized(
+def extract_fields_coalesced(
     raw_data,
     row_offsets,
     field_offsets,
@@ -261,7 +261,7 @@ def unified_decode_with_coalescing(
                         var_data_buffer[current_offset + i] = raw_data[field_offset + i]
 
 
-def optimize_grid_size(data_size: int, num_rows: int, device_props: dict) -> tuple:
+def calculate_gpu_grid_dimensions(data_size: int, num_rows: int, device_props: dict) -> tuple:
     """
     GPU特性に基づいたGrid/Blockサイズを計算
     
@@ -342,7 +342,7 @@ def parse_binary_chunk_gpu_enhanced(
     row_counter[0] = 0
     
     # Grid/Blockサイズの計算
-    count_blocks, count_threads = optimize_grid_size(data_size, 0, device_props)
+    count_blocks, count_threads = calculate_gpu_grid_dimensions(data_size, 0, device_props)
     
     count_rows_parallel_optimized[count_blocks, count_threads](
         data_section, row_counter, data_size
@@ -359,7 +359,7 @@ def parse_binary_chunk_gpu_enhanced(
     rows_found_counter[0] = 0
     
     # Grid/Blockサイズの計算
-    offset_blocks, offset_threads = optimize_grid_size(data_size, total_rows, device_props)
+    offset_blocks, offset_threads = calculate_gpu_grid_dimensions(data_size, total_rows, device_props)
     
     find_row_start_offsets_parallel_optimized[offset_blocks, offset_threads](
         data_section, row_offsets, rows_found_counter, data_size
@@ -394,10 +394,10 @@ def parse_binary_chunk_gpu_enhanced(
 
 
 __all__ = [
-    "find_row_start_offsets_parallel_optimized",
-    "count_rows_parallel_optimized", 
-    "extract_fields_coalesced_optimized",
+    "find_row_start_offsets_parallel",
+    "count_rows_parallel", 
+    "extract_fields_coalesced",
     "unified_decode_with_coalescing",
-    "optimize_grid_size",
+    "calculate_gpu_grid_dimensions",
     "parse_binary_chunk_gpu_enhanced"
 ]

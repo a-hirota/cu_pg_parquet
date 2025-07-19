@@ -6,9 +6,9 @@ ZeroCopy実装をデフォルトとして使用
 """
 
 # メインAPIの公開 (Direct版)
-from .main_postgres_to_parquet import (
+from .postgres_to_parquet_converter import (
     DirectProcessor,
-    postgresql_to_cudf_parquet_direct
+    convert_postgres_to_parquet_format
 )
 
 # 詳細制御用API
@@ -29,7 +29,7 @@ __version__ = "0.3.0"  # Direct版
 __all__ = [
     # メイン処理
     "DirectProcessor",
-    "postgresql_to_cudf_parquet_direct",
+    "convert_postgres_to_parquet_format",
     
     # 詳細制御
     "DirectColumnExtractor",

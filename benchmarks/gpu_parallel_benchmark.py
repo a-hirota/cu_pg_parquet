@@ -21,8 +21,8 @@ from typing import List, Dict, Any
 import glob
 
 from src.types import ColumnMeta
-from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
-from src.cuda_kernels.postgresql_binary_parser import detect_pg_header_size
+from src.postgres_to_parquet_converter import convert_postgres_to_parquet_format
+from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 
 TABLE_NAME = "lineorder"
 OUTPUT_DIR = "/dev/shm"
@@ -204,7 +204,7 @@ def process_chunk_direct(chunk_info: dict, columns: List[ColumnMeta]) -> tuple:
         process_start = time.time()
         chunk_output = f"benchmark/chunk_{chunk_id}_direct.parquet"
         
-        cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
+        cudf_df, detailed_timing = convert_postgres_to_parquet_format(
             raw_dev=raw_dev,
             columns=columns,
             ncols=len(columns),

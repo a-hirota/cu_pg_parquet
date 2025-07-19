@@ -26,7 +26,7 @@ from .types import ColumnMeta
 from .postgres_to_cudf import DirectColumnExtractor
 from .write_parquet_from_cudf import write_cudf_to_parquet_with_options
 from .cuda_kernels.postgres_binary_parser import detect_pg_header_size
-from .cuda_kernels.gpu_config_utils import optimize_grid_size
+from .cuda_kernels.gpu_configuration import calculate_gpu_grid_dimensions
 
 
 class DirectProcessor:
@@ -196,7 +196,7 @@ class DirectProcessor:
         
         return cudf_df, timing_info
     
-    def process_postgresql_to_parquet(
+    def transform_postgres_to_parquet_format(
         self,
         raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
         columns: List[ColumnMeta],
@@ -207,7 +207,7 @@ class DirectProcessor:
         **kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
-        PostgreSQL → cuDF → GPU Parquet の直接処理
+        PostgreSQLバイナリデータをParquet形式に変換
         """
         
         total_timing = {}
@@ -549,7 +549,7 @@ class DirectProcessor:
         print("=" * 30)
 
 
-def postgresql_to_cudf_parquet_direct(
+def convert_postgres_to_parquet_format(
     raw_dev: cuda.cudadrv.devicearray.DeviceNDArray,
     columns: List[ColumnMeta],
     ncols: int,
@@ -563,7 +563,7 @@ def postgresql_to_cudf_parquet_direct(
     **parquet_kwargs
 ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
     """
-    PostgreSQL → cuDF → GPU Parquet 直接処理関数（統合バッファ不使用版）
+    PostgreSQLバイナリデータをParquet形式に変換
     
     最適化技術を統合した高性能バージョン：
     - 統合バッファを削除し、メモリ使用量を削減
@@ -597,7 +597,7 @@ def postgresql_to_cudf_parquet_direct(
         test_mode=test_mode
     )
     
-    return processor.process_postgresql_to_parquet(
+    return processor.transform_postgres_to_parquet_format(
         raw_dev, columns, ncols, header_size, output_path, 
         compression, **parquet_kwargs
     )
@@ -605,5 +605,5 @@ def postgresql_to_cudf_parquet_direct(
 
 __all__ = [
     "DirectProcessor",
-    "postgresql_to_cudf_parquet_direct"
+    "convert_postgres_to_parquet_format"
 ]

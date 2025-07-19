@@ -25,7 +25,7 @@ from .types import (
 from .cuda_kernels.decimal_tables import (
     POW10_TABLE_LO_HOST, POW10_TABLE_HI_HOST
 )
-from .cuda_kernels.gpu_config_utils import optimize_grid_size
+from .cuda_kernels.gpu_configuration import calculate_gpu_grid_dimensions
 
 
 # 128ビット演算のデバイス関数（モジュールレベル）

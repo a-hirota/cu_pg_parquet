@@ -23,7 +23,7 @@ import sys
 import pandas as pd
 
 from src.types import ColumnMeta, PG_OID_TO_ARROW, UNKNOWN
-from src.main_postgres_to_parquet import postgresql_to_cudf_parquet_direct
+from src.postgres_to_parquet_converter import convert_postgres_to_parquet_format
 from src.cuda_kernels.postgres_binary_parser import detect_pg_header_size
 import pyarrow.parquet as pq
 
@@ -310,7 +310,7 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
             else:
                 os.environ['GPUPGPARSER_LAST_CHUNK'] = '0'
             
-            cudf_df, detailed_timing = postgresql_to_cudf_parquet_direct(
+            cudf_df, detailed_timing = convert_postgres_to_parquet_format(
                 raw_dev=raw_dev,
                 columns=columns,
                 ncols=len(columns),

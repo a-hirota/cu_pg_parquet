@@ -1088,9 +1088,9 @@ def parse_rows_and_fields_lite_test(
                     field_offsets[global_idx, j] = local_field_offsets[i, j]
                     field_lengths[global_idx, j] = local_field_lengths[i, j]
 
-def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None, debug=False, test_mode=False):
+def parse_postgres_raw_binary_to_column_arrows(raw_dev, columns, header_size=None, debug=False, test_mode=False):
     """
-    軽量統合版: 共有メモリ使用量を最小化した統合パーサー
+    PostgreSQLバイナリデータを列アロー形式に変換
     
     最適化効果:
     - メモリアクセス: 50%削減 (218MB × 2回 → 218MB × 1回)
@@ -1652,15 +1652,15 @@ def parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size=None
 # エイリアス関数（後方互換性）
 def parse_binary_chunk_gpu_ultra_fast_v2(raw_dev, columns, header_size=None, debug=False, test_mode=False):
     """従来版インターフェース互換ラッパー"""
-    return parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size, debug, test_mode)
+    return parse_postgres_raw_binary_to_column_arrows(raw_dev, columns, header_size, debug, test_mode)
 
 def parse_binary_chunk_gpu_ultra_fast_v2_integrated(raw_dev, columns, header_size=None, debug=False, test_mode=False):
     """統合最適化版（軽量版を使用）"""
-    return parse_binary_chunk_gpu_ultra_fast_v2_lite(raw_dev, columns, header_size, debug, test_mode)
+    return parse_postgres_raw_binary_to_column_arrows(raw_dev, columns, header_size, debug, test_mode)
 
 __all__ = [
     "detect_pg_header_size",
-    "parse_binary_chunk_gpu_ultra_fast_v2_lite",
+    "parse_postgres_raw_binary_to_column_arrows",
     "parse_binary_chunk_gpu_ultra_fast_v2", 
     "parse_binary_chunk_gpu_ultra_fast_v2_integrated",
     "estimate_row_size_from_columns",
