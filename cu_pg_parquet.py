@@ -26,9 +26,9 @@ from pathlib import Path
 # プロジェクトルートをパスに追加
 sys.path.insert(0, str(Path(__file__).parent))
 
-# benchmarkディレクトリからインポート
-sys.path.append(str(Path(__file__).parent / "benchmarks"))
-from gpu_pipeline_benchmark import main as benchmark_main
+# processorsディレクトリからインポート
+sys.path.append(str(Path(__file__).parent / "processors"))
+from gpu_pipeline_processor import main as pipeline_main
 
 
 def main():
@@ -168,8 +168,8 @@ def main():
     ]
     
     try:
-        # benchmark_rust_gpu_direct.pyのmain()を実行
-        benchmark_main(
+        # gpu_pipeline_processor.pyのmain()を実行
+        pipeline_main(
             total_chunks=args.chunks, 
             table_name=args.table, 
             test_mode=args.test,

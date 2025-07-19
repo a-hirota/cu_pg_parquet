@@ -1,6 +1,6 @@
 # Tidy Refactoring Changes
 
-This document summarizes all the naming changes made to follow the clean code principles and remove meaningless adjectives (optimized, ultra, fast, v2).
+This document summarizes all the naming changes made to follow the clean code principles and remove meaningless adjectives (optimized, ultra, fast, v2) and misleading names (benchmark for production code).
 
 ## Function Renaming
 
@@ -22,18 +22,22 @@ This document summarizes all the naming changes made to follow the clean code pr
 ## File Renaming
 - `src/main_postgres_to_parquet.py` → `src/postgres_to_parquet_converter.py`
 - `src/cuda_kernels/gpu_config_utils.py` → `src/cuda_kernels/gpu_configuration.py`
+- `benchmarks/gpu_pipeline_benchmark.py` → `processors/gpu_pipeline_processor.py`
+- `benchmarks/gpu_parallel_benchmark.py` → `processors/gpu_parallel_processor.py`
 
 ## Folder Renaming
 - `src/readPostgres/` → `src/postgres_reader/`
+- `benchmarks/` → `processors/` (these are production processors, not benchmarks)
 
 ## Import Updates
 All imports have been updated across the codebase:
-- `benchmarks/gpu_pipeline_benchmark.py`
-- `benchmarks/gpu_parallel_benchmark.py`
+- `processors/gpu_pipeline_processor.py` (formerly benchmarks/gpu_pipeline_benchmark.py)
+- `processors/gpu_parallel_processor.py` (formerly benchmarks/gpu_parallel_benchmark.py)
 - `src/__init__.py`
 - `src/postgres_to_parquet_converter.py`
 - `src/postgres_to_cudf.py`
 - `src/cuda_kernels/__init__.py`
+- `cu_pg_parquet.py` (main entry point)
 
 ## Naming Convention Applied
 The new names follow the pattern: `functionality_inputFormat_to_outputFormat`
