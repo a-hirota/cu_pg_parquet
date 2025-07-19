@@ -245,7 +245,7 @@ def rust_producer(chunk_queue: queue.Queue, total_chunks: int, stats_queue: queu
     print("[Producer] 全チャンク転送完了")
 
 
-def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int, table_name: str, test_mode: bool = False):
+def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_id: int, stats_queue: queue.Queue, total_chunks: int, table_name: str, test_mode: bool = False, compression: str = "zstd"):
     """GPU処理を実行するConsumerスレッド"""
     while not shutdown_flag.is_set():
         try:
@@ -316,7 +316,7 @@ def gpu_consumer(chunk_queue: queue.Queue, columns: List[ColumnMeta], consumer_i
                 ncols=len(columns),
                 header_size=header_size,
                 output_path=chunk_output,
-                compression='snappy',
+                compression=compression,
                 use_rmm=True,
                 optimize_gpu=True,
                 verbose=False,
@@ -454,7 +454,7 @@ def validate_parquet_output(file_path: str, num_rows: int = 5, gpu_rows: int = N
         return False
 
 
-def run_parallel_pipeline(total_chunks: int, table_name: str, test_mode: bool = False):
+def run_parallel_pipeline(total_chunks: int, table_name: str, test_mode: bool = False, compression: str = "zstd"):
     """真の並列パイプライン実行"""
     # キューとスレッド管理
     chunk_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -493,7 +493,7 @@ def run_parallel_pipeline(total_chunks: int, table_name: str, test_mode: bool = 
     # Consumerスレッド開始（1つのみ - GPUメモリ制約）
     consumer_thread = threading.Thread(
         target=gpu_consumer,
-        args=(chunk_queue, columns, 1, stats_queue, total_chunks, table_name, test_mode)
+        args=(chunk_queue, columns, 1, stats_queue, total_chunks, table_name, test_mode, compression)
     )
     consumer_thread.start()
     
@@ -600,7 +600,7 @@ def gpu_warmup(columns):
         print(f"⚠️  GPUウォーミングアップ警告: {e}\n")
 
 
-def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=None):
+def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=None, compression="zstd"):
     global TABLE_NAME
     if table_name:
         TABLE_NAME = table_name
@@ -633,7 +633,7 @@ def main(total_chunks=8, table_name=None, test_mode=False, test_duplicate_keys=N
         print("\n並列処理を開始します...")
         print("=" * 80)
         
-        results = run_parallel_pipeline(total_chunks, table_name, test_mode)
+        results = run_parallel_pipeline(total_chunks, table_name, test_mode, compression)
         
         # 最終統計を構造化表示
         total_gb = results['total_size'] / 1024**3

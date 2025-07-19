@@ -90,6 +90,13 @@ def main():
         default=None,
         help="テストモード時の重複チェックに使用する列名（カンマ区切り）。例: lo_orderkey,lo_linenumber"
     )
+    parser.add_argument(
+        "--compression",
+        type=str,
+        default="zstd",
+        choices=["snappy", "gzip", "lz4", "brotli", "zstd", "none"],
+        help="Parquet圧縮方式（デフォルト: zstd）"
+    )
     
     args = parser.parse_args()
     
@@ -166,7 +173,8 @@ def main():
             total_chunks=args.chunks, 
             table_name=args.table, 
             test_mode=args.test,
-            test_duplicate_keys=args.test_duplicate_keys if args.test else None
+            test_duplicate_keys=args.test_duplicate_keys if args.test else None,
+            compression=args.compression
         )
         elapsed_time = time.time() - start_time
         print(f"\n処理完了: {elapsed_time:.2f}秒")

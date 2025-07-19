@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 def write_cudf_to_parquet(
     cudf_df: cudf.DataFrame,
     output_path: str,
-    compression: str = 'snappy',
+    compression: str = 'zstd',
     **parquet_kwargs
 ) -> Dict[str, float]:
     """
@@ -22,7 +22,7 @@ def write_cudf_to_parquet(
     Args:
         cudf_df: 書き込み対象のcuDF DataFrame
         output_path: 出力Parquetファイルパス
-        compression: 圧縮方式 ('snappy', 'gzip', 'lz4', etc.)
+        compression: 圧縮方式 ('zstd', 'snappy', 'lz4', etc.)
         **parquet_kwargs: 追加のParquetオプション
     
     Returns:
@@ -66,7 +66,7 @@ def write_cudf_to_parquet(
 def write_cudf_to_parquet_with_options(
     cudf_df: cudf.DataFrame,
     output_path: str,
-    compression: str = 'snappy',
+    compression: str = 'zstd',
     optimize_for_spark: bool = False,
     row_group_size: Optional[int] = None,
     **parquet_kwargs

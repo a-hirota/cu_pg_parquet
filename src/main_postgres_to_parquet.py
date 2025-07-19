@@ -125,7 +125,7 @@ class DirectProcessor:
         field_lengths_dev,
         columns: List[ColumnMeta],
         output_path: str,
-        compression: str = 'snappy',
+        compression: str = 'zstd',
         thread_ids_dev=None,
         thread_start_positions_dev=None,
         thread_end_positions_dev=None,
@@ -203,7 +203,7 @@ class DirectProcessor:
         ncols: int,
         header_size: int,
         output_path: str,
-        compression: str = 'snappy',
+        compression: str = 'zstd',
         **kwargs
     ) -> Tuple[cudf.DataFrame, Dict[str, float]]:
         """
@@ -555,7 +555,7 @@ def postgresql_to_cudf_parquet_direct(
     ncols: int,
     header_size: int,
     output_path: str,
-    compression: str = 'snappy',
+    compression: str = 'zstd',
     use_rmm: bool = True,
     optimize_gpu: bool = True,
     verbose: bool = False,
