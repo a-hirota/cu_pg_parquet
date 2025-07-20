@@ -1,452 +1,499 @@
-# GPU PostgreSQL to Parquet Converter - 統合テスト計画
+# GPU PostgreSQL Parser 統合テスト計画
 
 ## 1. 概要
 
-このドキュメントは、GPU PostgreSQL to Parquet Converterの統合テストフレームワークの設計と実装計画を定義します。
-
 ### 1.1 目的
-- エンドツーエンドの動作検証
-- パフォーマンス回帰の防止
-- データ整合性の保証
-- 各種設定での動作確認
+本ドキュメントは、GPU PostgreSQL Parser (gpupgparser) システムの包括的な統合テスト計画を定義します。各処理段階を独立して検証し、エンドツーエンドのパイプライン全体を検証することを目的としています。
 
-### 1.2 スコープ
-- PostgreSQLからParquetへの変換プロセス全体
-- GPU処理パイプライン
-- メモリ管理とリソース利用
-- エラーハンドリングとリカバリ
-
-## 2. テストアーキテクチャ
-
-### 2.1 テストフレームワーク構成
-
+### 1.2 処理フローアーキテクチャ
 ```
-tests/
-├── integration/
-│   ├── __init__.py
-│   ├── conftest.py              # pytest設定とフィクスチャ
-│   ├── test_full_pipeline.py    # フルパイプラインテスト
-│   ├── test_data_integrity.py   # データ整合性テスト
-│   ├── test_performance.py      # パフォーマンステスト
-│   ├── test_error_handling.py   # エラーハンドリングテスト
-│   └── test_configurations.py   # 各種設定テスト
-├── unit/
-│   ├── test_parsers.py          # パーサーユニットテスト
-│   ├── test_converters.py       # 変換器ユニットテスト
-│   └── test_utilities.py        # ユーティリティテスト
-├── fixtures/
-│   ├── sample_data/             # テストデータ
-│   ├── expected_outputs/        # 期待される出力
-│   └── configurations/          # テスト設定
-└── utils/
-    ├── data_generator.py        # テストデータ生成
-    ├── validators.py            # 検証ユーティリティ
-    └── performance_monitor.py   # パフォーマンス監視
+[PostgreSQL] → [Queue(/dev/shm)] → [GPU Memory] → [Column Arrays] → [cuDF DataFrame] → [Parquet File]
+           ↑                    ↑              ↑                  ↑                    ↑
+      Process 1           Process 2       Process 3         Process 4           Process 5
+   (バイナリ抽出)      (GPU転送)       (CUDA解析)      (DataFrame変換)    (ファイル出力)
 ```
 
-### 2.2 主要コンポーネント
+### 1.3 テストカテゴリ
+- **機能テスト**: 各プロセスを独立して検証
+- **データ型テスト**: PostgreSQL型の包括的カバレッジ
+- **境界値テスト**: エッジケースと制限値
+- **性能テスト**: スループットとリソース使用
+- **統合テスト**: プロセス間の相互作用とデータフロー
+- **信頼性テスト**: エラーハンドリングとリカバリ
 
-#### 2.2.1 テストランナー
-- pytest 7.x を採用
-- カスタムマーカーでテスト分類
-- 並列実行サポート
+## 2. 機能別テストケース
 
-#### 2.2.2 データ管理
-- PostgreSQLテストデータベース
-- 合成データ生成器
-- 参照データセット
+### 2.1 Process 1: PostgreSQLバイナリ抽出テスト
 
-#### 2.2.3 検証フレームワーク
-- Parquetファイル検証
-- データ整合性チェック
-- パフォーマンスメトリクス
+#### 基本機能
+```yaml
+TC1-1: 小規模テーブル抽出
+  入力: 100行のテーブル、基本データ型
+  処理: COPY BINARYプロトコル抽出
+  検証: バイナリ形式の正確性、行数確認
 
-## 3. テストカテゴリ
+TC1-2: 大規模テーブルストリーミング
+  入力: 10GBテーブル、チャンク読み込み
+  処理: 64MBチャンクでのストリーミング
+  検証: メモリ使用量の安定性、データ損失なし
 
-### 3.1 機能テスト
-
-#### 3.1.1 基本変換テスト
-```python
-class TestBasicConversion:
-    """基本的な変換機能のテスト"""
-    
-    def test_small_table_conversion(self):
-        """小規模テーブルの変換"""
-        - 1万行程度のテーブル
-        - 全データ型のカバレッジ
-        - 出力検証
-    
-    def test_medium_table_conversion(self):
-        """中規模テーブルの変換"""
-        - 100万行程度のテーブル
-        - メモリ使用量の監視
-        - 並列処理の動作確認
-    
-    def test_large_table_conversion(self):
-        """大規模テーブルの変換"""
-        - 1億行以上のテーブル
-        - チャンク処理の検証
-        - リソース管理の確認
+TC1-3: 接続レジリエンス
+  入力: ネットワーク中断のシミュレーション
+  処理: リトライロジックと再接続
+  検証: 正常な復旧、データ整合性
 ```
 
-#### 3.1.2 データ型テスト
-```python
-class TestDataTypes:
-    """各種データ型の変換テスト"""
-    
-    def test_numeric_types(self):
-        """数値型の変換"""
-        - INT16, INT32, INT64
-        - FLOAT32, FLOAT64
-        - DECIMAL128
-    
-    def test_string_types(self):
-        """文字列型の変換"""
-        - TEXT, VARCHAR, CHAR
-        - マルチバイト文字
-        - 特殊文字
-    
-    def test_temporal_types(self):
-        """時刻型の変換"""
-        - DATE, TIMESTAMP
-        - タイムゾーン処理
-        - エポック変換
-    
-    def test_special_values(self):
-        """特殊値の処理"""
-        - NULL値
-        - 空文字列
-        - 極値（最大値、最小値）
+#### キュー管理
+```yaml
+TC1-4: キュー容量処理
+  入力: /dev/shm容量を超えるデータ
+  処理: プロデューサー・コンシューマー協調
+  検証: 適切なブロッキング、オーバーフローなし
+
+TC1-5: マルチテーブル並行抽出
+  入力: 5テーブルの同時処理
+  処理: 並列抽出スレッド
+  検証: キューの分離、データ混在なし
 ```
 
-### 3.2 パフォーマンステスト
+### 2.2 Process 2: GPUメモリ転送テスト
 
-#### 3.2.1 スループットテスト
-```python
-class TestThroughput:
-    """処理スループットのテスト"""
-    
-    def test_baseline_performance(self):
-        """ベースライン性能測定"""
-        - 標準的なデータセット
-        - 処理時間の記録
-        - メトリクスの収集
-    
-    def test_scaling_performance(self):
-        """スケーリング性能"""
-        - データサイズ別の性能
-        - 並列度別の性能
-        - GPU利用率の監視
-    
-    def test_memory_efficiency(self):
-        """メモリ効率"""
-        - メモリ使用量の追跡
-        - メモリリークの検出
-        - バッファ管理の検証
+#### kvikio転送テスト
+```yaml
+TC2-1: ファイルからGPUへの直接転送
+  入力: /dev/shmの1GBバイナリファイル
+  処理: kvikio.read()でGPUメモリへ転送
+  検証: MD5チェックサム一致、ゼロコピー確認
+
+TC2-2: マルチGPU並列転送
+  入力: 4データチャンク、4GPU
+  処理: 並行kvikio転送
+  検証: GPU割り当て、メモリ競合なし
+
+TC2-3: GPUメモリ圧迫時の処理
+  入力: GPUメモリの80%を超えるデータ
+  処理: メモリ監視付き転送
+  検証: 適切な処理、必要時のホストへのスピル
 ```
 
-#### 3.2.2 回帰テスト
-```python
-class TestPerformanceRegression:
-    """性能回帰の検出"""
-    
-    def test_throughput_regression(self):
-        """スループット回帰"""
-        - 前回の結果との比較
-        - 許容範囲の設定（±5%）
-        - アラートの生成
-    
-    def test_memory_regression(self):
-        """メモリ使用量回帰"""
-        - メモリ使用パターン
-        - ピークメモリの監視
-        - 異常検出
+#### メモリ管理
+```yaml
+TC2-4: メモリプール割り当て
+  入力: 繰り返し割り当て/解放
+  処理: RMMプール使用
+  検証: フラグメンテーションなし、安定した性能
+
+TC2-5: メモリ不足からの回復
+  入力: GPUメモリを超える割り当て
+  処理: エラーハンドリングとクリーンアップ
+  検証: クリーンな回復、メモリリークなし
 ```
 
-### 3.3 ストレステスト
+### 2.3 Process 3: CUDA解析テスト
 
-#### 3.3.1 境界値テスト
-```python
-class TestBoundaryConditions:
-    """境界条件でのテスト"""
-    
-    def test_maximum_columns(self):
-        """最大列数での動作"""
-        - 1000列以上のテーブル
-        - メモリ割り当ての確認
-        - カーネル制限の検証
-    
-    def test_maximum_row_size(self):
-        """最大行サイズでの動作"""
-        - 大きな文字列フィールド
-        - バッファオーバーフローの防止
-        - エラーハンドリング
-    
-    def test_resource_exhaustion(self):
-        """リソース枯渇時の動作"""
-        - GPUメモリ不足
-        - システムメモリ不足
-        - グレースフルな失敗
+#### 固定長データ型
+```yaml
+TC3-1: 整数型 (INT2/4/8)
+  入力: MIN_VALUE, -1, 0, 1, MAX_VALUE, NULL
+  処理: parse_int_column カーネル
+  検証: 正確な値の一致、オーバーフロー検出
+
+TC3-2: 浮動小数点 (FLOAT4/8)
+  入力: -Inf, -1.0, 0.0, 1.0, +Inf, NaN, NULL
+  処理: parse_float_column カーネル
+  検証: IEEE 754準拠、特殊値
+
+TC3-3: ブール型
+  入力: true, false, NULLパターン
+  処理: parse_bool_column カーネル
+  検証: ビット効率、nullビットマップ
+
+TC3-4: 時刻型 (DATE/TIME/TIMESTAMP)
+  入力: エポック、現在、未来の日付、タイムゾーン
+  処理: parse_temporal_column カーネル
+  検証: マイクロ秒精度、範囲制限
 ```
 
-#### 3.3.2 異常系テスト
-```python
-class TestErrorConditions:
-    """エラー条件でのテスト"""
-    
-    def test_corrupt_data_handling(self):
-        """破損データの処理"""
-        - 不正なバイナリフォーマット
-        - 予期しないEOF
-        - リカバリ動作
-    
-    def test_connection_failures(self):
-        """接続障害の処理"""
-        - データベース切断
-        - ネットワークタイムアウト
-        - 再試行ロジック
-    
-    def test_gpu_errors(self):
-        """GPU エラーの処理"""
-        - カーネルクラッシュ
-        - メモリアクセス違反
-        - フォールバック動作
+#### 可変長データ型
+```yaml
+TC3-5: TEXT/VARCHAR
+  入力: 空文字、ASCII、UTF-8、最大長文字列
+  処理: parse_text_column カーネル
+  検証: エンコーディング保持、長さの正確性
+
+TC3-6: BYTEAバイナリデータ
+  入力: 0バイトから1GBのバイナリデータ
+  処理: parse_bytea_column カーネル
+  検証: バイナリ整合性、サイズ処理
+
+TC3-7: 配列型
+  入力: 空配列、1次元、多次元配列
+  処理: parse_array_column カーネル
+  検証: 次元追跡、要素アクセス
+
+TC3-8: JSON/JSONB
+  入力: オブジェクト、配列、ネストした構造
+  処理: parse_json_column カーネル
+  検証: 構造保持、キー順序
 ```
 
-### 3.4 統合テスト
-
-#### 3.4.1 エンドツーエンドテスト
-```python
-class TestEndToEnd:
-    """完全なワークフローのテスト"""
-    
-    def test_complete_workflow(self):
-        """完全なワークフロー"""
-        - データベース作成
-        - データ投入
-        - 変換実行
-        - 結果検証
-        - クリーンアップ
-    
-    def test_multi_table_processing(self):
-        """複数テーブル処理"""
-        - 並行処理
-        - リソース共有
-        - 一貫性保証
-```
-
-#### 3.4.2 互換性テスト
-```python
-class TestCompatibility:
-    """互換性のテスト"""
-    
-    def test_postgres_versions(self):
-        """PostgreSQLバージョン互換性"""
-        - PostgreSQL 12, 13, 14, 15
-        - プロトコルの違い
-        - 機能の差異
-    
-    def test_parquet_readers(self):
-        """Parquet読み取り互換性"""
-        - pyarrow
-        - pandas
-        - Spark
-        - その他のツール
-```
-
-## 4. テストデータ戦略
-
-### 4.1 テストデータ生成
-
-```python
-class TestDataGenerator:
-    """テストデータ生成器"""
-    
-    def generate_standard_dataset(self, rows: int, columns: List[ColumnSpec]):
-        """標準データセット生成"""
-        - ランダムデータ
-        - 現実的な分布
-        - 再現可能性
-    
-    def generate_edge_case_dataset(self):
-        """エッジケースデータセット"""
-        - NULL値の多いデータ
-        - 極値を含むデータ
-        - 特殊文字を含むデータ
-    
-    def generate_performance_dataset(self, size_gb: float):
-        """パフォーマンステスト用データ"""
-        - 指定サイズのデータ
-        - 現実的なカーディナリティ
-        - 圧縮率の考慮
-```
-
-### 4.2 参照データセット
-
-- TPC-Hベンチマークデータ
-- 実世界のサンプルデータ
-- 各データ型の包括的なセット
-
-## 5. 検証戦略
-
-### 5.1 データ整合性検証
-
-```python
-class DataIntegrityValidator:
-    """データ整合性検証器"""
-    
-    def validate_row_count(self, source: PostgresConnection, target: ParquetFile):
-        """行数の検証"""
-        
-    def validate_column_values(self, source_sample: DataFrame, target_sample: DataFrame):
-        """列値の検証"""
-        
-    def validate_null_handling(self):
-        """NULL値処理の検証"""
-        
-    def validate_data_types(self):
-        """データ型マッピングの検証"""
-```
-
-### 5.2 パフォーマンス検証
-
-```python
-class PerformanceValidator:
-    """パフォーマンス検証器"""
-    
-    def measure_throughput(self) -> Metrics:
-        """スループット測定"""
-        - 行/秒
-        - MB/秒
-        - GPU利用率
-    
-    def measure_latency(self) -> Metrics:
-        """レイテンシ測定"""
-        - 初期化時間
-        - 処理時間
-        - ファイナライズ時間
-    
-    def measure_resource_usage(self) -> Metrics:
-        """リソース使用量測定"""
-        - GPUメモリ
-        - システムメモリ
-        - CPU使用率
-```
-
-## 6. CI/CD統合
-
-### 6.1 継続的インテグレーション
+### 2.4 Process 4: DataFrame変換テスト
 
 ```yaml
-# .github/workflows/integration-tests.yml
-name: Integration Tests
-on: [push, pull_request]
+TC4-1: カラムアレイからcuDF Series
+  入力: Process 3からの解析済みカラムアレイ
+  処理: cudf.Series構築
+  検証: データ型マッピング、nullマスク
 
-jobs:
-  test:
-    runs-on: [self-hosted, gpu]
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Setup test environment
-        run: |
-          docker-compose up -d postgres
-          pip install -r requirements-test.txt
-      
-      - name: Run unit tests
-        run: pytest tests/unit -v
-      
-      - name: Run integration tests
-        run: pytest tests/integration -v -m "not slow"
-      
-      - name: Run performance tests
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: pytest tests/integration -v -m "performance"
-      
-      - name: Upload test results
-        uses: actions/upload-artifact@v3
-        with:
-          name: test-results
-          path: test-results/
+TC4-2: マルチカラムDataFrame組み立て
+  入力: 混合型の100カラム
+  処理: DataFrame作成
+  検証: カラム整列、メモリレイアウト
+
+TC4-3: 大規模DataFrame処理
+  入力: 1000万行 x 50カラム
+  処理: チャンク化DataFrame作成
+  検証: メモリ効率、フラグメンテーションなし
 ```
 
-### 6.2 テスト環境
+### 2.5 Process 5: Parquet出力テスト
 
 ```yaml
-# docker-compose.test.yml
-version: '3.8'
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: testdb
-      POSTGRES_USER: testuser
-      POSTGRES_PASSWORD: testpass
-    volumes:
-      - ./fixtures/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
+TC5-1: 圧縮アルゴリズム比較
+  入力: 1GB DataFrame
+  処理: SNAPPY, ZSTD, LZ4, GZIPで書き込み
+  検証: サイズ削減、書き込み速度
+
+TC5-2: パーティション出力
+  入力: 日付/カテゴリカラムを持つDataFrame
+  処理: カラムによるパーティション
+  検証: ディレクトリ構造、ファイル分散
+
+TC5-3: スキーマ進化
+  入力: 型変更のあるDataFrame
+  処理: 追記モード書き込み
+  検証: スキーマ互換性、型プロモーション
+```
+
+## 3. データ型境界値テストマトリックス
+
+```yaml
+データ型     | 最小値         | 最大値         | NULL | 特殊ケース
+------------|----------------|----------------|------|---------------
+SMALLINT    | -32,768        | 32,767         | ✓    | -
+INTEGER     | -2,147,483,648 | 2,147,483,647  | ✓    | -
+BIGINT      | -2^63          | 2^63-1         | ✓    | -
+DECIMAL     | 131,072桁      | Scale 16,383   | ✓    | NaN, Infinity
+REAL        | -3.4E+38       | 3.4E+38        | ✓    | NaN, ±Inf
+DOUBLE      | -1.7E+308      | 1.7E+308       | ✓    | NaN, ±Inf
+VARCHAR(n)  | ''             | n文字          | ✓    | Unicode, 絵文字
+TEXT        | ''             | 1GB            | ✓    | 全UTF-8
+BYTEA       | 0バイト        | 1GB            | ✓    | バイナリデータ
+DATE        | 紀元前4713年   | 西暦5874897年  | ✓    | -
+TIME        | 00:00:00       | 24:00:00       | ✓    | マイクロ秒
+TIMESTAMP   | 紀元前4713年   | 西暦294276年   | ✓    | ±Infinity
+BOOLEAN     | false          | true           | ✓    | -
+ARRAY       | {}             | n次元          | ✓    | ネスト配列
+JSON/JSONB  | null           | 1GBネスト      | ✓    | 深いネスト
+```
+
+## 4. 性能テストシナリオ
+
+### 4.1 スループットベンチマーク
+
+```yaml
+ベンチマーク: エンドツーエンド処理速度
+  小規模データ:  100MB,  100万行,   10カラム
+  中規模データ:  10GB,   1億行,     50カラム  
+  大規模データ:  100GB,  10億行,    100カラム
   
-  test-runner:
-    build: .
-    environment:
-      GPUPASER_PG_DSN: postgresql://testuser:testpass@postgres/testdb
-      CUDA_VISIBLE_DEVICES: 0
-    volumes:
-      - .:/app
-      - /dev/shm:/dev/shm
-    depends_on:
-      - postgres
+  測定項目:
+    - PostgreSQL読み取り速度 (MB/秒)
+    - GPU転送速度 (GB/秒)
+    - 解析スループット (行/秒)
+    - Parquet書き込み速度 (MB/秒)
+    - 合計時間とボトルネック
 ```
 
-## 7. 実装スケジュール
+### 4.2 リソース使用率
 
-### Phase 1: 基盤整備（2週間）
-- pytestフレームワークのセットアップ
-- 基本的なフィクスチャの作成
-- CI/CD パイプラインの構築
+```yaml
+リソース監視:
+  CPUメトリクス:
+    - プロセスごとのコア使用率
+    - コンテキストスイッチ
+    - I/O待機時間
+    
+  GPUメトリクス:
+    - SM占有率
+    - メモリ帯域使用率
+    - カーネル実行時間
+    
+  メモリメトリクス:
+    - ホストメモリ使用量
+    - GPUメモリ割り当て
+    - メモリプール効率
+    - ページフォルト
+```
 
-### Phase 2: 基本テスト実装（3週間）
-- 機能テストの実装
-- データ整合性テストの実装
-- 基本的な検証ツールの作成
+### 4.3 スケーラビリティ分析
 
-### Phase 3: 高度なテスト実装（3週間）
-- パフォーマンステストの実装
-- ストレステストの実装
-- エラーハンドリングテストの実装
+```yaml
+マルチGPUスケーリング:
+  構成: 1, 2, 4, 8 GPU
+  データセット: 100GBテーブル
+  
+  測定項目:
+    - 線形スケーリング係数
+    - GPU間通信オーバーヘッド
+    - ロードバランシング効果
+    - GPU当たりの最適チャンクサイズ
+```
 
-### Phase 4: 統合と最適化（2週間）
-- 全テストスイートの統合
-- パフォーマンスチューニング
-- ドキュメント作成
+## 5. 統合テストシナリオ
 
-## 8. メトリクスとレポート
+### 5.1 エンドツーエンド検証
 
-### 8.1 カバレッジ目標
-- コードカバレッジ: 80%以上
-- ブランチカバレッジ: 70%以上
-- 統合テストカバレッジ: 90%以上
+```yaml
+E2E-1: 標準本番ワークロード
+  セットアップ:
+    - 顧客テーブル: 1000万行, 25カラム
+    - 注文テーブル: 5000万行, 15カラム
+    - 商品テーブル: 100万行, 40カラム
+  
+  実行:
+    - 全テーブルの並行処理
+    - 標準変換の適用
+    - パーティション化Parquetファイル生成
+  
+  検証:
+    - 行数精度: 100%
+    - データ整合性: チェックサム一致
+    - スキーマ準拠: 全型保持
+    - 性能: 合計30分以内
+```
 
-### 8.2 パフォーマンス目標
-- 基本変換: 1GB/秒以上
-- メモリ効率: 入力データの2倍以下
-- GPU利用率: 80%以上
+### 5.2 障害回復テスト
 
-### 8.3 レポート形式
-- JUnit XML形式のテスト結果
-- HTMLカバレッジレポート
-- パフォーマンストレンドグラフ
-- エラー分析レポート
+```yaml
+E2E-2: プロセス中断からの回復
+  シナリオ:
+    - 抽出中のProcess 1強制終了
+    - 解析中のGPUメモリ不足
+    - Parquet書き込み中のディスクフル
+    - PostgreSQLからのネットワーク切断
+  
+  検証:
+    - グレースフルシャットダウン
+    - 状態保持
+    - 正常な再起動
+    - データ損失や破損なし
+```
 
-## 9. リスクと軽減策
+### 5.3 継続運用
+
+```yaml
+E2E-3: 24時間ストレステスト
+  構成:
+    - 継続的なテーブル処理
+    - メモリリーク検出
+    - 性能劣化監視
+    - リソースクリーンアップ検証
+  
+  成功基準:
+    - メモリリークなし (1%未満の増加)
+    - 安定したスループット (5%未満の変動)
+    - クラッシュやハングなし
+    - 全データ整合性チェック合格
+```
+
+## 6. テスト実装計画
+
+### 6.1 フェーズ1: 基盤構築 (第1-2週)
+```yaml
+第1週:
+  - テストインフラのセットアップ
+  - テストデータジェネレータ作成
+  - Process 1テスト実装 (TC1-1からTC1-5)
+  - 基本的なCI/CDパイプライン
+
+第2週:
+  - Process 2テスト実装 (TC2-1からTC2-5)
+  - GPU環境セットアップ
+  - メモリ監視ツール
+  - 初期性能ベースライン
+```
+
+### 6.2 フェーズ2: コア機能 (第3-4週)
+```yaml
+第3週:
+  - Process 3テスト: 固定長型 (TC3-1からTC3-4)
+  - 境界値テストフレームワーク
+  - 自動テスト実行
+
+第4週:
+  - Process 3テスト: 可変長型 (TC3-5からTC3-8)
+  - Process 4と5のテスト (TC4-1からTC5-3)
+  - 統合テストフレームワーク
+```
+
+### 6.3 フェーズ3: 高度なテスト (第5-6週)
+```yaml
+第5週:
+  - 性能ベンチマーク
+  - マルチGPUテスト
+  - ストレステストシナリオ
+  - 障害注入フレームワーク
+
+第6週:
+  - エンドツーエンドシナリオ
+  - 24時間安定性テスト
+  - テストレポート生成
+  - ドキュメント完成
+```
+
+## 7. テストインフラストラクチャ
+
+### 7.1 テストデータ生成
+```python
+# テストデータジェネレータフレームワーク
+class TestDataGenerator:
+    def generate_boundary_values(self, data_type):
+        """最小値、最大値、null、エッジケースを生成"""
+        
+    def generate_random_data(self, data_type, row_count):
+        """ランダムな有効データを生成"""
+        
+    def generate_malformed_data(self, data_type):
+        """意図的に破損したデータを生成"""
+```
+
+### 7.2 テスト実行フレームワーク
+```yaml
+テストランナー設定:
+  フレームワーク: pytest + pytest-benchmark
+  
+  フィクスチャ:
+    - postgresql_connection
+    - gpu_memory_pool
+    - test_data_generator
+    - performance_monitor
+    
+  プラグイン:
+    - pytest-xdist (並列実行)
+    - pytest-timeout (テストタイムアウト)
+    - pytest-memray (メモリプロファイリング)
+    - pytest-monitor (リソース追跡)
+```
+
+### 7.3 継続的インテグレーション
+```yaml
+GitHub Actionsワークフロー:
+  on: [push, pull_request]
+  
+  jobs:
+    unit-tests:
+      - プロセス固有のテスト
+      - GPU不要
+      
+    integration-tests:
+      - フルパイプラインテスト
+      - GPUランナー必須
+      - PostgreSQLサービスコンテナ
+      
+    performance-regression:
+      - ベンチマーク比較
+      - 閾値アラート
+      - トレンド分析
+```
+
+## 8. 成功指標
+
+### 8.1 品質ゲート
+```yaml
+必須合格基準:
+  機能:
+    - データ型カバレッジ100%
+    - データ損失や破損ゼロ
+    - 全境界ケース処理
+    
+  性能:
+    - スループット > 1GB/秒 (大規模テーブル)
+    - GPU使用率 > 80%
+    - メモリオーバーヘッド < データサイズの2倍
+    
+  信頼性:
+    - 24時間安定性テスト合格
+    - グレースフルなエラー回復
+    - メモリリークなし
+```
+
+### 8.2 テストカバレッジ要件
+```yaml
+コードカバレッジ:
+  - 行カバレッジ: > 90%
+  - ブランチカバレッジ: > 85%
+  - CUDAカーネルカバレッジ: 100%
+  
+テストカバレッジ:
+  - 全PostgreSQL型: 100%
+  - エラーパス: > 95%
+  - 性能シナリオ: 100%
+```
+
+## 9. リスク分析と軽減策
 
 ### 9.1 技術的リスク
-- **GPU環境の違い**: 複数のGPUモデルでのテスト
-- **大規模データ**: 段階的なデータサイズ増加
-- **並行性の問題**: 適切な同期とロック機構
+```yaml
+高優先度:
+  リスク: GPUメモリ不足
+  軽減策: 動的チャンクサイジング、ホストへのスピル
+  
+  リスク: PostgreSQL接続喪失
+  軽減策: コネクションプーリング、自動リトライ
+  
+  リスク: データ型不一致
+  軽減策: 包括的な型テスト、安全なデフォルト
+
+中優先度:
+  リスク: 性能回帰
+  軽減策: 自動ベンチマーク、トレンド分析
+  
+  リスク: マルチGPU同期
+  軽減策: 明示的バリア、データ検証
+```
 
 ### 9.2 運用リスク
-- **テスト実行時間**: 並列実行とキャッシング
-- **リソース要求**: クラウドGPUインスタンスの活用
-- **データ管理**: テストデータの自動生成と削除
+```yaml
+デプロイメントリスク:
+  - CUDAバージョン互換性
+  - PostgreSQLバージョン差異
+  - システムリソース可用性
+  
+軽減策:
+  - バージョンマトリックステスト
+  - デプロイメント検証スイート
+  - リソース要件ドキュメント
+```
+
+## 10. 成果物とタイムライン
+
+### 10.1 テスト成果物
+```yaml
+成果物:
+  第2週: テストインフラとジェネレータ
+  第4週: 機能テストスイート完成
+  第6週: 性能テストフレームワーク
+  第8週: 完全な統合テストスイート
+  第10週: 最終テストレポートとドキュメント
+```
+
+### 10.2 保守計画
+```yaml
+継続的活動:
+  - 週次回帰実行
+  - 性能トレンド監視
+  - 新PostgreSQLバージョンテスト
+  - テストスイート最適化
+  - ドキュメント更新
+```
