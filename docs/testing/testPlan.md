@@ -59,8 +59,14 @@
 - テーブル作成スクリプトの実装
 - テストデータ生成ユーティリティの作成
 
-### 3.2 フェーズ2: 機能別E2Eテスト実装（8日）
+### 3.2 フェーズ2: 機能別E2Eテスト実装（10日）
 各機能について以下のテストを実装：
+
+#### 機能0テスト: PostgreSQL型 → Arrowスキーマ生成（2日）
+- PostgreSQLカタログからの型情報取得
+- 各データ型に対する正しいArrow型へのマッピング
+- 精度・スケール情報の保持（NUMERIC、VARCHARなど）
+- NULL可否情報の正しい設定
 
 #### 機能1テスト: PostgreSQL → /dev/shmキュー（2日）
 - 基本動作確認（10行のシンプルデータ）
@@ -129,10 +135,11 @@ tests/
 │   ├── create_test_db.py      # テストDB作成
 │   └── generate_test_data.py  # テストデータ生成
 ├── e2e/
-│   ├── test_function1.py      # 機能1のE2Eテスト
-│   ├── test_function2.py      # 機能2のE2Eテスト
-│   ├── test_function3.py      # 機能3のE2Eテスト
-│   └── test_function4.py      # 機能4のE2Eテスト
+│   ├── test_function0.py      # 機能0: PostgreSQL型→Arrowスキーマ生成
+│   ├── test_function1.py      # 機能1: PostgreSQL→/dev/shmキュー
+│   ├── test_function2.py      # 機能2: /dev/shmキュー→GPU転送
+│   ├── test_function3.py      # 機能3: GPUバイナリ解析→Arrow配列
+│   └── test_function4.py      # 機能4: Arrow→cuDF→Parquet
 ├── datatypes/
 │   ├── test_numeric_types.py  # 数値型テスト
 │   ├── test_string_types.py   # 文字列型テスト
@@ -177,3 +184,55 @@ tests/
 2. **必須**: 基本データ型（数値、文字列、日付、論理）のテストが合格
 3. **推奨**: 全データ型のテストが合格
 4. **推奨**: 統合テストでの値の完全一致確認
+
+## 8. テスト実行環境
+
+### 8.1 pytest設定
+
+プロジェクトルートに`pytest.ini`を配置し、以下の設定を使用：
+
+- テストパス: `tests/`
+- マーカー: gpu, integration, slow, datatypes, e2e
+- 出力オプション: 詳細表示、短いトレースバック
+
+### 8.2 pre-commit統合
+
+`.pre-commit-config.yaml`でテストを自動実行：
+
+```yaml
+- repo: local
+  hooks:
+    - id: pytest-check
+      name: pytest
+      entry: bash -c 'pytest tests/ -v --tb=short --maxfail=1 || exit 1'
+      language: system
+      types: [python]
+      pass_filenames: false
+      always_run: true
+      stages: [commit]
+```
+
+これにより、コミット時に自動的にテストが実行され、Red/Greenの状態が確認できます。
+
+### 8.3 テスト実行コマンド
+
+```bash
+# 全テスト実行
+pytest tests/
+
+# 特定の機能テストのみ
+pytest tests/e2e/test_function1.py
+
+# GPUテストを除外
+pytest tests/ -m "not gpu"
+
+# 高速テストのみ（slowを除外）
+pytest tests/ -m "not slow"
+
+# カバレッジ付き実行
+pytest tests/ --cov=src --cov-report=html
+```
+
+### 8.4 継続的インテグレーション
+
+GitHub ActionsやGitLab CIでの自動テスト実行設定も可能です。
