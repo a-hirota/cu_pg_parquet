@@ -50,7 +50,7 @@ PostgreSQLバイナリ形式からArrow型へのマッピング方法につい�
 
 - **GPUカーネルのデータ流れ・設計見直し:** GPUを用いる意義を最大化するには、カーネル設計の妥当性検証も重要です。現在の実装を踏まえると、**GPUに適した処理とCPUでした方がよい処理とを切り分け**、GPUカーネルは**計算量が大きい部分（例えば大規模な数値変換やフィルタリング）に特化**させるのが望ましいです。PostgreSQLバイナリ→Arrow変換は分岐やメモリアクセス中心でGPU向きとは言えない部分もあるため、**本当にGPUでやるべきか再評価**します。もしGPUで行うなら、例えば**全行のNUMERIC->Decimal変換**は大きな整数演算になるためGPU向きでしょうが、**オフセット計算やNULL判定のような軽量処理はCPUで済ませる**方がシンプルで高速かもしれません。データ流向上のためには、**GPUメモリ上で完結できる処理はできるだけ一度のカーネルで実行**し、中間結果を極力ホストに出さない工夫も必要です。現在はparseカーネルとdecodeカーネルが分かれているようですが、一体化できればメモリ読み書きの一貫性が増すでしょう。PG-Stromのように**“変換後のデータでGPU計算まで行う”**のであれば意義がありますが、そうでないなら無理にGPUを使わず**まず正確で高速なCPU実装を完成させ、その上でプロファイルを取りつつGPUオフロード箇所を選定**するのが健全です。
 
-以上のリファクタリングにより、現在の不安定な実装は大幅に整理・単純化され、バグの温床が取り除かれるはずです。特にADBCドライバやPG-Stromで採用されている**Arrowフォーマット準拠の考え方（nullビットマップ、適切な型長、可変長バッファなど）**を取り入れることで、精度と保守性が向上します。一度堅牢なCPU実装ができれば、それ自体が有用ですし、必要に応じて**ボトルネック部分のみGPU化する戦略**も立てやすくなります。最終的には「PostgreSQL→Arrowデコーダ」と「Arrow→Parquetライター」を独立したモジュールにして組み合わせる形にすれば、システム全体の柔軟性も増すでしょう。上述の改善を段階的に適用し、まずは**正確さと安定動作を確保した上でパフォーマンスチューニング**を行うことを強く推奨します。そうすることで、ADBCやPG-Stromの利点を取り入れた、高速かつ拡張性の高い実装に近づけることができると考えられます。  
+以上のリファクタリングにより、現在の不安定な実装は大幅に整理・単純化され、バグの温床が取り除かれるはずです。特にADBCドライバやPG-Stromで採用されている**Arrowフォーマット準拠の考え方（nullビットマップ、適切な型長、可変長バッファなど）**を取り入れることで、精度と保守性が向上します。一度堅牢なCPU実装ができれば、それ自体が有用ですし、必要に応じて**ボトルネック部分のみGPU化する戦略**も立てやすくなります。最終的には「PostgreSQL→Arrowデコーダ」と「Arrow→Parquetライター」を独立したモジュールにして組み合わせる形にすれば、システム全体の柔軟性も増すでしょう。上述の改善を段階的に適用し、まずは**正確さと安定動作を確保した上でパフォーマンスチューニング**を行うことを強く推奨します。そうすることで、ADBCやPG-Stromの利点を取り入れた、高速かつ拡張性の高い実装に近づけることができると考えられます。
 
 
 
@@ -174,7 +174,7 @@ def build_gpu_meta(meta):
 
 ### 4 . そのまま Numba / CUDA カーネルで使える `oid→id` ルックアップ
 
-Numba には Python dict が直接渡せないので、**`if elif` 連鎖** に落とすか、`numba.typed.Dict` を使います。  
+Numba には Python dict が直接渡せないので、**`if elif` 連鎖** に落とすか、`numba.typed.Dict` を使います。
 以下は単純な `@njit` 版（CPU パース用）。GPU カーネルでは同様の分岐または `switch/case` 相当で良いです。
 
 ```python
@@ -212,27 +212,27 @@ def oid_to_internal(oid):
 
 ## これで何が良くなるか
 
-1. **全行をスキャンしなくても列数・型が確実に判る**  
+1. **全行をスキャンしなくても列数・型が確実に判る**
    → チャンク前処理の複雑な「列数推定」「ヘッダ後 10 バイト走査」ロジックを削除できる。
 
-2. **可変長型も typmod で最大長や精度を取得できる**  
+2. **可変長型も typmod で最大長や精度を取得できる**
    → VARCHAR や NUMERIC の **バッファサイズを正確に確保**。推定失敗でバッファあふれが起きない。
 
-3. **GPU バッファ確保がワンパスで完了**  
-   → `allocate_gpu_buffers` が `type_ids / elem_size / param` 配列だけを見れば良い。  
+3. **GPU バッファ確保がワンパスで完了**
+   → `allocate_gpu_buffers` が `type_ids / elem_size / param` 配列だけを見れば良い。
    → 後からスキーマが変わっても、再度 `fetch_column_meta` するだけで対応。
 
-4. **カラム追加・型追加時のフォールバックが簡単**  
+4. **カラム追加・型追加時のフォールバックが簡単**
    → `UNKNOWN`（255）で受けて GPU では処理せず生バイトを保持 or CPU に回す、の 2 択に統一できる。
 
 ---
 
 ### まとめ
 
-- **「RowDescription → Arrow スキーマ → GPU バッファ」** の一直線パイプラインで、ヘッダパースと列数推定のバグ源を排除。  
-- 型ごとに **Arrow に合わせた固定長／可変長レイアウト** を決め打ちできるため、デコードカーネルが単純化。  
-- `typmod` を利用して VARCHAR(N) や NUMERIC(p,s) の **正確な長さ・精度** を反映可能。  
-- 実装コストは `PG_OID_TO_ARROW` テーブル＋`oid_to_internal` の 100 行弱だけ。  
+- **「RowDescription → Arrow スキーマ → GPU バッファ」** の一直線パイプラインで、ヘッダパースと列数推定のバグ源を排除。
+- 型ごとに **Arrow に合わせた固定長／可変長レイアウト** を決め打ちできるため、デコードカーネルが単純化。
+- `typmod` を利用して VARCHAR(N) や NUMERIC(p,s) の **正確な長さ・精度** を反映可能。
+- 実装コストは `PG_OID_TO_ARROW` テーブル＋`oid_to_internal` の 100 行弱だけ。
 
 この方式をベースにすれば、「どの型でも 1 回のメタデータ取得で Arrow スキーマが確定 → GPU バッファ確保 → COPY BINARY ストリームをそのままデコード」という **シンプルで変化に強い設計** が実現できます。
 
@@ -262,7 +262,7 @@ def oid_to_internal(oid):
 ## 実装ポイントとヒント
 
 ### 1. 行先頭ポインタ `row_ptrs[]`
-* **CPU で 1 pass** して作るのが最も簡単・高速。  
+* **CPU で 1 pass** して作るのが最も簡単・高速。
   2 バイトの *row‐header* と `len` を読み飛ばすだけなのでメモリ帯域負荷は極小。
 * もし完全 GPU 化したい場合は、`raw` を 1 warp＝1 行に割り当てて
   `__syncthreads()` しながらポインタを進める方法もあるが、実測で差が出にくい。
@@ -280,7 +280,7 @@ esize  = bits & 0xFFFF;
 の 1 行で判定でき、分岐が減ります。
 
 ### 3. null ビットマップ
-* Arrow は 8 行分を 1 byte に詰めるが、実装を急ぐなら  
+* Arrow は 8 行分を 1 byte に詰めるが、実装を急ぐなら
   `uint8[rows]` で 0/1 を立てておき、最終バッチ化時に
   ```python
   pa.py_buffer(null_uint8).cast(pa.bool_())  # もしくは pa.pack_bits()
@@ -288,20 +288,20 @@ esize  = bits & 0xFFFF;
   で十分。
 
 ### 4. ストリーム／コンカレンシー
-* ` cudaStream_t stream_copy, stream_compute` を分け  
-  - `cudaMemcpyAsync(COPYチャンク → gpu_buf, stream_copy)`  
-  - `pass1_lengths[grid,block,stream_compute](…)`  
-  とすれば **I/O と計算をオーバラップ** できます。  
+* ` cudaStream_t stream_copy, stream_compute` を分け
+  - `cudaMemcpyAsync(COPYチャンク → gpu_buf, stream_copy)`
+  - `pass1_lengths[grid,block,stream_compute](…)`
+  とすれば **I/O と計算をオーバラップ** できます。
 * 2 つ目のチャンクをコピー中に 1 つ目の pass-1/scan が走る構造に。
 
 ### 5. 固定長列のデコード
-* Endian 変換付き `*reinterpret_cast<int32_t*>` 読み取りを  
-  `@cuda.jit(device=True, inline=True)` で用意しておく。  
+* Endian 変換付き `*reinterpret_cast<int32_t*>` 読み取りを
+  `@cuda.jit(device=True, inline=True)` で用意しておく。
 * 今後 `float`, `date32`, `timestamp64` などを増やしても
   `type_id`→`esize`→`decode()` のテーブルだけ足せば済む。
 
 ### 6. RecordBatch サイズとスライス
-* COPY のチャンク＝RecordBatch にしなくても良い。  
+* COPY のチャンク＝RecordBatch にしなくても良い。
   例えば 100 MB チャンクで来ても、prefix-sum 後に
   「列 value バッファが 16 MB を超えたらバッチを切る」
   といった判定を挟み、`row_limit` で 2 回に分けて offset を再計算する
@@ -311,11 +311,11 @@ esize  = bits & 0xFFFF;
 
 ## これで解決できること
 * **型判定は RowDescription だけ**、可変長サイズは **len 値の prefix-sum** だけで確定。
-* データ本体は 2nd pass まで **一切コピー不要**。  
+* データ本体は 2nd pass まで **一切コピー不要**。
   → DRAM → GPU の転送コストを最小化。
-* 固定長 / 可変長 / NULL を Arrow 規約通りに分離。  
+* 固定長 / 可変長 / NULL を Arrow 規約通りに分離。
   → そのまま `pyarrow.cuda` でゼロコピー RecordBatch。
-* CPU 側ロジックは **行先頭ポインタ作成と cudaMalloc 呼び出しのみ**。  
+* CPU 側ロジックは **行先頭ポインタ作成と cudaMalloc 呼び出しのみ**。
   → コードが単純・バグが減る。
 
 
@@ -571,15 +571,14 @@ if __name__ == "__main__":
 
 ```
 
-* **CPU 部**  
-  * `fetch_column_meta` … OID/typmod を Arrow 型 ID にマップ  
-  * `build_row_ptrs` … COPY バイト列を軽く走査し行ポインタ配列を生成  
+* **CPU 部**
+  * `fetch_column_meta` … OID/typmod を Arrow 型 ID にマップ
+  * `build_row_ptrs` … COPY バイト列を軽く走査し行ポインタ配列を生成
 
-* **GPU カーネル**  
-  * `pass1_lengths` … 行スレッド並列で `len/null` 収集  
-  * Thrust/CuPy で列ごと prefix-sum → offset & 総サイズ確定  
-  * `pass2_scatter` … 列スレッド並列で value バッファに scatter-copy  
+* **GPU カーネル**
+  * `pass1_lengths` … 行スレッド並列で `len/null` 収集
+  * Thrust/CuPy で列ごと prefix-sum → offset & 総サイズ確定
+  * `pass2_scatter` … 列スレッド並列で value バッファに scatter-copy
 
-* **RecordBatch 構築**  
-  * `pyarrow.cuda` で **ゼロコピー** Arrow 配列を生成 → クライアントへ。  
-
+* **RecordBatch 構築**
+  * `pyarrow.cuda` で **ゼロコピー** Arrow 配列を生成 → クライアントへ。

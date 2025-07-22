@@ -46,21 +46,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chunk_id: usize = std::env::var("CHUNK_ID")?.parse()?;
     let total_chunks: usize = std::env::var("TOTAL_CHUNKS")?.parse()?;
     let table_name = std::env::var("TABLE_NAME").unwrap_or_else(|_| "lineorder".to_string());
-    
+
     // 環境変数から並列数を取得
     let parallel_connections = std::env::var("RUST_PARALLEL_CONNECTIONS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_PARALLEL_CONNECTIONS);
-    
+
     println!("=== PostgreSQL → /dev/shm 単一チャンク転送 ===");
     println!("チャンク: {} / {}", chunk_id + 1, total_chunks);
     println!("並列接続数: {}", parallel_connections);
     println!("バッファサイズ: {} MB", BUFFER_SIZE / 1024 / 1024);
-    
+
     // コンフィグを作成
     let config: Config = dsn.parse()?;
-    
+
     // メタデータを取得
     let (client, connection) = config.connect(NoTls).await?;
     tokio::spawn(async move {
@@ -68,27 +68,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("connection error: {}", e);
         }
     });
-    
+
     // テーブルのページ数を取得（正確な値を取得）
     let row = client.query_one(
-        &format!("SELECT (pg_relation_size('{}'::regclass) / current_setting('block_size')::int)::int", table_name), 
+        &format!("SELECT (pg_relation_size('{}'::regclass) / current_setting('block_size')::int)::int", table_name),
         &[]
     ).await?;
     let max_page: i32 = row.get(0);
     let max_page = max_page as u32;
-    
+
     // デバッグ情報（テストモード時のみ）
     let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
     if is_test_mode {
         println!("チャンク{}: 総ページ数: {}", chunk_id, max_page);
         println!("チャンク{}: 総チャンク数: {}", chunk_id, total_chunks);
     }
-    
+
     // カラム情報を取得（最初のチャンクのみ）
     let columns = if chunk_id == 0 {
         println!("メタデータを取得中...");
         let meta_rows = client.query(
-            &format!("SELECT 
+            &format!("SELECT
                 a.attname AS name,
                 t.typname AS data_type,
                 t.oid AS pg_oid
@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ORDER BY a.attnum", table_name),
             &[]
         ).await?;
-        
+
         meta_rows.iter().map(|row| {
             let data_type: &str = row.get("data_type");
             let arrow_type = match data_type {
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "bool" => "bool",
                 _ => "string"
             };
-            
+
             ColumnMeta {
                 name: row.get("name"),
                 data_type: row.get("data_type"),
@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Vec::new()
     };
-    
+
     // チャンクの範囲を計算
     let pages_per_chunk = (max_page + 1) / total_chunks as u32;
     let chunk_start_page = chunk_id as u32 * pages_per_chunk;
@@ -137,17 +137,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (chunk_id + 1) as u32 * pages_per_chunk
     };
-    
+
     if is_test_mode {
-        println!("チャンク{}: ページ範囲: {} - {} (各チャンク: {}ページ)", 
+        println!("チャンク{}: ページ範囲: {} - {} (各チャンク: {}ページ)",
             chunk_id, chunk_start_page, chunk_end_page, pages_per_chunk);
-        println!("チャンク{}: 期待される行数 (ページ×53行/ページ): 約{}行", 
+        println!("チャンク{}: 期待される行数 (ページ×53行/ページ): 約{}行",
             chunk_id, (chunk_end_page - chunk_start_page) * 53);
-        
+
         // 実際の行数を事前に確認（デバッグ用）
         if chunk_id == 0 {
             let count_row = client.query_one(
-                &format!("SELECT COUNT(*) FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid", 
+                &format!("SELECT COUNT(*) FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid",
                     table_name, chunk_start_page, chunk_end_page),
                 &[]
             ).await?;
@@ -157,31 +157,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("ページ範囲: {} - {}", chunk_start_page, chunk_end_page);
     }
-    
+
     // チャンクファイルを作成（テーブル名を含む）
     let chunk_path = format!("{}/{}_chunk_{}.bin", OUTPUT_DIR, table_name, chunk_id);
     let file = File::create(&chunk_path)?;
-    
+
     // ファイルサイズを事前確保（断片化防止）
     // 推定サイズ: ページ数 × 8KB × 1.5（マージン）
     let estimated_size = ((chunk_end_page - chunk_start_page) as u64) * 8192 * 3 / 2;
     file.set_len(estimated_size)?;
     file.sync_all()?;
-    
+
     let chunk_file = Arc::new(file);
     let worker_offset = Arc::new(AtomicU64::new(0));
     let workers = Arc::new(Mutex::new(Vec::new()));
-    
+
     // 共有カウンタ
     let total_bytes = Arc::new(AtomicU64::new(0));
-    
+
     let start = Instant::now();
-    
+
     // 並列タスクを作成
     let mut tasks = JoinSet::new();
     let total_pages = chunk_end_page - chunk_start_page;
     let pages_per_task = total_pages / parallel_connections as u32;
-    
+
     for worker_id in 0..parallel_connections {
         let start_page = chunk_start_page + (worker_id as u32 * pages_per_task);
         let end_page = if worker_id == parallel_connections - 1 {
@@ -190,14 +190,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             chunk_start_page + ((worker_id + 1) as u32 * pages_per_task)
         };
-        
+
         let config = config.clone();
         let total_bytes_clone = Arc::clone(&total_bytes);
         let chunk_file_clone = Arc::clone(&chunk_file);
         let workers_clone = Arc::clone(&workers);
         let worker_offset_clone = Arc::clone(&worker_offset);
         let table_name_clone = table_name.clone();
-        
+
         tasks.spawn(async move {
             process_range(
                 config,
@@ -212,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ).await
         });
     }
-    
+
     // 全タスクの完了を待つ
     let mut completed = 0;
     while let Some(result) = tasks.join_next().await {
@@ -227,15 +227,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => eprintln!("JoinError: {}", e),
         }
     }
-    
+
     let elapsed = start.elapsed();
     let final_bytes = total_bytes.load(Ordering::Relaxed);
     let speed_gbps = final_bytes as f64 / elapsed.as_secs_f64() / 1024.0 / 1024.0 / 1024.0;
-    
+
     println!("チャンクサイズ: {:.2} GB", final_bytes as f64 / 1024.0 / 1024.0 / 1024.0);
     println!("処理時間: {:.2}秒", elapsed.as_secs_f64());
     println!("速度: {:.2} GB/秒", speed_gbps);
-    
+
     // 結果をJSON出力
     let result = ChunkResult {
         columns,
@@ -245,12 +245,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_bytes: final_bytes,
         elapsed_seconds: elapsed.as_secs_f64(),
     };
-    
+
     let result_json = serde_json::to_string(&result)?;
     println!("\n===CHUNK_RESULT_JSON===");
     println!("{}", result_json);
     println!("===END_CHUNK_RESULT_JSON===");
-    
+
     Ok(())
 }
 
@@ -266,39 +266,39 @@ async fn process_range(
     table_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (client, connection) = config.connect(NoTls).await?;
-    
+
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("connection error: {}", e);
         }
     });
-    
+
     // ワーカー用のバッファ
     let mut write_buffer = Vec::with_capacity(BUFFER_SIZE);
     // 注意: worker_start_offsetは最初の書き込み時に決定される
     let mut worker_start_offset: Option<u64> = None;
     let mut worker_bytes = 0u64;
     let mut is_first_write = true;
-    
+
     // デバッグ情報（テストモード時のみ）
     let is_test_mode = std::env::var("GPUPGPARSER_TEST_MODE").unwrap_or_default() == "1";
     if is_test_mode && worker_id == 0 {
-        println!("ワーカー{}: COPY範囲 ページ{} - {}", 
+        println!("ワーカー{}: COPY範囲 ページ{} - {}",
             worker_id, start_page, end_page);
     }
-    
+
     // COPY開始
     let copy_query = format!(
         "COPY (SELECT * FROM {} WHERE ctid >= '({},1)'::tid AND ctid < '({},1)'::tid) TO STDOUT (FORMAT BINARY)",
         table_name, start_page, end_page
     );
-    
+
     let stream = client.copy_out(&copy_query).await?;
     futures_util::pin_mut!(stream);
-    
+
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
-        
+
         // 最初の書き込み時に0xFFFFを追加
         if is_first_write {
             if is_test_mode {
@@ -308,27 +308,27 @@ async fn process_range(
             write_buffer.push(0xFF);
             is_first_write = false;
         }
-        
+
         write_buffer.extend_from_slice(&chunk);
-        
+
         if write_buffer.len() >= BUFFER_SIZE {
             let bytes_to_write = write_buffer.len();
             let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
-            
+
             // 最初の書き込み時にstart_offsetを記録
             if worker_start_offset.is_none() {
                 worker_start_offset = Some(write_offset);
             }
-            
+
             chunk_file.write_all_at(&write_buffer, write_offset)?;
-            
+
             worker_bytes += bytes_to_write as u64;
             total_bytes.fetch_add(bytes_to_write as u64, Ordering::Relaxed);
-            
+
             write_buffer.clear();
         }
     }
-    
+
     // 残りのデータを書き込み
     if !write_buffer.is_empty() {
         // 最初の書き込みで、まだ0xFFFFを追加していない場合は追加
@@ -343,27 +343,27 @@ async fn process_range(
             new_buffer.extend_from_slice(&write_buffer);
             write_buffer = new_buffer;
         }
-        
+
         let bytes_to_write = write_buffer.len();
         let write_offset = worker_offset.fetch_add(bytes_to_write as u64, Ordering::SeqCst);
-        
+
         // 最初の書き込み時にstart_offsetを記録
         if worker_start_offset.is_none() {
             worker_start_offset = Some(write_offset);
         }
-        
+
         chunk_file.write_all_at(&write_buffer, write_offset)?;
-        
+
         worker_bytes += bytes_to_write as u64;
         total_bytes.fetch_add(bytes_to_write as u64, Ordering::Relaxed);
     }
-    
+
     // ストリーミング完了ログ（テストモード時のみ）
     if is_test_mode {
-        println!("ワーカー{}: ストリーミング完了。合計{}バイト転送 (ページ{} - {})", 
+        println!("ワーカー{}: ストリーミング完了。合計{}バイト転送 (ページ{} - {})",
             worker_id, worker_bytes, start_page, end_page);
     }
-    
+
     // ワーカーメタデータを保存
     {
         let mut w = workers.lock().unwrap();
@@ -374,6 +374,6 @@ async fn process_range(
             actual_size: worker_bytes,  // 実際に書き込んだバイト数
         });
     }
-    
+
     Ok(())
 }

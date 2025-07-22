@@ -51,7 +51,7 @@ old/
 backup/
 test_binaries/
 
-# Project specific - Generated data and logs  
+# Project specific - Generated data and logs
 *.parquet
 *.bin
 *.log

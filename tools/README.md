@@ -70,17 +70,17 @@ def inspect_binary_file(filename: str, max_rows: int = 10):
         signature = f.read(11)  # 'PGCOPY\n\377\r\n\0'
         flags = struct.unpack('>I', f.read(4))[0]
         extension_length = struct.unpack('>I', f.read(4))[0]
-        
+
         print(f"Signature: {signature}")
         print(f"Flags: {flags:032b}")
         print(f"Extension Length: {extension_length}")
-        
+
         # 行データ解析
         for row_num in range(max_rows):
             field_count = struct.unpack('>h', f.read(2))[0]
             if field_count == -1:  # EOF marker
                 break
-                
+
             print(f"\nRow {row_num}: {field_count} fields")
             for field_num in range(field_count):
                 field_length = struct.unpack('>i', f.read(4))[0]
@@ -112,13 +112,13 @@ def memory_trace(label: str):
     # 開始時のメモリ
     cpu_start = psutil.Process().memory_info().rss / 1024 / 1024
     gpu_start = cupy.cuda.MemoryPool().used_bytes() / 1024 / 1024
-    
+
     yield
-    
+
     # 終了時のメモリ
     cpu_end = psutil.Process().memory_info().rss / 1024 / 1024
     gpu_end = cupy.cuda.MemoryPool().used_bytes() / 1024 / 1024
-    
+
     print(f"\n{label}:")
     print(f"  CPU Memory: {cpu_start:.1f}MB → {cpu_end:.1f}MB (Δ{cpu_end-cpu_start:+.1f}MB)")
     print(f"  GPU Memory: {gpu_start:.1f}MB → {gpu_end:.1f}MB (Δ{gpu_end-gpu_start:+.1f}MB)")
@@ -136,25 +136,25 @@ from cupy import prof
 
 def profile_kernel(kernel_name: str, grid_size: tuple, block_size: tuple):
     """カーネル実行時間を測定"""
-    
+
     # ウォームアップ
     for _ in range(10):
         kernel[grid_size, block_size](...)
-        
+
     # プロファイリング
     times = []
     for _ in range(100):
         start = cupy.cuda.Event()
         end = cupy.cuda.Event()
-        
+
         start.record()
         kernel[grid_size, block_size](...)
         end.record()
         end.synchronize()
-        
+
         elapsed_time = cupy.cuda.get_elapsed_time(start, end)
         times.append(elapsed_time)
-    
+
     print(f"Kernel: {kernel_name}")
     print(f"  Average: {np.mean(times):.3f}ms")
     print(f"  Min: {np.min(times):.3f}ms")
@@ -175,7 +175,7 @@ import numpy as np
 
 def validate_type_conversion(pg_table: str, parquet_file: str):
     """PostgreSQLとParquetの型変換を検証"""
-    
+
     # PostgreSQLから型情報取得
     conn = psycopg2.connect(...)
     cur = conn.cursor()
@@ -185,18 +185,18 @@ def validate_type_conversion(pg_table: str, parquet_file: str):
         WHERE table_name = '{pg_table}'
     """)
     pg_schema = cur.fetchall()
-    
+
     # Parquetスキーマ取得
     pq_file = pq.ParquetFile(parquet_file)
     pq_schema = pq_file.schema
-    
+
     # 型マッピング検証
     for pg_col, pg_type, precision, scale in pg_schema:
         pq_field = pq_schema.field(pg_col)
         print(f"{pg_col}:")
         print(f"  PostgreSQL: {pg_type}({precision},{scale})")
         print(f"  Parquet: {pq_field.type}")
-        
+
         # 型互換性チェック
         if not is_compatible(pg_type, pq_field.type):
             print(f"  WARNING: Type mismatch!")
@@ -227,7 +227,7 @@ python tools/compare_tables.py --pg-table lineorder --parquet-file output/lineor
 # GPU プロファイル
 nsys profile --stats=true python cu_pg_parquet.py --table lineorder
 
-# メモリ帯域幅測定  
+# メモリ帯域幅測定
 python tools/profile_gpu.py --measure bandwidth
 
 # ボトルネック分析
@@ -272,7 +272,7 @@ export GPUPGPARSER_PROFILE_KERNELS=1
    # メモリ使用量確認
    nvidia-smi
    python tools/memory_trace.py --gpu-only
-   
+
    # チャンクサイズ調整
    export GPUPGPARSER_CHUNK_SIZE=100MB
    ```
@@ -281,7 +281,7 @@ export GPUPGPARSER_PROFILE_KERNELS=1
    ```bash
    # 詳細比較
    python tools/compare_tables.py --verbose --show-diff
-   
+
    # 特定行の調査
    python tools/binary_inspector.py chunk.bin --row 12345
    ```
@@ -290,7 +290,7 @@ export GPUPGPARSER_PROFILE_KERNELS=1
    ```bash
    # プロファイル比較
    python tools/profile_gpu.py --compare baseline.json current.json
-   
+
    # 環境変数最適化
    python tools/tune_parameters.py --auto
    ```

@@ -30,7 +30,7 @@ repos:
 
   # Pytest hooks - commented out for now to allow commits with failing tests
   # Uncomment when you want to enforce test passing before commit
-  
+
   # - repo: local
   #   hooks:
   #     - id: pytest-check

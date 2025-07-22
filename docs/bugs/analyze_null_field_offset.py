@@ -4,7 +4,7 @@ Analyze how NULL fields should be handled in offset calculation
 """
 
 print("PostgreSQL Binary Format - NULL Field Handling")
-print("="*60)
+print("=" * 60)
 
 print("\nScenario: First field (c_custkey) is NULL")
 print("\nBinary layout:")

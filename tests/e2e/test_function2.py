@@ -87,7 +87,7 @@ class TestFunction2QueueToGPUTransfer:
             start_time = time.time()
             # kvikio API might vary - adjust as needed
             # bytes_read = kvikio.read(queue_path, gpu_buffer)
-            with open(queue_path, 'rb') as f:
+            with open(queue_path, "rb") as f:
                 data = f.read()
                 gpu_buffer[:] = cp.asarray(np.frombuffer(data, dtype=np.uint8))
             bytes_read = len(data)
@@ -132,7 +132,7 @@ class TestFunction2QueueToGPUTransfer:
             # Transfer using kvikio
             start_time = time.time()
             # kvikio API might vary - adjust as needed
-            with open(queue_path, 'rb') as f:
+            with open(queue_path, "rb") as f:
                 data = f.read()
                 gpu_buffer[:] = cp.asarray(np.frombuffer(data, dtype=np.uint8))
             bytes_read = len(data)
@@ -291,10 +291,10 @@ class TestFunction2QueueToGPUTransfer:
         # Test with non-existent file
         gpu_buffer = cp.zeros(1024, dtype=cp.uint8)
         non_existent_path = "/dev/shm/non_existent_file.bin"
-        
+
         # Should handle file not found gracefully
         try:
-            with open(non_existent_path, 'rb') as f:
+            with open(non_existent_path, "rb") as f:
                 data = f.read()
                 gpu_buffer[:] = cp.asarray(np.frombuffer(data, dtype=np.uint8))
         except FileNotFoundError:
@@ -312,7 +312,7 @@ class TestFunction2QueueToGPUTransfer:
             gpu_buffer = cp.zeros(512, dtype=cp.uint8)  # Buffer too small
 
             # This should handle gracefully
-            with open(queue_path, 'rb') as f:
+            with open(queue_path, "rb") as f:
                 # Read only what the buffer can hold
                 data = f.read(512)
                 gpu_buffer[:] = cp.asarray(np.frombuffer(data, dtype=np.uint8))

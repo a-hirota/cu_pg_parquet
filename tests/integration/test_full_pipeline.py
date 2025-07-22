@@ -24,7 +24,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 try:
     import cudf
 
-
     GPU_AVAILABLE = True
 except ImportError:
     GPU_AVAILABLE = False
