@@ -2,21 +2,31 @@
 
 ## 1. 概要
 
-本ドキュメントは、GPU PostgreSQL Parserの包括的なテスト計画を定義します。4つの主要機能と全PostgreSQLデータ型について、End-to-End（E2E）テストを実装します。
+本ドキュメントは、GPU PostgreSQL Parserの包括的なテスト計画を定義します。3つの主要機能と全PostgreSQLデータ型について、End-to-End（E2E）テストを実装します。
 
 ## 2. システム機能概要
 
 ### 2.1 処理フロー
-現在の処理は大きく4つの機能に分かれています：
+現在の処理は大きく3つの機能に分かれています：
 
-1. **機能1**: PostgreSQLからpostgres_raw_binaryを/dev/shmにあるキューに蓄積
-2. **機能2**: キューから取り出し、kvikioを利用してGPUメモリに転送
-3. **機能3**: GPUメモリ上でバイナリ解析とArrow配列作成
+1. **機能1**: PostgreSQLバイナリ抽出とメタデータ生成
+   - PostgreSQLからCOPY BINARYプロトコルでデータ取得
+   - Rust/Pythonでバイナリデータ解析とメタデータ生成
+   - PostgreSQL型からArrow型へのマッピング（src/types.py）
+
+2. **機能2**: GPU処理（転送・解析・Arrow生成）
+   - バイナリデータをGPUメモリに転送（kvikio使用）
+   - GPUカーネルでPostgreSQLバイナリ形式を解析（src/cuda_kernels/）
+   - GPU上でArrow配列を生成
    - row offsetとfield indicesを作成
    - indexを利用してcolumn_arrowsを作成（固定長/可変長）
-4. **機能4**: column_arrowをcuDF DataFrameに変換し、Parquetファイルとして出力
+
+3. **機能3**: Arrow→cuDF→Parquet変換
+   - Arrow配列をcuDF DataFrameに変換
+   - 各種圧縮オプションでParquetファイル出力
 
 ### 2.2 データ型マッピング
+
 | PostgreSQL型 | Arrow型 | cuDF型 | 備考 |
 |-------------|---------|---------|------|
 | **数値型** |
@@ -55,48 +65,63 @@
 ## 3. テスト実装計画
 
 ### 3.1 フェーズ1: テスト環境構築（2日）
+
 - PostgreSQLテストデータベースのセットアップ
 - テーブル作成スクリプトの実装
 - テストデータ生成ユーティリティの作成
 
-### 3.2 フェーズ2: 機能別E2Eテスト実装（10日）
+### 3.2 フェーズ2: 機能別テスト実装（10日）
 各機能について以下のテストを実装：
 
-#### 機能0テスト: PostgreSQL型 → Arrowスキーマ生成（2日）
-- PostgreSQLカタログからの型情報取得
-- 各データ型に対する正しいArrow型へのマッピング
-- 精度・スケール情報の保持（NUMERIC、VARCHARなど）
-- NULL可否情報の正しい設定
+#### 機能1テスト: PostgreSQLバイナリ抽出とメタデータ生成（3日）
 
-#### 機能1テスト: PostgreSQL → /dev/shmキュー（2日）
-- 基本動作確認（10行のシンプルデータ）
-- 大量データ処理（100万行）
-- エラーハンドリング（接続エラー、キュー満杯）
+- **Rust抽出とpsycopg2の比較テスト**
+  - COPY BINARYで取得したデータをRust実装（rust/src/lib.rs）で解析
+  - 同じデータをpsycopg2で取得し、値の完全一致を確認
+  - サポートされている全データ型で検証
 
-#### 機能2テスト: /dev/shmキュー → GPU転送（2日）
-- kvikio転送の動作確認
-- メモリ不足時の挙動
-- 並行転送の安定性
+- **メタデータ生成テスト**
+  - PostgreSQL型情報からArrow型への正しいマッピング
+  - src/types.pyのPG_OID_TO_ARROWに基づく変換確認
+  - 精度・スケール情報の保持（NUMERIC、VARCHARなど）
 
-#### 機能3テスト: GPUバイナリ解析 → Arrow配列（2日）
-- 固定長データ型の解析
-- 可変長データ型の解析
-- NULL値の正しい処理
+- **未実装型のエラーテスト**
+  - TIME、UUID、JSON等の未実装型で適切なエラーが発生することを確認
 
-#### 機能4テスト: Arrow → cuDF → Parquet（2日）
-- 基本的な変換動作
-- 圧縮オプション（ZSTD）の動作
-- 大規模データの出力
+#### 機能2テスト: GPU処理（転送・解析・Arrow生成）（3日）
+
+- **実際のGPUカーネルテスト**
+  - src/cuda_kernels/postgres_binary_parser.pyの実行
+  - kvikio（または直接転送）でGPUメモリにデータ転送
+  - GPU上でのバイナリ解析処理
+
+- **Arrow配列生成と検証**
+  - 固定長データ型の解析結果確認
+  - 可変長データ型の解析結果確認
+  - NULL値の正しい処理
+  - CPUに戻して値・型・桁の一致確認
+
+#### 機能3テスト: Arrow→cuDF→Parquet変換（2日）
+
+- **cuDF変換テスト**
+  - Arrow配列からcuDF DataFrameへの実際の変換
+  - データ型の保持確認
+
+- **Parquet出力テスト**
+  - 各種圧縮オプション（snappy、zstd）の動作確認
+  - 出力ファイルの読み込みと内容検証
 
 ### 3.3 フェーズ3: データ型別テスト実装（10日）
 全データ型について以下のテストケースを作成：
 
 #### テストデータ仕様
+
 - 通常値: 100行
 - NULL値: 各型で10%含む
 - 境界値: 最小値、最大値を1行ずつ
 
 #### 実装順序
+
 1. **数値型テスト**（2日）
    - SMALLINT, INTEGER, BIGINT
    - REAL, DOUBLE PRECISION
@@ -122,10 +147,21 @@
    - JSON/JSONB
    - COMPOSITE TYPE（必要に応じて）
 
-### 3.4 フェーズ4: 統合テストとツール作成（3日）
-- 全機能（1-4）を通した統合テストスクリプト
-- テスト結果検証ツール（値の完全一致確認）
-- CI/CDパイプラインへの組み込み
+### 3.4 フェーズ4: E2E統合テストとツール作成（3日）
+
+- **E2E統合テスト**
+  - 機能1→2→3を連結した完全なパイプラインテスト
+  - PostgreSQL → COPY BINARY → Rust抽出 → GPU処理 → Arrow → cuDF → Parquet
+  - 実際のコードのみ使用（モックなし）
+
+- **Parquet検証ツール**
+  - 出力されたParquetファイルの内容検証
+  - PostgreSQL元データとの値の完全一致確認
+  - データ型、NULL値、精度の保持確認
+
+- **CI/CDパイプラインへの組み込み**
+  - 実装済み機能のみテスト成功
+  - 未実装機能は適切にスキップまたはエラー
 
 ## 4. テストコード構成
 
@@ -135,36 +171,88 @@ tests/
 │   ├── create_test_db.py      # テストDB作成
 │   └── generate_test_data.py  # テストデータ生成
 ├── e2e/
-│   ├── test_function0.py      # 機能0: PostgreSQL型→Arrowスキーマ生成
-│   ├── test_function1.py      # 機能1: PostgreSQL→/dev/shmキュー
-│   ├── test_function2.py      # 機能2: /dev/shmキュー→GPU転送
-│   ├── test_function3.py      # 機能3: GPUバイナリ解析→Arrow配列
-│   └── test_function4.py      # 機能4: Arrow→cuDF→Parquet
+│   ├── test_rust_extraction.py      # 機能1: Rust抽出とメタデータ生成テスト
+│   ├── test_gpu_processing.py      # 機能2: GPU処理（転送・解析・Arrow生成）テスト
+│   └── test_arrow_to_parquet.py      # 機能3: Arrow→cuDF→Parquetテスト
 ├── datatypes/
-│   ├── test_numeric_types.py  # 数値型テスト
-│   ├── test_string_types.py   # 文字列型テスト
-│   ├── test_datetime_types.py # 日付時刻型テスト
-│   └── test_other_types.py    # その他の型テスト
+│   ├── test_numeric_types.py  # 数値型テスト（実際のパイプライン使用）
+│   ├── test_string_types.py   # 文字列型テスト（実際のパイプライン使用）
+│   ├── test_datetime_types.py # 日付時刻型テスト（実際のパイプライン使用）
+│   └── test_other_types.py    # その他の型テスト（実際のパイプライン使用）
 ├── integration/
-│   └── test_full_pipeline.py  # 統合テスト
+│   └── test_full_pipeline.py  # E2E統合テスト（全機能結合）
 └── utils/
-    ├── verification.py        # 検証ユーティリティ
-    └── performance.py         # 性能測定ツール
+    ├── verification.py        # Parquet検証ユーティリティ
+    └── comparison.py         # Rust/psycopg2比較ユーティリティ
 ```
 
-## 5. 検証項目
+## 5. テスト実装戦略
 
-### 5.1 機能検証
+### 5.1 段階的テスト実装アプローチ
+
+実装の現状を考慮し、以下の段階的アプローチでテストを実装します：
+
+#### フェーズ1: INTEGER型のみでの基本動作確認
+1. **最初にINTEGER型（int32）のみでテストを作成**
+   - 最も基本的で実装が完了している可能性が高い
+   - バイナリ形式が単純（4バイト固定長）
+   - エンディアン変換のみで値を取得可能
+
+2. **各機能でINTEGER型テストを実装**
+   - 機能1: INTEGER型のバイナリ抽出とメタデータ
+   - 機能2: INTEGER型のGPU処理とArrow配列生成
+   - 機能3: INTEGER型のArrow→cuDF→Parquet
+
+3. **E2E統合テストもINTEGER型で実装**
+   - 全パイプラインが動作することを確認
+
+#### フェーズ2: 他の固定長数値型への拡張
+- SMALLINT（int16）、BIGINT（int64）を追加
+- REAL（float32）、DOUBLE PRECISION（float64）を追加
+- これらも固定長で実装が比較的容易
+
+#### フェーズ3: 可変長型への拡張
+- TEXT、VARCHAR型を追加（可変長の処理が必要）
+- NUMERIC/DECIMAL型を追加（特殊な形式）
+
+#### フェーズ4: その他の型への拡張
+- BOOLEAN、DATE、TIMESTAMP等
+- 実装済みの型から順次追加
+
+### 5.2 テストコードの構造化
+
+```python
+# 各テストクラスに型ごとのテストメソッドを追加
+class TestFunction2GPUProcessing:
+    def test_integer_type_only(self):
+        """INTEGER型のみでGPU処理をテスト"""
+        # まずこれを動作させる
+
+    def test_numeric_types(self):
+        """数値型全般のテスト"""
+        # INTEGER型が動作したら追加
+
+    def test_string_types(self):
+        """文字列型のテスト"""
+        # 可変長処理が実装されたら追加
+```
+
+## 6. 検証項目
+
+### 6.1 機能検証
+
 - [ ] 各機能が個別に正しく動作すること
 - [ ] 全機能を通した処理が正常に完了すること
 - [ ] エラー時に適切なメッセージが出力されること
 
 ### 5.2 データ整合性検証
+
 - [ ] 全データ型で値が完全一致すること
 - [ ] NULL値が正しく処理されること
 - [ ] 境界値が正しく処理されること
 
 ### 5.3 性能検証（参考値）
+
 - [ ] 1GBデータを10分以内に処理できること
 - [ ] メモリ使用量が適切な範囲内であること
 
@@ -184,6 +272,15 @@ tests/
 2. **必須**: 基本データ型（数値、文字列、日付、論理）のテストが合格
 3. **推奨**: 全データ型のテストが合格
 4. **推奨**: 統合テストでの値の完全一致確認
+
+## 8. 現行のテスト実装とマッピング
+
+現在のテスト実装と本番機能のマッピングについては、[test_mapping_analysis.md](./test_mapping_analysis.md)を参照してください。このドキュメントには以下の情報が含まれています：
+
+- 本番処理フローの詳細（関数粒度）
+- 各テストファイルと本番機能のマッピング
+- テストされていない重要な機能のリスト
+- 推奨される追加テストの提案
 
 ## 8. テスト実行環境
 
@@ -221,7 +318,7 @@ tests/
 pytest tests/
 
 # 特定の機能テストのみ
-pytest tests/e2e/test_function1.py
+pytest tests/e2e/test_rust_extraction.py
 
 # GPUテストを除外
 pytest tests/ -m "not gpu"

@@ -2,6 +2,7 @@
 Pytest configuration and fixtures for GPU PostgreSQL Parser tests.
 """
 
+import atexit
 import logging
 import os
 import sys
@@ -15,6 +16,52 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Suppress Numba CUDA logging errors at exit
+def cleanup_numba_logging():
+    """Disable Numba CUDA logging to prevent errors during Python exit."""
+    try:
+        # Get Numba logger and disable it
+        numba_logger = logging.getLogger("numba.cuda.cudadrv.driver")
+        numba_logger.disabled = True
+        numba_logger.handlers.clear()
+
+        # Clean up CuPy resources first
+        try:
+            import cupy as cp
+
+            # Synchronize all streams
+            cp.cuda.Stream.null.synchronize()
+            # Free memory pools
+            mempool = cp.get_default_memory_pool()
+            mempool.free_all_blocks()
+            pinned_mempool = cp.get_default_pinned_memory_pool()
+            pinned_mempool.free_all_blocks()
+        except:
+            pass
+
+        # Also try to clean up any CUDA contexts
+        try:
+            import numba.cuda
+
+            numba.cuda.close()
+        except:
+            pass
+    except:
+        pass
+
+
+# Register cleanup function
+atexit.register(cleanup_numba_logging)
+
+# Also set Numba environment variables
+os.environ.setdefault("NUMBA_CUDA_LOG_LEVEL", "ERROR")
+os.environ.setdefault("NUMBA_DISABLE_PERFORMANCE_WARNINGS", "1")
+
+# Suppress CuPy warnings
+os.environ.setdefault("CUPY_CACHE_CLEAR_ON_DEVICE_DESTRUCTION", "1")
+os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
 
 
 @pytest.fixture(scope="session")
@@ -118,3 +165,22 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "gpu" in item.keywords:
                 item.add_marker(skip_gpu)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Clean up at the end of the test session."""
+    # Force cleanup of Numba CUDA resources
+    cleanup_numba_logging()
+
+    # Additional cleanup for logging handlers
+    logging.shutdown()
+
+    # Force garbage collection
+    import gc
+
+    gc.collect()
+
+    # Explicitly disable CuPy module unloading warnings
+    import warnings
+
+    warnings.filterwarnings("ignore", category=Warning, module="cupy")
