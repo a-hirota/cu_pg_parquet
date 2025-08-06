@@ -109,15 +109,11 @@ class TestRunner:
         """Run all test categories."""
         test_categories = [
             ("Setup", "tests/setup"),
-            ("E2E Function 0", "tests/e2e/test_function0.py"),
-            ("E2E Function 1", "tests/e2e/test_function1.py"),
-            ("E2E Function 2", "tests/e2e/test_function2.py"),
-            ("E2E Function 3", "tests/e2e/test_function3.py"),
-            ("E2E Function 4", "tests/e2e/test_function4.py"),
-            ("Numeric Types", "tests/datatypes/test_numeric_types.py"),
-            ("String Types", "tests/datatypes/test_string_types.py"),
-            ("DateTime Types", "tests/datatypes/test_datetime_types.py"),
-            ("Other Types", "tests/datatypes/test_other_types.py"),
+            ("E2E PostgreSQL to Binary", "tests/e2e/test_postgres_to_binary.py"),
+            ("E2E Binary to Arrow", "tests/e2e/test_binary_to_arrow.py"),
+            ("E2E Arrow to Parquet", "tests/e2e/test_arrow_to_parquet.py"),
+            ("E2E All Types", "tests/e2e/test_all_types.py"),
+            ("Type Matrix", "tests/test_type_matrix.py"),
             ("Integration", "tests/integration"),
         ]
 
@@ -144,9 +140,9 @@ class TestRunner:
 
         if total > 0:
             print(f"Total Tests: {total}")
-            print(f"✅ Passed: {summary['passed']} ({summary['passed']/total*100:.1f}%)")
-            print(f"❌ Failed: {summary['failed']} ({summary['failed']/total*100:.1f}%)")
-            print(f"⏭️  Skipped: {summary['skipped']} ({summary['skipped']/total*100:.1f}%)")
+            print(f"✅ Passed: {summary['passed']} ({summary['passed'] / total * 100:.1f}%)")
+            print(f"❌ Failed: {summary['failed']} ({summary['failed'] / total * 100:.1f}%)")
+            print(f"⏭️  Skipped: {summary['skipped']} ({summary['skipped'] / total * 100:.1f}%)")
 
             if summary["errors"] > 0:
                 print(f"💥 Errors: {summary['errors']}")
@@ -157,7 +153,7 @@ class TestRunner:
         for category, results in self.results["test_categories"].items():
             status_icon = "✅" if results["status"] == "passed" else "❌"
             duration = results.get("duration", 0)
-            print(f"  {status_icon} {category}: {results['status']} ({duration:.2f}s)")
+            print(f"  {status_icon} {category}: {results['status']} ({duration: .2f}s)")
 
         # Overall result
         print("\n" + "=" * 60)
@@ -196,15 +192,11 @@ def main():
         # Run specific category
         test_path = {
             "setup": "tests/setup",
-            "function0": "tests/e2e/test_function0.py",
-            "function1": "tests/e2e/test_function1.py",
-            "function2": "tests/e2e/test_function2.py",
-            "function3": "tests/e2e/test_function3.py",
-            "function4": "tests/e2e/test_function4.py",
-            "numeric": "tests/datatypes/test_numeric_types.py",
-            "string": "tests/datatypes/test_string_types.py",
-            "datetime": "tests/datatypes/test_datetime_types.py",
-            "other": "tests/datatypes/test_other_types.py",
+            "postgres_to_binary": "tests/e2e/test_postgres_to_binary.py",
+            "binary_to_arrow": "tests/e2e/test_binary_to_arrow.py",
+            "arrow_to_parquet": "tests/e2e/test_arrow_to_parquet.py",
+            "all_types": "tests/e2e/test_all_types.py",
+            "type_matrix": "tests/test_type_matrix.py",
             "integration": "tests/integration",
         }.get(args.category.lower())
 
@@ -215,7 +207,7 @@ def main():
             sys.exit(1)
     else:
         # Run all tests
-        all_passed = runner.run_all_tests()
+        runner.run_all_tests()
 
     # Print summary
     summary_passed = runner.print_summary()

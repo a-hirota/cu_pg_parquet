@@ -2,16 +2,12 @@
 Type Test Matrix - すべての型×機能のテスト状態を管理
 """
 
-import json
 import os
-import struct
 import sys
 import tempfile
 from datetime import date, datetime, time
 from decimal import Decimal
-from pathlib import Path
 
-import psycopg2
 import pytest
 
 # Import project modules
@@ -63,9 +59,9 @@ class TypeTestResult:
         self.type_name = type_name
         self.oid = oid
         self.results = {
-            "function1_extract": None,  # PostgreSQL COPY BINARY extraction
-            "function2_gpu_parse": None,  # GPU parsing
-            "function3_arrow_cudf": None,  # Arrow to cuDF conversion
+            "postgres_to_binary": None,  # PostgreSQL COPY BINARY extraction
+            "binary_to_arrow": None,  # GPU parsing
+            "arrow_to_parquet": None,  # Arrow to cuDF to Parquet conversion
             "full_pipeline": None,  # End-to-end pipeline
         }
 
@@ -125,7 +121,7 @@ def create_test_table_for_type(conn, table_name, oid, type_info):
 class TestTypeMatrix:
     """すべての型に対して各機能をテスト"""
 
-    def test_function1_copy_binary_extraction(self, db_connection, oid, type_info):
+    def test_postgres_to_binary_extraction(self, db_connection, oid, type_info):
         """Function 1: PostgreSQL COPY BINARY extraction"""
         type_name, sql_type, test_values, expected_arrow_id = type_info
 
@@ -135,7 +131,7 @@ class TestTypeMatrix:
         table_name = f"test_{type_name.lower()}_extraction"
 
         try:
-            num_rows = create_test_table_for_type(db_connection, table_name, oid, type_info)
+            create_test_table_for_type(db_connection, table_name, oid, type_info)
 
             # COPY BINARY extraction
             cur = db_connection.cursor()
@@ -152,10 +148,10 @@ class TestTypeMatrix:
             assert len(binary_data) > 19  # ヘッダーより大きい
             assert binary_data[:11] == b"PGCOPY\n\xff\r\n\0"
 
-            TEST_RESULTS[oid].set_result("function1_extract", True)
+            TEST_RESULTS[oid].set_result("postgres_to_binary", True)
 
         except Exception as e:
-            TEST_RESULTS[oid].set_result("function1_extract", False, str(e))
+            TEST_RESULTS[oid].set_result("postgres_to_binary", False, str(e))
             if expected_arrow_id >= 0:  # 実装済みの型なら失敗
                 raise
         finally:
@@ -164,7 +160,7 @@ class TestTypeMatrix:
             db_connection.commit()
             cur.close()
 
-    def test_function2_gpu_parsing(self, db_connection, oid, type_info):
+    def test_binary_to_arrow_parsing(self, db_connection, oid, type_info):
         """Function 2: GPU parsing"""
         if not GPU_AVAILABLE:
             pytest.skip("GPU not available")
@@ -182,7 +178,7 @@ class TestTypeMatrix:
             )
             from src.types import ColumnMeta
 
-            num_rows = create_test_table_for_type(db_connection, table_name, oid, type_info)
+            create_test_table_for_type(db_connection, table_name, oid, type_info)
 
             # メタデータ作成
             columns = [
@@ -219,10 +215,10 @@ class TestTypeMatrix:
             assert result is not None
             assert len(result) >= 3  # row_positions, field_offsets, field_lengths
 
-            TEST_RESULTS[oid].set_result("function2_gpu_parse", True)
+            TEST_RESULTS[oid].set_result("binary_to_arrow", True)
 
         except Exception as e:
-            TEST_RESULTS[oid].set_result("function2_gpu_parse", False, str(e))
+            TEST_RESULTS[oid].set_result("binary_to_arrow", False, str(e))
             if expected_arrow_id >= 0:  # 実装済みの型なら失敗
                 raise
         finally:
@@ -231,7 +227,7 @@ class TestTypeMatrix:
             db_connection.commit()
             cur.close()
 
-    def test_function3_arrow_to_cudf(self, oid, type_info):
+    def test_arrow_to_parquet_conversion(self, oid, type_info):
         """Function 3: Arrow to cuDF conversion"""
         if not GPU_AVAILABLE:
             pytest.skip("GPU not available")
@@ -275,7 +271,7 @@ class TestTypeMatrix:
                 arrow_array = pa.array([v for v in test_values if v is not None], type=pa.bool_())
             else:
                 # 未実装の型
-                TEST_RESULTS[oid].set_result("function3_arrow_cudf", False, "Unsupported type")
+                TEST_RESULTS[oid].set_result("arrow_to_parquet", False, "Unsupported type")
                 return
 
             # Arrow table作成
@@ -285,10 +281,10 @@ class TestTypeMatrix:
             gdf = cudf.DataFrame.from_arrow(table)
             assert len(gdf) == len([v for v in test_values if v is not None])
 
-            TEST_RESULTS[oid].set_result("function3_arrow_cudf", True)
+            TEST_RESULTS[oid].set_result("arrow_to_parquet", True)
 
         except Exception as e:
-            TEST_RESULTS[oid].set_result("function3_arrow_cudf", False, str(e))
+            TEST_RESULTS[oid].set_result("arrow_to_parquet", False, str(e))
             if expected_arrow_id >= 0:  # 実装済みの型なら失敗
                 raise
 
@@ -299,7 +295,8 @@ def pytest_sessionfinish(session, exitstatus):
     print("TYPE TEST MATRIX REPORT")
     print("=" * 80)
     print(
-        f"{'Type':<15} {'OID':<6} {'Extract':<10} {'GPU Parse':<10} {'Arrow→cuDF':<12} {'Pipeline':<10}"
+        f"{'Type':<15} {'OID':<6} {'Extract':<10} "
+        f"{'GPU Parse':<10} {'Arrow→cuDF':<12} {'Pipeline':<10}"
     )
     print("-" * 80)
 
@@ -307,9 +304,9 @@ def pytest_sessionfinish(session, exitstatus):
         result = TEST_RESULTS[oid]
         print(
             f"{result.type_name:<15} {oid:<6} "
-            f"{result.get_status_symbol('function1_extract'):<10} "
-            f"{result.get_status_symbol('function2_gpu_parse'):<10} "
-            f"{result.get_status_symbol('function3_arrow_cudf'):<12} "
+            f"{result.get_status_symbol('postgres_to_binary'):<10} "
+            f"{result.get_status_symbol('binary_to_arrow'):<10} "
+            f"{result.get_status_symbol('arrow_to_parquet'):<12} "
             f"{result.get_status_symbol('full_pipeline'):<10}"
         )
 

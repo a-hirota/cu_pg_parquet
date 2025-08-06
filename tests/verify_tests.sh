@@ -61,20 +61,15 @@ echo "Running all test categories..."
 echo
 
 # E2E Tests
-run_test_category "Function 0 - PostgreSQL to Arrow Schema" "tests/e2e/test_function0.py"
-run_test_category "Function 1 - PostgreSQL to Queue" "tests/e2e/test_function1.py"
-run_test_category "Function 2 - Queue to GPU" "tests/e2e/test_function2.py"
-run_test_category "Function 3 - GPU Binary Parsing" "tests/e2e/test_function3.py"
-run_test_category "Function 4 - Arrow to Parquet" "tests/e2e/test_function4.py"
+run_test_category "PostgreSQL to Binary" "tests/e2e/test_postgres_to_binary.py"
+run_test_category "Binary to Arrow" "tests/e2e/test_binary_to_arrow.py"
+run_test_category "Arrow to Parquet" "tests/e2e/test_arrow_to_parquet.py"
+run_test_category "All Types" "tests/e2e/test_all_types.py"
 
-# Data Type Tests
-run_test_category "Numeric Types" "tests/datatypes/test_numeric_types.py"
-run_test_category "String Types" "tests/datatypes/test_string_types.py"
-run_test_category "DateTime Types" "tests/datatypes/test_datetime_types.py"
-run_test_category "Other Types" "tests/datatypes/test_other_types.py"
+# Type Matrix Test
+run_test_category "Type Matrix" "tests/test_type_matrix.py"
 
 # Integration Tests
-run_test_category "Pipeline Components" "tests/integration/test_pipeline_components.py"
 run_test_category "Full Pipeline" "tests/integration/test_full_pipeline.py"
 
 # Summary
