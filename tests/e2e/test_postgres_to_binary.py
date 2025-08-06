@@ -1,16 +1,17 @@
-"""E2E Test for Function 1: Rust Binary Extraction and Metadata Generation
+"""E2E Test for Function 1: PostgreSQL to Binary Extraction and Metadata Generation
 
 This test verifies:
-1. Rust binary extractor (pg_chunk_extractor) functionality
-2. Metadata extraction from PostgreSQL
-3. Binary data format compatibility
-4. Integration with rust_producer() function
+1. PostgreSQL COPY BINARY extraction
+2. Metadata generation from PostgreSQL catalog
+3. Binary data format validation
+4. Type mapping from PostgreSQL to Arrow
+5. Rust binary extractor functionality (if available)
 
-Test Implementation Strategy:
-- Phase 1: INTEGER type only (this file)
-- Phase 2: Add other numeric types
-- Phase 3: Add string types
-- Phase 4: Add other types
+Test covers:
+- Direct psycopg2 COPY BINARY
+- Metadata extraction from pg_attribute
+- Binary format parsing
+- Type OID to Arrow mapping validation
 """
 
 import json
@@ -31,8 +32,8 @@ from src.types import INT32, PG_OID_TO_ARROW
 
 
 @pytest.mark.e2e
-class TestRustExtraction:
-    """Test Rust binary extraction and metadata generation."""
+class TestPostgresToBinary:
+    """Test PostgreSQL to Binary extraction and metadata generation."""
 
     def parse_postgres_binary_header(self, data):
         """Parse PostgreSQL COPY BINARY header."""
@@ -68,6 +69,122 @@ class TestRustExtraction:
                 fields.append(field_data)
 
         return fields, offset
+
+    def test_postgres_metadata_generation(self, db_connection):
+        """Test comprehensive metadata generation from PostgreSQL catalog."""
+        table_name = "test_metadata_generation"
+        cur = db_connection.cursor()
+
+        # Create table with various data types
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"""
+            CREATE TABLE {table_name} (
+                id SERIAL PRIMARY KEY,
+                int_col INTEGER NOT NULL,
+                bigint_col BIGINT,
+                text_col TEXT,
+                varchar_col VARCHAR(50),
+                numeric_col NUMERIC(10, 2),
+                bool_col BOOLEAN DEFAULT true,
+                date_col DATE,
+                timestamp_col TIMESTAMP,
+                bytea_col BYTEA,
+                real_col REAL,
+                double_col DOUBLE PRECISION
+            )
+        """
+        )
+        db_connection.commit()
+
+        try:
+            # Import metadata utilities
+            from src.readPostgres.metadata import fetch_column_meta
+
+            # Fetch metadata using project's metadata utilities
+            columns = fetch_column_meta(db_connection, f"SELECT * FROM {table_name}")
+
+            # Verify metadata for each column
+            assert len(columns) == 12, f"Expected 12 columns, got {len(columns)}"
+
+            # Expected mappings
+            expected_mappings = {
+                "id": (23, INT32, 4),  # INTEGER
+                "int_col": (23, INT32, 4),  # INTEGER
+                "bigint_col": (20, 2, 8),  # BIGINT -> INT64
+                "text_col": (25, 6, -1),  # TEXT -> UTF8
+                "varchar_col": (1043, 6, -1),  # VARCHAR -> UTF8
+                "numeric_col": (1700, 5, -1),  # NUMERIC -> DECIMAL128
+                "bool_col": (16, 10, 1),  # BOOLEAN -> BOOL
+                "date_col": (1082, 8, -1),  # DATE -> TS64_S
+                "timestamp_col": (1114, 9, -1),  # TIMESTAMP -> TS64_US
+                "bytea_col": (17, 7, -1),  # BYTEA -> BINARY
+                "real_col": (700, 3, 4),  # REAL -> FLOAT32
+                "double_col": (701, 4, 8),  # DOUBLE -> FLOAT64
+            }
+
+            for col in columns:
+                assert col.name in expected_mappings, f"Unexpected column: {col.name}"
+
+                expected_oid, expected_arrow_id, expected_size = expected_mappings[col.name]
+
+                # Verify PostgreSQL OID
+                assert (
+                    col.pg_oid == expected_oid
+                ), f"{col.name}: Expected OID {expected_oid}, got {col.pg_oid}"
+
+                # Verify Arrow type mapping
+                assert (
+                    col.arrow_id == expected_arrow_id
+                ), f"{col.name}: Expected Arrow ID {expected_arrow_id}, got {col.arrow_id}"
+
+                # Verify element size
+                assert (
+                    col.elem_size == expected_size
+                ), f"{col.name}: Expected size {expected_size}, got {col.elem_size}"
+
+                # Check variable length flag
+                expected_variable = expected_size == -1
+                assert (
+                    col.is_variable == expected_variable
+                ), f"{col.name}: Expected is_variable={expected_variable}, got {col.is_variable}"
+
+                print(
+                    f"✓ {col.name}: PG OID {col.pg_oid} → Arrow {col.arrow_id} "
+                    f"(size: {col.elem_size}, variable: {col.is_variable})"
+                )
+
+            # Test metadata generation for a query with expressions
+            complex_query = f"""
+                SELECT
+                    id,
+                    int_col * 2 as doubled,
+                    text_col || '_suffix' as concatenated,
+                    CASE WHEN bool_col THEN 1 ELSE 0 END as bool_as_int
+                FROM {table_name}
+            """
+
+            complex_columns = fetch_column_meta(db_connection, complex_query)
+            assert (
+                len(complex_columns) == 4
+            ), f"Expected 4 columns in complex query, got {len(complex_columns)}"
+
+            # Verify derived column types
+            col_map = {col.name: col for col in complex_columns}
+
+            assert col_map["doubled"].pg_oid == 23, "Derived INTEGER column"
+            assert col_map["concatenated"].pg_oid == 25, "String concatenation returns TEXT"
+            assert col_map["bool_as_int"].pg_oid == 23, "CASE expression returns INTEGER"
+
+            print("\n✓ Metadata generation test passed")
+            print(f"  - Tested {len(columns)} column types")
+            print(f"  - All PostgreSQL OIDs correctly mapped to Arrow types")
+            print(f"  - Variable length flags correctly set")
+            print(f"  - Complex query metadata correctly derived")
+
+        finally:
+            cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+            db_connection.commit()
 
     def test_integer_rust_extraction(self, db_connection):
         """Test INTEGER type extraction using Rust binary extractor."""

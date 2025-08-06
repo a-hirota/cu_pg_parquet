@@ -1,17 +1,17 @@
-"""
-E2E Test for Function 2: GPU Processing (Transfer, Parse, Arrow Generation)
+"""End-to-end tests for Function 2: Binary to Arrow Conversion
 
-This test verifies:
-1. Binary data transfer to GPU using kvikio or direct methods
-2. GPU kernel execution for parsing PostgreSQL binary format
-3. Arrow array generation on GPU
-4. CPU verification of parsed results
+This tests the GPU processing of PostgreSQL binary data to Arrow arrays:
+1. Binary data parsing on GPU using CUDA kernels
+2. Arrow array generation from parsed data
+3. Field extraction and type conversion
+4. NULL handling and data validation
+5. GPU memory management and performance
 
-Test Implementation Strategy:
-- Phase 1: INTEGER type only (this file)
-- Phase 2: Add other numeric types
-- Phase 3: Add string types
-- Phase 4: Add other types
+Test covers:
+- CUDA kernel execution for binary parsing
+- Arrow array construction on GPU
+- Type-specific conversions
+- Performance benchmarking
 """
 
 import os
@@ -47,8 +47,8 @@ if GPU_AVAILABLE:
 @pytest.mark.e2e
 @pytest.mark.gpu
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="GPU not available")
-class TestGPUProcessing:
-    """Test GPU transfer and parsing functionality."""
+class TestBinaryToArrow:
+    """Test Binary to Arrow conversion on GPU."""
 
     def test_integer_gpu_parsing(self, db_connection):
         """Test INTEGER type GPU parsing and Arrow generation."""
