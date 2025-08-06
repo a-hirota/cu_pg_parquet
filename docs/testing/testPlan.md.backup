@@ -1,5 +1,5 @@
 # GPU PostgreSQL Parser Test Plan
-Generated: 2025-08-06 22:31:00
+Generated: 2025-08-06 22:30:27
 
 ## Overview
 
@@ -54,20 +54,6 @@ The parser reads PostgreSQL binary data using COPY BINARY protocol and processes
 
 | PostgreSQL Type | OID | Arrow Type | Test Status |
 |----------------|-----|------------|-------------|
-| BOOLEAN | 16 | BOOL | ✅ Tested |
-| BYTEA | 17 | BINARY | ✅ Tested |
-| BIGINT | 20 | INT64 | ✅ Tested |
-| SMALLINT | 21 | INT16 | ✅ Tested |
-| INTEGER | 23 | INT32 | ✅ Tested |
-| TEXT | 25 | UTF8 | ✅ Tested |
-| REAL | 700 | FLOAT32 | ✅ Tested |
-| DOUBLE | 701 | FLOAT64 | ✅ Tested |
-| CHAR | 1042 | UTF8 | ✅ Tested |
-| VARCHAR | 1043 | UTF8 | ✅ Tested |
-| DATE | 1082 | TS64_S | ✅ Tested |
-| TIMESTAMP | 1114 | TS64_US | ✅ Tested |
-| TIMESTAMPTZ | 1184 | TS64_US | ✅ Tested |
-| NUMERIC | 1700 | DECIMAL128 | ✅ Tested |
 
 ## Test Categories
 

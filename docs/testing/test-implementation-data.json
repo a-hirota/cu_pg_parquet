@@ -1,0 +1,366 @@
+{
+  "timestamp": "2025-08-06T22:31:06.048064",
+  "quality": {
+    "function_coverage": {
+      "F1": {
+        "e2e_test": true,
+        "unit_tests": false,
+        "integration_tests": false,
+        "uses_real_code": true,
+        "test_files": [
+          "tests/e2e/test_postgres_to_binary.py"
+        ]
+      },
+      "F2": {
+        "e2e_test": true,
+        "unit_tests": false,
+        "integration_tests": false,
+        "uses_real_code": true,
+        "test_files": [
+          "tests/e2e/test_binary_to_arrow.py"
+        ]
+      },
+      "F3": {
+        "e2e_test": true,
+        "unit_tests": false,
+        "integration_tests": false,
+        "uses_real_code": true,
+        "test_files": [
+          "tests/e2e/test_arrow_to_parquet.py"
+        ]
+      }
+    },
+    "type_coverage": {
+      "has_type_matrix": true,
+      "tested_types": [
+        {
+          "oid": "21",
+          "type": "SMALLINT"
+        },
+        {
+          "oid": "23",
+          "type": "INTEGER"
+        },
+        {
+          "oid": "20",
+          "type": "BIGINT"
+        },
+        {
+          "oid": "700",
+          "type": "REAL"
+        },
+        {
+          "oid": "701",
+          "type": "DOUBLE"
+        },
+        {
+          "oid": "16",
+          "type": "BOOLEAN"
+        },
+        {
+          "oid": "25",
+          "type": "TEXT"
+        },
+        {
+          "oid": "1043",
+          "type": "VARCHAR"
+        },
+        {
+          "oid": "1042",
+          "type": "CHAR"
+        },
+        {
+          "oid": "17",
+          "type": "BYTEA"
+        },
+        {
+          "oid": "1082",
+          "type": "DATE"
+        },
+        {
+          "oid": "1114",
+          "type": "TIMESTAMP"
+        },
+        {
+          "oid": "1184",
+          "type": "TIMESTAMPTZ"
+        },
+        {
+          "oid": "1083",
+          "type": "TIME"
+        },
+        {
+          "oid": "2950",
+          "type": "UUID"
+        },
+        {
+          "oid": "114",
+          "type": "JSON"
+        }
+      ],
+      "coverage_percentage": 114.28571428571428
+    },
+    "overall": {
+      "total_test_files": 6,
+      "using_production_code": 6,
+      "using_mocks": 1,
+      "with_assertions": 5,
+      "testing_edge_cases": 6,
+      "testing_errors": 6,
+      "using_gpu": 6
+    }
+  },
+  "implemented_tests": {
+    "tests/e2e/test_all_types.py": {
+      "path": "tests/e2e/test_all_types.py",
+      "type": "e2e",
+      "imports": [
+        "import os",
+        "import struct",
+        "import sys",
+        "import tempfile",
+        "from datetime import date, datetime, time",
+        "from decimal import Decimal",
+        "from pathlib import Path",
+        "import psycopg2",
+        "import pyarrow as pa",
+        "import pyarrow.parquet as pq"
+      ],
+      "test_classes": [
+        {
+          "name": "TestAllTypes",
+          "methods": [
+            "test_type_full_pipeline",
+            "test_type_summary_report"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_type_full_pipeline",
+        "test_type_summary_report"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": false,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": false,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": false
+      }
+    },
+    "tests/e2e/test_postgres_to_binary.py": {
+      "path": "tests/e2e/test_postgres_to_binary.py",
+      "type": "e2e",
+      "imports": [
+        "import json",
+        "import os",
+        "import struct",
+        "import subprocess",
+        "import sys",
+        "import tempfile",
+        "from pathlib import Path",
+        "import psycopg2",
+        "import pytest",
+        "from src.types import INT32, PG_OID_TO_ARROW"
+      ],
+      "test_classes": [
+        {
+          "name": "TestPostgresToBinary",
+          "methods": [
+            "test_postgres_metadata_generation",
+            "test_integer_rust_extraction",
+            "test_rust_producer_integration",
+            "test_integer_metadata_mapping"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_postgres_metadata_generation",
+        "test_integer_rust_extraction",
+        "test_rust_producer_integration",
+        "test_integer_metadata_mapping"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": false,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": true,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": false
+      }
+    },
+    "tests/e2e/test_binary_to_arrow.py": {
+      "path": "tests/e2e/test_binary_to_arrow.py",
+      "type": "e2e",
+      "imports": [
+        "import os",
+        "import struct",
+        "import sys",
+        "import tempfile",
+        "from pathlib import Path",
+        "import numpy as np",
+        "import psycopg2",
+        "import pytest"
+      ],
+      "test_classes": [
+        {
+          "name": "TestBinaryToArrow",
+          "methods": [
+            "test_integer_gpu_parsing",
+            "test_gpu_memory_transfer_methods",
+            "test_gpu_parsing_performance",
+            "test_gpu_null_handling"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_integer_gpu_parsing",
+        "test_gpu_memory_transfer_methods",
+        "test_gpu_parsing_performance",
+        "test_gpu_null_handling"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": false,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": true,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": true
+      }
+    },
+    "tests/e2e/test_arrow_to_parquet.py": {
+      "path": "tests/e2e/test_arrow_to_parquet.py",
+      "type": "e2e",
+      "imports": [
+        "import os",
+        "import sys",
+        "import tempfile",
+        "from pathlib import Path",
+        "import numpy as np",
+        "import pyarrow as pa",
+        "import pyarrow.parquet as pq",
+        "import pytest",
+        "import struct"
+      ],
+      "test_classes": [
+        {
+          "name": "TestArrowToParquet",
+          "methods": [
+            "test_direct_processor_arrow_conversion",
+            "test_write_parquet_with_compression_options",
+            "test_mixed_types_conversion",
+            "test_large_dataset_performance",
+            "test_metadata_preservation"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_direct_processor_arrow_conversion",
+        "test_write_parquet_with_compression_options",
+        "test_mixed_types_conversion",
+        "test_large_dataset_performance",
+        "test_metadata_preservation"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": true,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": true,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": true
+      }
+    },
+    "tests/test_type_matrix.py": {
+      "path": "tests/test_type_matrix.py",
+      "type": "type_matrix",
+      "imports": [
+        "import os",
+        "import sys",
+        "import tempfile",
+        "from datetime import date, datetime, time",
+        "from decimal import Decimal",
+        "import pytest"
+      ],
+      "test_classes": [
+        {
+          "name": "TestTypeMatrix",
+          "methods": [
+            "test_postgres_to_binary_extraction",
+            "test_binary_to_arrow_parsing",
+            "test_arrow_to_parquet_conversion"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_postgres_to_binary_extraction",
+        "test_binary_to_arrow_parsing",
+        "test_arrow_to_parquet_conversion"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": false,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": true,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": false
+      }
+    },
+    "tests/integration/test_full_pipeline.py": {
+      "path": "tests/integration/test_full_pipeline.py",
+      "type": "integration",
+      "imports": [
+        "import os",
+        "import struct",
+        "import sys",
+        "import tempfile",
+        "import time",
+        "from pathlib import Path",
+        "import numpy as np",
+        "import pandas as pd",
+        "import psycopg2",
+        "import pyarrow as pa"
+      ],
+      "test_classes": [
+        {
+          "name": "TestFullPipeline",
+          "methods": [
+            "test_integer_pipeline_with_actual_code",
+            "test_pipeline_with_direct_processor",
+            "test_error_handling_unimplemented_types"
+          ]
+        }
+      ],
+      "test_functions": [
+        "test_integer_pipeline_with_actual_code",
+        "test_pipeline_with_direct_processor",
+        "test_error_handling_unimplemented_types"
+      ],
+      "uses_production_code": true,
+      "uses_mocks": false,
+      "coverage": [],
+      "quality_checks": {
+        "has_assertions": true,
+        "tests_edge_cases": true,
+        "tests_errors": true,
+        "has_setup_teardown": false,
+        "uses_gpu": true,
+        "tests_performance": false
+      }
+    }
+  }
+}
